@@ -149,21 +149,26 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                      f"_scimrefdiffimg_sexout.fits")
             return sex_dir / fname
 
+        # Load permanent 404s so epochs with no IRSA diff image are treated as done
+        _perm404_log = base_dir / "Epochs" / "permanent_404s.log"
+        _perm404_urls = set()
+        if _perm404_log.exists():
+            _perm404_urls = set(_perm404_log.read_text().splitlines())
+
+        def _epoch_done(ffd):
+            if _sexcat_path(ffd).exists():
+                return True
+            needle = f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"
+            return any(needle in url for url in _perm404_urls)
+
         for bi, start in enumerate(range(0, len(q_epochs), N)):
             batch    = q_epochs.iloc[start:start + N]
             # Normalise filefracday to integer string to match filenames on disk
             ffds     = [str(int(float(v))) for v in batch["filefracday"]]
             is_first = (bi == 0)
 
-            # Skip batch entirely if all SEx catalogs already exist
-            _p0 = _sexcat_path(ffds[0])
-            logger.info(f"  [debug] checking: {_p0}  exists={_p0.exists()}")
-            if sex_dir.exists():
-                _sample = list(sex_dir.glob("*_sexout.fits"))[:2]
-                logger.info(f"  [debug] sex_dir exists, sample files: {[f.name for f in _sample]}")
-            else:
-                logger.info(f"  [debug] sex_dir does not exist: {sex_dir}")
-            if not args.force and all(_sexcat_path(ffd).exists() for ffd in ffds):
+            # Skip batch entirely if all SEx catalogs exist (or epoch was a permanent 404)
+            if not args.force and all(_epoch_done(ffd) for ffd in ffds):
                 logger.info(f"  batch {bi+1}/{n_batches}: all SEx catalogs exist — skipping")
                 continue
 
