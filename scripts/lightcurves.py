@@ -159,7 +159,8 @@ def step_lightcurves(
                 logger.warning(f"  Could not read {cal_path.name}: {e}")
                 continue
 
-            tbl = pd.DataFrame(np.array(data).byteswap().newbyteorder())
+            from astropy.table import Table
+            tbl = Table(data).to_pandas()
             if tbl.empty:
                 continue
 
