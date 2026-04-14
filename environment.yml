@@ -1,0 +1,33 @@
+name: ztf
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+
+  # Core scientific stack
+  - numpy
+  - scipy
+  - pandas
+  - astropy
+  - matplotlib
+
+  # Parquet I/O (used by pandas for .parquet files)
+  - pyarrow
+
+  # HTTP downloads
+  - requests
+
+  # Geometry (required by ztfquery internally)
+  - shapely
+
+  # SExtractor and funpack (from conda-forge)
+  - source-extractor
+  - cfitsio
+
+  # pip-only packages
+  - pip
+  - pip:
+      - ztfquery

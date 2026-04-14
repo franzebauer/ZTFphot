@@ -1,0 +1,28 @@
+# Data (kept outside the repo)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environments
+.env
+*.env
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# IRSA credentials (stored in ~/.ztfquery — never commit)
+.ztfquery

@@ -1,0 +1,246 @@
+"""
+run_pipeline.py — ZTF difference-image photometry pipeline
+
+Steps (run in order, or select with --steps):
+    lookup       — query IRSA for field/epoch coverage and cache results
+    download     — fetch science and reference images from IRSA
+    funpack      — decompress .fits.fz difference images
+    catalog      — build reference CSV catalogs from refsexcat.fits
+    simulate     — build simulated detection images (PSF at reference positions)
+    sex          — SExtractor dual-image aperture photometry
+    vet          — flag variable/bad calibration stars by multi-epoch RMS
+    calibrate    — linear ZP → 3σ clip → faint correction → polynomial → flatfield
+    flatfield    — rebuild spatial flatfield from post-polynomial residuals
+    lightcurves  — assemble per-object light curves from calibrated FITS
+    merge        — cross-calibrate and merge multiple quadrants per band
+    plots        — diagnostic plots (spatial, rms, precision, quality, light curves)
+
+Usage:
+    # Full run from scratch (steps 1–12):
+    python run_pipeline.py --ra 330.34158 --dec 0.72143
+
+    # Re-run calibration and plots on existing data:
+    python run_pipeline.py --steps calibrate lightcurves plots \\
+        --ra 330.34158 --dec 0.72143 --field 443 --band zg --ccdid 16 --qid 2 --force
+
+    # Status check:
+    python run_pipeline.py --status
+"""
+
+from __future__ import annotations
+import argparse, logging, sys, time, warnings
+from pathlib import Path
+import numpy as np
+
+warnings.filterwarnings("ignore", category=FutureWarning,
+                        message=".*DataFrame concatenation with empty or all-NA entries.*")
+
+_SCRIPTS = Path(__file__).parent / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+logger = logging.getLogger(__name__)
+
+ALL_STEPS = ["lookup", "download", "funpack", "catalog", "simulate", "sex",
+             "vet", "calibrate", "flatfield", "lightcurves", "merge", "plots"]
+
+
+def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
+    from shutil import get_terminal_size
+    w = min(get_terminal_size().columns, 100)
+    print("=" * w)
+    print(f"{'Quadrant':<32} {'Diff imgs':>10} {'SExCats':>10} {'Calibrated':>12} {'LC':>4}")
+    print("-" * w)
+    for q in quadrants:
+        f, fc, ccd, qid = q["field"], q["filtercode"], q["ccdid"], q["qid"]
+        sci = q["sci_dir"]
+        n_diff = len(list(sci.glob("*_scimrefdiffimg.fits")))
+        sex_d  = base_dir / "SExCatalogs" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid)
+        n_sex  = len(list(sex_d.glob("*_sexout.fits"))) if sex_d.exists() else 0
+        cal_d  = base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid)
+        n_cal  = len(list(cal_d.glob("*_cal.fits"))) if cal_d.exists() else 0
+        lc     = cal_d.parent.parent.parent.parent / "LightCurves" / f"{f:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid}" / "lightcurves.parquet"
+        print(f"{f:06d} {fc} ccd{ccd:02d} q{qid:<24} {n_diff:>10} {n_sex:>10} {n_cal:>12} {'✓' if lc.exists() else '–':>4}")
+    print("=" * w)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="ZTF difference-image photometry pipeline.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--base-dir",  type=Path, default=Path("data"),
+                   help="Data directory (default: ./data)")
+    p.add_argument("--ra",        type=float, default=None,
+                   help="Target RA (deg) — required for lookup/download steps")
+    p.add_argument("--dec",       type=float, default=None,
+                   help="Target Dec (deg) — required for lookup/download steps")
+    p.add_argument("--bands",     nargs="+", default=None,
+                   help="Bands to process: g r i (default: all present)")
+    p.add_argument("--field",     type=int,   default=None)
+    p.add_argument("--ccdid",     type=int,   default=None)
+    p.add_argument("--qid",       type=int,   default=None)
+    p.add_argument("--steps",     nargs="+",  default=ALL_STEPS, choices=ALL_STEPS,
+                   metavar="STEP")
+    p.add_argument("--workers",   type=int,   default=4)
+    p.add_argument("--force",     action="store_true")
+    p.add_argument("--verbose",   action="store_true")
+    p.add_argument("--status",    action="store_true", help="Print file-existence summary and exit")
+    p.add_argument("--dry-run",   action="store_true")
+    # Calibration
+    p.add_argument("--vet-catalog",  type=Path, default=None)
+    p.add_argument("--poly-degree",  type=int,  default=2)
+    p.add_argument("--ff-bins",      type=int,  default=20)
+    p.add_argument("--ff-min-count", type=int,  default=50)
+    # Download filters (used when "download" is in steps)
+    p.add_argument("--max-seeing",          type=float, default=None, metavar="ARCSEC")
+    p.add_argument("--min-maglim",          type=float, default=None, metavar="MAG")
+    p.add_argument("--skip-flagged",        action="store_true")
+    p.add_argument("--mjd-min",             type=float, default=None)
+    p.add_argument("--mjd-max",             type=float, default=None)
+    p.add_argument("--min-epochs-per-quad", type=int,   default=None)
+    # Purge utility
+    p.add_argument("--purge-hard-reject", action="store_true",
+                   help="Delete on-disk files for hard-rejected epochs and exit")
+    p.add_argument("--epochs-parquet",    type=Path, default=None)
+    args = p.parse_args()
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(message)s",
+                        datefmt="%H:%M:%S")
+
+    base_dir = args.base_dir.resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    from download_coordinator import find_quadrants, download_all, purge_hard_reject
+
+    # ── Purge utility ─────────────────────────────────────────────────────────
+    if args.purge_hard_reject:
+        if not args.epochs_parquet:
+            sys.exit("--purge-hard-reject requires --epochs-parquet")
+        purge_hard_reject(base_dir, args.epochs_parquet.resolve(), dry_run=args.dry_run)
+        return
+
+    steps = args.steps
+    bands = args.bands or ["g", "r", "i"]
+    epochs = None
+
+    # ── Step: lookup ──────────────────────────────────────────────────────────
+    if "lookup" in steps:
+        if args.ra is None or args.dec is None:
+            logger.warning("lookup: --ra and --dec required — skipping")
+        else:
+            logger.info("─── lookup ───")
+            from ztf_field_lookup import lookup_target
+            plot_dir = base_dir / "Plots" / f"{args.ra:.5f}_{args.dec:+.5f}"
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            epochs = lookup_target(
+                ra=args.ra, dec=args.dec, bands=bands,
+                cache_dir=base_dir / "Epochs",
+                plot_out=plot_dir / "coverage.png",
+            )
+
+    # ── Step: download ────────────────────────────────────────────────────────
+    if "download" in steps:
+        if args.ra is None or args.dec is None:
+            logger.warning("download: --ra and --dec required — skipping")
+        else:
+            if epochs is None:
+                # Load from cache (lookup already ran previously)
+                import pandas as pd
+                band_str   = "-".join(sorted(bands))
+                cache_path = (base_dir / "Epochs"
+                              / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{band_str}.epochs.parquet")
+                if not cache_path.exists():
+                    sys.exit(f"Epochs cache not found: {cache_path}\nRun the lookup step first.")
+                epochs = pd.read_parquet(cache_path)
+
+            logger.info("─── download ───")
+            download_all(
+                epochs, base_dir=base_dir, bands=bands,
+                max_workers=args.workers,
+                skip_flagged=args.skip_flagged,
+                max_seeing=args.max_seeing,
+                min_maglim=args.min_maglim,
+                mjd_min=args.mjd_min,
+                mjd_max=args.mjd_max,
+                min_epochs_per_quad=args.min_epochs_per_quad,
+            )
+
+    # ── Discover quadrants on disk ────────────────────────────────────────────
+    quadrants = find_quadrants(base_dir, bands=args.bands,
+                               field=args.field, ccdid=args.ccdid, qid=args.qid)
+
+    if args.status:
+        _print_status(base_dir, quadrants)
+        return
+
+    remaining = [s for s in steps if s not in ("lookup", "download")]
+    if remaining and not quadrants:
+        sys.exit("No quadrants found on disk. Run lookup and download first.")
+
+    logger.info(f"Quadrants ({len(quadrants)}):")
+    for q in quadrants:
+        logger.info(f"  {q['field']:06d} {q['filtercode']} ccd{q['ccdid']:02d} q{q['qid']}")
+
+    # ── Import step modules ───────────────────────────────────────────────────
+    from photometry  import step_funpack, step_make_catalog, step_simulate, step_sextractor
+    from calibrate   import step_vet, step_calibrate, step_build_flatfield
+    from lightcurves import step_lightcurves, step_merge
+
+    t0 = time.time()
+
+    if "funpack"    in steps: step_funpack(base_dir, force=args.force)
+    if "catalog"    in steps: step_make_catalog(base_dir, quadrants, force=args.force)
+    if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force)
+    if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
+                                              force=args.force, verbose=args.verbose)
+    if "vet"        in steps: step_vet(base_dir, quadrants)
+
+    # Load flatfield from disk for each quadrant (used in calibrate)
+    _ff_map: dict = {}
+    for q in quadrants:
+        ff = (base_dir / "Calibrated" / f"{q['field']:06d}"
+              / q['filtercode'] / f"{q['ccdid']:02d}" / str(q['qid']) / "flatfield.npz")
+        if ff.exists():
+            try:
+                d = np.load(str(ff))
+                _ff_map[(q['field'], q['filtercode'], q['ccdid'], q['qid'])] = dict(
+                    stat=d['stat'], ra_edges=d['ra_edges'], dec_edges=d['dec_edges'])
+            except Exception as e:
+                logger.warning(f"Could not load flatfield {ff}: {e}")
+
+    if "flatfield"  in steps:
+        _ff_map = step_build_flatfield(base_dir, quadrants,
+                                       nbins=args.ff_bins, min_count=args.ff_min_count)
+
+    if "calibrate"  in steps:
+        for q in quadrants:
+            key = (q['field'], q['filtercode'], q['ccdid'], q['qid'])
+            step_calibrate(base_dir, [q], workers=args.workers, force=args.force,
+                           vet_catalog=args.vet_catalog, poly_degree=args.poly_degree,
+                           flatfield=_ff_map.get(key),
+                           target_ra=args.ra, target_dec=args.dec,
+                           save_residuals=True)
+
+    if "lightcurves" in steps:
+        step_lightcurves(base_dir, quadrants, force=args.force,
+                         use_calibrated="calibrate" in steps)
+
+    if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force)
+
+    if "plots"      in steps:
+        logger.info("─── plots ───")
+        plot_root = base_dir / "Plots"
+        if args.ra is not None and args.dec is not None:
+            plot_root = plot_root / f"{args.ra:.5f}_{args.dec:+.5f}"
+        plot_root.mkdir(parents=True, exist_ok=True)
+        # TODO: implement diagnostic plots
+        logger.info(f"  plots not yet implemented — output dir: {plot_root}")
+
+    logger.info(f"Done in {time.time() - t0:.1f}s")
+    _print_status(base_dir, quadrants)
+
+
+if __name__ == "__main__":
+    main()

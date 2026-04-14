@@ -1,0 +1,97 @@
+#-------------------------------- Catalog ------------------------------------
+#CATALOG_TYPE    on command-line            # NONE,ASCII,ASCII_HEAD, ASCII_SKYCAT,ASCII_VOTABLE, FITS_1.0 or FITS_LDAC
+#CATALOG_NAME    on command-line            # name of the output catalog
+PARAMETERS_NAME  ./SExtractor/default.param # name of the file containing catalog contents
+
+#------------------------------- Extraction ----------------------------------
+
+DETECT_TYPE      CCD                        # CCD (linear) or PHOTO (with gamma correction)
+#DETECT_MINAREA  on command-line            # minimum number of pixels above threshold
+
+#DETECT_THRESH   on command-line            # <sigmas> or <threshold>,<ZP> in mag.arcsec-2
+#ANALYSIS_THRESH on command-line            # <sigmas> or <threshold>,<ZP> in mag.arcsec-2
+#THRESH_TYPE      RELATIVE                   # [ABSOLUTE/RELATIVE]Want this to be absolute since we are detecting on a match-filtered S/N image.
+THRESH_TYPE      ABSOLUTE                   # [ABSOLUTE/RELATIVE]Want this to be absolute since we are detecting on a match-filtered S/N image.
+
+FILTER           N                          # Do not want any (psf-matched)-filtering here since we're already detecting off such an image.
+
+DEBLEND_NTHRESH  4                          # Number of deblending sub-thresholds
+DEBLEND_MINCONT  0.005                      # Minimum contrast parameter for deblending
+
+CLEAN            Y                          # Clean spurious detections? (Y or N)?
+CLEAN_PARAM      1.0                        # Cleaning efficiency
+
+MASK_TYPE        CORRECT                    # type of detection MASKing: can be one of
+                                            # NONE, BLANK or CORRECT
+
+#----------------------------- Weighting -------------------------------------
+
+# Interpret the input to -WEIGHT_IMAGE (command-line) as an uncertainty (RMS)
+# map for the measurement image only.
+
+WEIGHT_TYPE      NONE                 # type of WEIGHTing: NONE, BACKGROUND,
+                                            # MAP_RMS, MAP_VAR or MAP_WEIGHT
+#WEIGHT_IMAGE    on command-line            # weight-map filename
+WEIGHT_GAIN      N                          # modulate gain (E/ADU) with weights? (Y/N)
+
+#------------------------------ Photometry -----------------------------------
+
+
+
+#PHOT_APERTURES  on command-line            # MAG_APER aperture diameter(s) in pixels
+#SATUR_LEVEL     on command-line            # level (in ADUs) at which arises saturation
+#MAG_ZEROPOINT   on command-line            # magnitude zero-point
+MAG_GAMMA        4.0                        # gamma of emulsion (for photographic scans)
+GAIN             999999999999999.9          # Set to big value to avoid internal photon-noise calc when input WEIGHT_IMAGE (MAP_RMS) already contains photon-noise constribution.
+#PIXEL_SCALE     on command-line            # size of pixel in arcsec (0=use FITS WCS info)
+
+#------------------------- Star/Galaxy Separation ----------------------------
+
+SEEING_FWHM      2.5                        # stellar FWHM in arcsec
+STARNNW_NAME     ./SExtractor/default.nnw    # Neural-Network_Weight table filename
+
+#------------------------------ Background -----------------------------------
+
+#BACK_TYPE        AUTO                       # Manually force to zero since we have difference images.
+BACK_TYPE        MANUAL                       # Manually force to zero since we have difference images.
+BACK_VALUE       0.0,0.0
+BACK_SIZE        64                         # Background mesh: <size> or <width>,<height>
+BACK_FILTERSIZE  3                          # Background filter: <size> or <width>,<height>
+BACK_FILTTHRESH  0.0                        # Threshold for background-map filter
+BACKPHOTO_TYPE   LOCAL                      # can be GLOBAL or LOCAL
+BACKPHOTO_THICK  35                         # Thickness of the background LOCAL annulus
+
+#------------------------------ Check Image ----------------------------------
+CHECKIMAGE_TYPE  NONE                       # can be NONE, BACKGROUND, BACKGROUND_RMS,
+                                            # MINIBACKGROUND, MINIBACK_RMS, -BACKGROUND,
+                                            # FILTERED, OBJECTS, -OBJECTS, SEGMENTATION,
+                                            # or APERTURES
+CHECKIMAGE_NAME  check.fits                 # Filename for the check-image
+
+#--------------------- Memory (change with caution!) -------------------------
+
+MEMORY_OBJSTACK  30000                       # number of objects in stack
+MEMORY_PIXSTACK  30000000                     # number of pixels in stack
+MEMORY_BUFSIZE   4128                       # number of lines in buffer
+
+#----------------------------- Miscellaneous ---------------------------------
+
+VERBOSE_TYPE     QUIET                      # can be QUIET, NORMAL or FULL
+WRITE_XML        N                          # Write XML file (Y/N)?
+XML_NAME         sex.xml                    # Filename for XML output
+
+
+#----------------------------- Interpolation ---------------------------------
+
+INTERP_TYPE      ALL
+
+#------------------------------- ASSOCiation ---------------------------------
+
+#ASSOC_NAME       sky.list        # name of the ASCII file to ASSOCiate
+#ASSOC_DATA       0                # columns of the data to replicate (0=all)
+#ASSOC_PARAMS     4,5              # columns of xpos,ypos[,mag]
+#ASSOCCOORD_TYPE  WORLD            # ASSOC coordinates: PIXEL [6,7] or WORLD [4,5]
+#ASSOC_RADIUS     2.0              # cross-matching radius (pixels)
+#ASSOC_TYPE       NEAREST          # ASSOCiation method: FIRST, NEAREST, MEAN,
+                                  # MAG_MEAN, SUM, MAG_SUM, MIN or MAX
+#ASSOCSELEC_TYPE  MATCHED          # ASSOC selection type: ALL, MATCHED or -MATCHED
