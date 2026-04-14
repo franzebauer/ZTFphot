@@ -144,21 +144,24 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
         sex_dir = (base_dir / "SExCatalogs" / f"{field:06d}" / fc
                    / f"{ccd:02d}" / str(qid_))
 
+        def _sexcat_path(ffd):
+            fname = (f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}"
+                     f"_scimrefdiffimg_sexout.fits")
+            return sex_dir / fname
+
         for bi, start in enumerate(range(0, len(q_epochs), N)):
             batch    = q_epochs.iloc[start:start + N]
-            ffds     = set(batch["filefracday"].astype(str))
+            # Normalise filefracday to integer string to match filenames on disk
+            ffds     = [str(int(float(v))) for v in batch["filefracday"]]
             is_first = (bi == 0)
 
             # Skip batch entirely if all SEx catalogs already exist
-            if not args.force and sex_dir.exists():
-                already_done = all(
-                    any(sex_dir.glob(f"*{ffd}*_sexout.fits")) for ffd in ffds
-                )
-                if already_done:
-                    logger.info(f"  batch {bi+1}/{n_batches}: all SEx catalogs exist — skipping")
-                    continue
+            if not args.force and all(_sexcat_path(ffd).exists() for ffd in ffds):
+                logger.info(f"  batch {bi+1}/{n_batches}: all SEx catalogs exist — skipping")
+                continue
 
             logger.info(f"  batch {bi+1}/{n_batches}: {len(batch)} epochs")
+            ffds_set = set(ffds)
 
             # Download this batch (ref products skipped automatically if already on disk)
             if "download" in steps or args.purge_batch:
@@ -167,7 +170,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                              max_workers=args.workers)
 
             if "funpack" in steps:
-                step_funpack(base_dir, force=args.force, filefracdays=ffds)
+                step_funpack(base_dir, force=args.force, filefracdays=ffds_set)
 
             if "catalog" in steps and not catalog_done:
                 step_make_catalog(base_dir, [q], force=args.force)
@@ -175,17 +178,17 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
 
             if "simulate" in steps:
                 step_simulate(base_dir, [q], workers=args.workers,
-                              force=args.force, filefracdays=ffds)
+                              force=args.force, filefracdays=ffds_set)
 
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose,
-                                filefracdays=ffds)
+                                filefracdays=ffds_set)
 
             # Purge: always remove sci products; ref only after first batch
             purge_images(base_dir, [q],
                          sci=True, ref=is_first,
-                         filefracdays=ffds, dry_run=args.dry_run)
+                         filefracdays=ffds_set, dry_run=args.dry_run)
 
 
 def main() -> None:
