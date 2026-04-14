@@ -18,7 +18,7 @@ Difference-image aperture photometry pipeline for ZTF data. Given a sky position
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/ZTFphot.git
+git clone https://github.com/franzebauer/ZTFphot.git
 cd ZTFphot
 ```
 
