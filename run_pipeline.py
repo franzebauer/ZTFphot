@@ -156,6 +156,13 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             is_first = (bi == 0)
 
             # Skip batch entirely if all SEx catalogs already exist
+            _p0 = _sexcat_path(ffds[0])
+            logger.info(f"  [debug] checking: {_p0}  exists={_p0.exists()}")
+            if sex_dir.exists():
+                _sample = list(sex_dir.glob("*_sexout.fits"))[:2]
+                logger.info(f"  [debug] sex_dir exists, sample files: {[f.name for f in _sample]}")
+            else:
+                logger.info(f"  [debug] sex_dir does not exist: {sex_dir}")
             if not args.force and all(_sexcat_path(ffd).exists() for ffd in ffds):
                 logger.info(f"  batch {bi+1}/{n_batches}: all SEx catalogs exist — skipping")
                 continue
