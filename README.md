@@ -109,6 +109,34 @@ python run_pipeline.py --steps calibrate flatfield calibrate lightcurves \
     --ra 330.34158 --dec 0.72143 --workers 8 --force
 ```
 
+### Low-disk mode
+
+On systems with limited disk space, use `--purge-batch N` to process images in batches of N epochs. After each batch's SExtractor step, all imaging products (difference images, simulated images, reference images) are deleted. Only the SExtractor catalogs (~5 MB/epoch) are kept for the calibration stage.
+
+```bash
+# Full pipeline, 5 epochs at a time (~4 GB peak disk usage per quadrant):
+python run_pipeline.py --ra 0.20323 --dec -7.15322 --purge-batch 5 --workers 8
+
+# Preview what would be deleted without touching disk:
+python run_pipeline.py --ra 0.20323 --dec -7.15322 --purge-batch 5 --dry-run
+```
+
+After a full run (without `--purge-batch`), you can also clean up imaging products retroactively:
+
+```bash
+python run_pipeline.py --clean-up          # delete all imaging products
+python run_pipeline.py --clean-up --dry-run  # preview first
+```
+
+**Typical disk budget** (10 quadrants, ~400 epochs each):
+
+| Stage | Peak disk |
+|-------|-----------|
+| During `--purge-batch 5` | ~4 GB |
+| SEx catalogs (end state) | ~20 GB |
+| Calibrated FITS (end state) | ~8 GB |
+| **Total at completion** | **~28 GB** |
+
 ---
 
 ## Directory layout
@@ -169,9 +197,11 @@ data/                       ← created in your working directory on first run
 | `--qid N` | Quadrant ID (filter to specific quadrant) |
 | `--workers N` | Parallel workers (default: 4) |
 | `--force` | Re-run even if output files exist |
-| `--target-ra / --target-dec` | Track target source through calibration headers and plots |
 | `--poly-degree N` | Spatial polynomial degree for calibration (default: 2) |
 | `--status` | Print file-existence summary and exit |
+| `--purge-batch N` | Low-disk mode: process N epochs at a time, deleting imaging products after each batch's sex step. Only SEx catalogs are kept on disk. |
+| `--clean-up` | Delete all imaging products (Science/, Reference/) for discovered quadrants. Safe once the sex step is complete. |
+| `--dry-run` | Preview what `--purge-batch` or `--clean-up` would delete without touching disk. |
 
 ---
 
