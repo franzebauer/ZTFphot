@@ -141,10 +141,22 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                    f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(REFERENCE)[OBJECTS].csv")
         catalog_done = cat_csv.exists() and not args.force
 
+        sex_dir = (base_dir / "SExCatalogs" / f"{field:06d}" / fc
+                   / f"{ccd:02d}" / str(qid_))
+
         for bi, start in enumerate(range(0, len(q_epochs), N)):
             batch    = q_epochs.iloc[start:start + N]
             ffds     = set(batch["filefracday"].astype(str))
             is_first = (bi == 0)
+
+            # Skip batch entirely if all SEx catalogs already exist
+            if not args.force and sex_dir.exists():
+                already_done = all(
+                    any(sex_dir.glob(f"*{ffd}*_sexout.fits")) for ffd in ffds
+                )
+                if already_done:
+                    logger.info(f"  batch {bi+1}/{n_batches}: all SEx catalogs exist — skipping")
+                    continue
 
             logger.info(f"  batch {bi+1}/{n_batches}: {len(batch)} epochs")
 
