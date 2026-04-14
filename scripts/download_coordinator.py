@@ -875,6 +875,83 @@ def find_quadrants(
     return quadrants
 
 
+def purge_images(
+    base_dir: Path,
+    quadrants: list[dict],
+    *,
+    sci: bool = True,
+    ref: bool = True,
+    filefracdays: set | None = None,
+    dry_run: bool = False,
+) -> int:
+    """
+    Delete large imaging products after SExtractor catalogs are built.
+
+    sci=True  — deletes diff.fits.fz, diff.fits, *_simulated.fits
+    ref=True  — deletes refimg.fits, refsexcat.fits, refpsfcat.fits, refcov.fits
+    filefracdays — if given, restrict science deletion to these epoch IDs only;
+                   ref products are always deleted in full (one per quadrant)
+    dry_run   — log what would be deleted without touching the disk
+
+    Returns total bytes freed (or that would be freed).
+    """
+    sci_patterns = [
+        "*_scimrefdiffimg.fits.fz",
+        "*_scimrefdiffimg.fits",
+        "*_simulated.fits",
+    ]
+    ref_patterns = [
+        "*_refimg.fits",
+        "*_refsexcat.fits",
+        "*_refpsfcat.fits",
+        "*_refcov.fits",
+    ]
+
+    to_delete: list[Path] = []
+
+    for q in quadrants:
+        field = q["field"]; fc = q["filtercode"]
+        ccd = q["ccdid"]; qid_ = q["qid"]
+        sci_dir = q.get("sci_dir",
+            base_dir / "Science" / f"{field:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid_}")
+        ref_dir = q.get("ref_dir",
+            base_dir / "Reference" / f"{field:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid_}")
+
+        if sci and sci_dir.exists():
+            for pat in sci_patterns:
+                for p in sorted(sci_dir.glob(pat)):
+                    if filefracdays is not None:
+                        ffd = p.name.split("_")[1]
+                        if ffd not in filefracdays:
+                            continue
+                    to_delete.append(p)
+
+        if ref and ref_dir.exists():
+            for pat in ref_patterns:
+                to_delete.extend(sorted(ref_dir.glob(pat)))
+
+    total_bytes = 0
+    n_deleted = 0
+    for p in to_delete:
+        try:
+            size = p.stat().st_size
+            total_bytes += size
+            if dry_run:
+                logger.info(f"  [dry-run] {p.name} ({size/1e6:.1f} MB)")
+            else:
+                p.unlink()
+                n_deleted += 1
+                logger.debug(f"  deleted {p.name} ({size/1e6:.1f} MB)")
+        except FileNotFoundError:
+            pass
+
+    freed_mb = total_bytes / 1e6
+    action = "Would free" if dry_run else "Freed"
+    n = len(to_delete)
+    logger.info(f"purge_images: {n} files — {action} {freed_mb:.0f} MB")
+    return total_bytes
+
+
 def purge_hard_reject(base_dir: Path, epochs_parquet: Path, dry_run: bool = True) -> int:
     """Delete on-disk files belonging to hard-rejected epochs (bits 0/1/25)."""
     import pandas as pd

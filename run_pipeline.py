@@ -64,6 +64,118 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
     print("=" * w)
 
 
+def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> None:
+    """
+    Run funpack → (catalog once) → simulate → sex in batches of --purge-batch N,
+    deleting all imaging products after each batch's sex step.
+    Reference products are deleted after the first batch (catalog no longer needs them).
+    """
+    import math
+    import pandas as pd
+    from download_coordinator import download_all, purge_images, filter_epochs
+    from photometry import step_funpack, step_make_catalog, step_simulate, step_sextractor
+
+    N = args.purge_batch
+    steps = set(args.steps)
+
+    # Load epochs from cache if not already in memory (e.g. lookup not in steps)
+    if epochs is None and args.ra is not None and args.dec is not None:
+        import pandas as pd
+        bands = args.bands or ["g", "r", "i"]
+        band_str   = "-".join(sorted(bands))
+        cache_path = (base_dir / "Epochs"
+                      / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{band_str}.epochs.parquet")
+        if cache_path.exists():
+            epochs = pd.read_parquet(cache_path)
+            logger.info(f"purge-batch: loaded {len(epochs)} epochs from cache")
+        else:
+            logger.warning(f"purge-batch: no epoch cache found at {cache_path} — "
+                           "will process existing files on disk only")
+
+    # Pre-filter epochs once (avoid re-filtering inside download_all per batch)
+    if epochs is not None and not epochs.empty:
+        epochs = filter_epochs(
+            epochs,
+            skip_cautionary=args.skip_flagged,
+            max_seeing=args.max_seeing,
+            min_maglim=args.min_maglim,
+            mjd_min=args.mjd_min,
+            mjd_max=args.mjd_max,
+            min_epochs_per_quad=args.min_epochs_per_quad,
+        )
+
+    for q in quadrants:
+        field = q["field"]; fc = q["filtercode"]
+        ccd = q["ccdid"]; qid_ = q["qid"]
+        tag = f"{field:06d}/{fc}/ccd{ccd:02d}/q{qid_}"
+
+        # Epochs for this quadrant (from pre-filtered cache)
+        q_epochs = pd.DataFrame()
+        if epochs is not None and not epochs.empty:
+            mask = (
+                (epochs["field"].astype(int)    == field) &
+                (epochs["filtercode"]            == fc)   &
+                (epochs["ccdid"].astype(int)     == ccd)  &
+                (epochs["qid"].astype(int)       == qid_)
+            )
+            q_epochs = epochs[mask].reset_index(drop=True)
+
+        if q_epochs.empty:
+            logger.warning(f"{tag}: no epochs in cache — skipping download, "
+                           "processing existing files only")
+            # Still run catalog/simulate/sex on whatever is already on disk
+            if "catalog" in steps:
+                step_make_catalog(base_dir, [q], force=args.force)
+            if "simulate" in steps:
+                step_simulate(base_dir, [q], workers=args.workers, force=args.force)
+            if "sex" in steps:
+                step_sextractor(base_dir, [q], workers=args.workers,
+                                force=args.force, verbose=args.verbose)
+            continue
+
+        n_batches = math.ceil(len(q_epochs) / N)
+        logger.info(f"─── purge-batch {tag}: {len(q_epochs)} epochs → "
+                    f"{n_batches} batches of {N} ───")
+
+        cat_csv = (base_dir / "Catalogs" /
+                   f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(REFERENCE)[OBJECTS].csv")
+        catalog_done = cat_csv.exists() and not args.force
+
+        for bi, start in enumerate(range(0, len(q_epochs), N)):
+            batch    = q_epochs.iloc[start:start + N]
+            ffds     = set(batch["filefracday"].astype(str))
+            is_first = (bi == 0)
+
+            logger.info(f"  batch {bi+1}/{n_batches}: {len(batch)} epochs")
+
+            # Download this batch (ref products skipped automatically if already on disk)
+            if "download" in steps or args.purge_batch:
+                band = fc[1:]   # zg→g, zr→r, zi→i
+                download_all(batch, base_dir=base_dir, bands=[band],
+                             max_workers=args.workers)
+
+            if "funpack" in steps:
+                step_funpack(base_dir, force=args.force, filefracdays=ffds)
+
+            if "catalog" in steps and not catalog_done:
+                step_make_catalog(base_dir, [q], force=args.force)
+                catalog_done = True
+
+            if "simulate" in steps:
+                step_simulate(base_dir, [q], workers=args.workers,
+                              force=args.force, filefracdays=ffds)
+
+            if "sex" in steps:
+                step_sextractor(base_dir, [q], workers=args.workers,
+                                force=args.force, verbose=args.verbose,
+                                filefracdays=ffds)
+
+            # Purge: always remove sci products; ref only after first batch
+            purge_images(base_dir, [q],
+                         sci=True, ref=is_first,
+                         filefracdays=ffds, dry_run=args.dry_run)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="ZTF difference-image photometry pipeline.",
@@ -103,6 +215,14 @@ def main() -> None:
     p.add_argument("--purge-hard-reject", action="store_true",
                    help="Delete on-disk files for hard-rejected epochs and exit")
     p.add_argument("--epochs-parquet",    type=Path, default=None)
+    # Low-disk mode
+    p.add_argument("--purge-batch",  type=int, default=None, metavar="N",
+                   help="Process N epochs at a time, deleting imaging products after each "
+                        "batch's sex step. Keeps only SEx catalogs on disk. "
+                        "Use --dry-run to preview what would be deleted.")
+    p.add_argument("--clean-up",     action="store_true",
+                   help="Delete all imaging products (Science/, Reference/) for discovered "
+                        "quadrants and exit. Safe once the sex step is complete.")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -141,7 +261,7 @@ def main() -> None:
             )
 
     # ── Step: download ────────────────────────────────────────────────────────
-    if "download" in steps:
+    if "download" in steps and not args.purge_batch:
         if args.ra is None or args.dec is None:
             logger.warning("download: --ra and --dec required — skipping")
         else:
@@ -175,6 +295,13 @@ def main() -> None:
         _print_status(base_dir, quadrants)
         return
 
+    # ── Clean-up: delete all imaging products and exit ────────────────────────
+    if args.clean_up:
+        logger.info("─── clean-up: deleting imaging products ───")
+        from download_coordinator import purge_images
+        purge_images(base_dir, quadrants, sci=True, ref=True, dry_run=args.dry_run)
+        return
+
     remaining = [s for s in steps if s not in ("lookup", "download")]
     if remaining and not quadrants:
         sys.exit("No quadrants found on disk. Run lookup and download first.")
@@ -190,11 +317,14 @@ def main() -> None:
 
     t0 = time.time()
 
-    if "funpack"    in steps: step_funpack(base_dir, force=args.force)
-    if "catalog"    in steps: step_make_catalog(base_dir, quadrants, force=args.force)
-    if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force)
-    if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
-                                              force=args.force, verbose=args.verbose)
+    if args.purge_batch and any(s in steps for s in ("funpack", "catalog", "simulate", "sex")):
+        _run_purge_batch(base_dir, epochs, quadrants, args)
+    else:
+        if "funpack"    in steps: step_funpack(base_dir, force=args.force)
+        if "catalog"    in steps: step_make_catalog(base_dir, quadrants, force=args.force)
+        if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force)
+        if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
+                                                  force=args.force, verbose=args.verbose)
     if "vet"        in steps: step_vet(base_dir, quadrants)
 
     # Load flatfield from disk for each quadrant (used in calibrate)

@@ -19,6 +19,12 @@ from astropy.io import fits
 
 logger = logging.getLogger(__name__)
 
+
+def _ffd_from_path(p: Path) -> str:
+    """Extract filefracday from a ZTF filename: ztf_{ffd}_{field}_..."""
+    return p.name.split("_")[1]
+
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Aperture diameters in pixels.
@@ -35,10 +41,14 @@ _SEX_DIR = Path(__file__).parent / "SExtractor"
 
 # ── Step 0: funpack ───────────────────────────────────────────────────────────
 
-def step_funpack(base_dir: Path, force: bool = False) -> int:
-    """Decompress all .fits.fz files under base_dir/Science/."""
+def step_funpack(base_dir: Path, force: bool = False,
+                 filefracdays: set | None = None) -> int:
+    """Decompress .fits.fz files under base_dir/Science/.
+    filefracdays: if given, only process files matching those epoch IDs."""
     sci_root = base_dir / "Science"
     fz_files = sorted(sci_root.rglob("*.fits.fz"))
+    if filefracdays is not None:
+        fz_files = [f for f in fz_files if _ffd_from_path(f) in filefracdays]
 
     if not fz_files:
         logger.info("No .fits.fz files found — nothing to funpack")
@@ -118,8 +128,10 @@ def _simulate_one(args: tuple) -> tuple[str, bool, str]:
 def step_simulate(
     base_dir: Path, quadrants: list[dict],
     workers: int = 4, force: bool = False,
+    filefracdays: set | None = None,
 ) -> int:
-    """Build a simulated detection image for each science epoch."""
+    """Build a simulated detection image for each science epoch.
+    filefracdays: if given, only process files matching those epoch IDs."""
     tasks = []
     for q in quadrants:
         sci_dir = q["sci_dir"]; ref_dir = q["ref_dir"]
@@ -132,6 +144,8 @@ def step_simulate(
             continue
 
         for diff_path in sorted(sci_dir.glob("*_scimrefdiffimg.fits")):
+            if filefracdays is not None and _ffd_from_path(diff_path) not in filefracdays:
+                continue
             sim_path = diff_path.with_name(diff_path.stem + "_simulated.fits")
             if sim_path.exists() and not force:
                 continue
@@ -220,8 +234,10 @@ def _sex_one(args: tuple) -> tuple[str, bool, str]:
 def step_sextractor(
     base_dir: Path, quadrants: list[dict],
     workers: int = 4, force: bool = False, verbose: bool = False,
+    filefracdays: set | None = None,
 ) -> int:
-    """Run SExtractor dual-image mode for every epoch."""
+    """Run SExtractor dual-image mode for every epoch.
+    filefracdays: if given, only process files matching those epoch IDs."""
     sex_conf  = _SEX_DIR / "clean.sex"
     sex_param = _SEX_DIR / "default.param"
     sex_nnw   = _SEX_DIR / "default.nnw"
@@ -241,6 +257,8 @@ def step_sextractor(
             / fc / f"{ccd:02d}" / str(qid_)
         )
         for sim_path in sorted(sci_dir.glob("*_simulated.fits")):
+            if filefracdays is not None and _ffd_from_path(sim_path) not in filefracdays:
+                continue
             diff_path = sim_path.with_name(
                 sim_path.name.replace("_simulated.fits", ".fits"))
             if not diff_path.exists():
