@@ -168,13 +168,16 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             ffds     = [str(int(float(v))) for v in batch["filefracday"]]
             is_first = (bi == 0)
 
+            ffds_set = set(ffds)
+
             # Skip batch entirely if all SEx catalogs exist (or epoch was a permanent 404)
             if not args.force and all(_epoch_done(ffd) for ffd in ffds):
                 logger.info(f"  batch {bi+1}/{n_batches}: all SEx catalogs exist — skipping")
+                purge_images(base_dir, [q], sci=True, ref=is_first,
+                             filefracdays=ffds_set, dry_run=args.dry_run)
                 continue
 
             logger.info(f"  batch {bi+1}/{n_batches}: {len(batch)} epochs")
-            ffds_set = set(ffds)
 
             # Download this batch (ref products skipped automatically if already on disk)
             if "download" in steps or args.purge_batch:
@@ -389,12 +392,49 @@ def main() -> None:
 
     if "plots"      in steps:
         logger.info("─── plots ───")
+        import sys as _sys
+        if str(_SCRIPTS) not in _sys.path:
+            _sys.path.insert(0, str(_SCRIPTS))
+        from make_diagnostic_plots import (
+            make_fig_calibration, make_fig_precision,
+            make_fig_spatial, make_fig_lightcurve,
+        )
+
         plot_root = base_dir / "Plots"
         if args.ra is not None and args.dec is not None:
             plot_root = plot_root / f"{args.ra:.5f}_{args.dec:+.5f}"
         plot_root.mkdir(parents=True, exist_ok=True)
-        # TODO: implement diagnostic plots
-        logger.info(f"  plots not yet implemented — output dir: {plot_root}")
+
+        lc_paths_for_target: list[tuple] = []
+
+        for q in quadrants:
+            f, fc, ccd, qid_ = q["field"], q["filtercode"], q["ccdid"], q["qid"]
+            tag = f"{f:06d}_{fc}_c{ccd:02d}_q{qid_}"
+            quad_plot_dir = plot_root / tag
+            quad_plot_dir.mkdir(parents=True, exist_ok=True)
+
+            cal_dir = base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)
+            lc_path = (base_dir / "LightCurves" / f"{f:06d}" / fc
+                       / f"ccd{ccd:02d}" / f"q{qid_}" / "lightcurves.parquet")
+
+            if cal_dir.exists() and any(cal_dir.glob("*_cal.fits")):
+                make_fig_calibration(cal_dir,
+                                     quad_plot_dir / "fig_calibration.png", tag)
+            else:
+                logger.info(f"  [{tag}] no calibrated FITS — skipping calibration plot")
+
+            if lc_path.exists():
+                make_fig_precision(lc_path, quad_plot_dir / "fig_precision.png",
+                                   tag, args.ra, args.dec)
+                make_fig_spatial(lc_path, quad_plot_dir / "fig_spatial.png", tag)
+                lc_paths_for_target.append((lc_path, fc))
+            else:
+                logger.info(f"  [{tag}] no light-curve parquet — skipping precision/spatial plots")
+
+        if args.ra is not None and args.dec is not None and lc_paths_for_target:
+            make_fig_lightcurve(lc_paths_for_target,
+                                plot_root / "fig_lightcurve.png",
+                                args.ra, args.dec)
 
     logger.info(f"Done in {time.time() - t0:.1f}s")
     _print_status(base_dir, quadrants)
