@@ -23,8 +23,7 @@ dependencies:
   # Geometry (required by ztfquery internally)
   - shapely
 
-  # SExtractor and funpack (from conda-forge)
-  - source-extractor
+  # funpack (from conda-forge); SExtractor installed separately — see README
   - cfitsio
 
   # pip-only packages

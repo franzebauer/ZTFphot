@@ -10,12 +10,13 @@ seeing, maglim, infobits, etc. for every matching epoch.
 
 Credentials
 -----------
-IRSA credentials are required. Set them once:
+IRSA credentials are required. Add them to ~/.netrc:
 
-    from ztfquery import utils
-    utils.set_account("irsa", "your_username", "your_password")
+    machine irsa.ipac.caltech.edu
+    login your_username
+    password your_password
 
-They are stored in ~/.ztfquery and reused on subsequent calls.
+Set file permissions: chmod 600 ~/.netrc
 
 Usage
 -----
@@ -91,19 +92,14 @@ def lookup_target(
     try:
         from ztfquery import query as ztfquery
     except ImportError:
-        raise ImportError(
-            "ztfquery is required. Install with: pip install ztfquery\n"
-            "Then set credentials once:\n"
-            "  from ztfquery import utils\n"
-            "  utils.set_account('irsa', 'username', 'password')"
-        )
+        raise ImportError("ztfquery is required. Install with: pip install ztfquery")
 
     filtercodes = [BAND_TO_FILTERCODE[b] for b in bands]
 
     logger.info(f"Querying IRSA for RA={ra:.5f}, Dec={dec:.5f}, "
                 f"radius={search_radius_deg:.4f} deg ...")
     zquery = ztfquery.ZTFQuery()
-    zquery.load_metadata(radec=[ra, dec], size=search_radius_deg, verbose=False)
+    zquery.load_metadata(radec=[ra, dec], size=search_radius_deg)
 
     meta = zquery.metatable
     if meta is None or meta.empty:

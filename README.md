@@ -33,14 +33,21 @@ This installs Python, numpy, astropy, scipy, matplotlib, pandas, ztfquery, and S
 
 ### 3. Configure IRSA credentials
 
-IRSA credentials are required to download image products. Set them once:
+IRSA credentials are required to download image products. Add them to `~/.netrc`:
 
-```python
-from ztfquery import utils
-utils.set_account("irsa", "your_username", "your_password")
+```
+machine irsa.ipac.caltech.edu
+login your_username
+password your_password
 ```
 
-Credentials are cached in `~/.ztfquery` and reused automatically on subsequent runs.
+Then restrict permissions:
+
+```bash
+chmod 600 ~/.netrc
+```
+
+An IRSA account is free at [irsa.ipac.caltech.edu](https://irsa.ipac.caltech.edu).
 
 ### 4. Data directory
 
@@ -60,7 +67,7 @@ python /path/to/ZTFphot/run_pipeline.py --ra 330.34158 --dec 0.72143
 
 This runs all steps in order: field lookup → image download → decompress → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → re-calibrate → light curves → merge → plots.
 
-> **Note:** The `sex` step requires SExtractor, which must be installed (e.g. via `conda install -c conda-forge astromatic-source-extractor`). The `ztf` environment from `environment.yml` includes it.
+> **Note:** The `sex` step requires SExtractor. On most systems: `conda install -n ztf -c conda-forge source-extractor`. On HPC clusters it is often available via `module load sextractor` (or `module avail sex` to check).
 
 ### Common quality cuts for download (all optional)
 
