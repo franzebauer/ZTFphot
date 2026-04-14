@@ -49,7 +49,7 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
     from shutil import get_terminal_size
     w = min(get_terminal_size().columns, 100)
     print("=" * w)
-    print(f"{'Quadrant':<32} {'Diff imgs':>10} {'SExCats':>10} {'Calibrated':>12} {'LC':>4}")
+    print(f"{'Quadrant':<32} {'Diff imgs*':>10} {'SExCats':>10} {'Calibrated':>12} {'LC':>4}")
     print("-" * w)
     for q in quadrants:
         f, fc, ccd, qid = q["field"], q["filtercode"], q["ccdid"], q["qid"]
@@ -59,9 +59,10 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
         n_sex  = len(list(sex_d.glob("*_sexout.fits"))) if sex_d.exists() else 0
         cal_d  = base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid)
         n_cal  = len(list(cal_d.glob("*_cal.fits"))) if cal_d.exists() else 0
-        lc     = cal_d.parent.parent.parent.parent / "LightCurves" / f"{f:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid}" / "lightcurves.parquet"
+        lc     = base_dir / "LightCurves" / f"{f:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid}" / "lightcurves.parquet"
         print(f"{f:06d} {fc} ccd{ccd:02d} q{qid:<24} {n_diff:>10} {n_sex:>10} {n_cal:>12} {'✓' if lc.exists() else '–':>4}")
     print("=" * w)
+    print("  * Diff imgs = 0 is expected after --purge-batch or --clean-up")
 
 
 def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> None:
