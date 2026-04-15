@@ -1,7 +1,7 @@
 """
-plot_dispersion.py
-------------------
-Fig 3 — Photometric precision and astrometric scatter (2×2):
+plot_precision.py
+-----------------
+Photometric precision and astrometric scatter (2×2):
 
   Top-left:  σ_mag vs median calibrated magnitude, coloured by N clean detections
   Top-right: σ_mag vs median calibrated magnitude, coloured by CLASS_STAR (0=gal, 1=star)
@@ -104,7 +104,7 @@ def _running_median(grp: pd.DataFrame, edges: np.ndarray):
 
 # ── main function ─────────────────────────────────────────────────────────────
 
-def make_fig3_precision(lc_path: Path, out_path: Path, tag: str = "",
+def make_precision(lc_path: Path, out_path: Path, tag: str = "",
                         target_ra: float | None = None,
                         target_dec: float | None = None,
                         vet_catalog: Path | None = None) -> None:
@@ -131,6 +131,18 @@ def make_fig3_precision(lc_path: Path, out_path: Path, tag: str = "",
     else:
         agg["cs"] = np.nan
     grp = agg[agg["n"] >= 5]
+
+    # ── per-source summary from pre-calibration mags (aperture-corrected maginst)
+    _ORG_COL = "MAG_4_TOT_AB_org"
+    grp_org = None
+    if _ORG_COL in clean.columns:
+        clean[_ORG_COL] = pd.to_numeric(clean[_ORG_COL], errors="coerce")
+        agg_org = clean.groupby("object_index").agg(
+            n_org=(_ORG_COL, "count"),
+            med=(_ORG_COL,   "median"),
+            std=(_ORG_COL,   "std"),
+        ).dropna(subset=["std"])
+        grp_org = agg_org[agg_org["n_org"] >= 5]
 
     tgt_obj_idx  = _find_target_obj(df, target_ra, target_dec) if target_ra is not None else None
     vet_rejected = _load_vet_rejected(vet_catalog, df)
@@ -209,10 +221,15 @@ def make_fig3_precision(lc_path: Path, out_path: Path, tag: str = "",
                         s=4, alpha=0.5, rasterized=True, zorder=3)
         plt.colorbar(sc, ax=ax, label=clabel, shrink=0.88)
 
-        # running median locus
+        # running median locus — calibrated (solid) and pre-calibration (dotted)
         cx, my = _running_median(grp, edges)
         if cx:
-            ax.plot(cx, my, "k-", lw=2, zorder=4)
+            ax.plot(cx, my, "k-", lw=2, zorder=4, label="Median σ (calibrated)")
+        if grp_org is not None:
+            cx_org, my_org = _running_median(grp_org, edges)
+            if cx_org:
+                ax.plot(cx_org, my_org, "k--", lw=1.5, zorder=4,
+                        label="Median σ (pre-calibration)")
 
         # calibration star range
         ax.axvline(_CALIB_MAG_LO, color="steelblue", lw=1.2, ls=":", alpha=0.8)

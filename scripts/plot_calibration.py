@@ -57,7 +57,7 @@ def _load_epoch_headers(cal_dir: Path) -> "pd.DataFrame":
     return df.sort_values("OBSMJD").reset_index(drop=True)
 
 
-def make_fig2_rms(cal_dir: Path, out_path: Path, tag: str = "") -> None:
+def make_rms(cal_dir: Path, out_path: Path, tag: str = "") -> None:
     df = _load_epoch_headers(cal_dir)
     if df.empty:
         logger.warning(f"No calibrated epochs in {cal_dir}")
@@ -157,4 +157,4 @@ def make_fig2_rms(cal_dir: Path, out_path: Path, tag: str = "") -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
-    logger.info(f"  fig2 rms → {out_path}")
+    logger.info(f"  rms → {out_path}")

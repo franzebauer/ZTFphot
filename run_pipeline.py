@@ -411,10 +411,10 @@ def main() -> None:
         import sys as _sys
         if str(_SCRIPTS) not in _sys.path:
             _sys.path.insert(0, str(_SCRIPTS))
-        from make_diagnostic_plots import (
+        from plot_diagnostics import (
             make_spatial_rms, make_spatial_iqr,
-            make_fig2_rms, make_fig3_precision,
-            make_fig4_lightcurves,
+            make_rms, make_precision,
+            make_lightcurves,
         )
 
         plot_root = base_dir / "Plots"
@@ -444,7 +444,7 @@ def main() -> None:
                 logger.info(f"  [{tag}] no residual NPZ files — skipping spatial_rms/IQR")
 
             if has_cal:
-                make_fig2_rms(cal_dir,
+                make_rms(cal_dir,
                               plot_root / f"rms_{tag}.png", tag)
             else:
                 logger.info(f"  [{tag}] no calibrated FITS — skipping rms")
@@ -452,12 +452,12 @@ def main() -> None:
             if has_lc:
                 vet_cat = cal_dir / "vet_calib_stars.fits"
                 vet_cat_arg = vet_cat if vet_cat.exists() else None
-                make_fig3_precision(lc_path,
+                make_precision(lc_path,
                                     plot_root / f"precision_{tag}.png",
                                     tag, args.ra, args.dec,
                                     vet_catalog=vet_cat_arg)
                 if args.ra is not None and args.dec is not None:
-                    make_fig4_lightcurves(lc_path,
+                    make_lightcurves(lc_path,
                                           plot_root / f"lightcurves_{tag}.png",
                                           args.ra, args.dec,
                                           tag=tag,

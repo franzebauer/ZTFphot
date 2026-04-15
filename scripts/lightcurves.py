@@ -40,6 +40,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         'MAG_6_TOT_AB', 'MERR_6_TOT_AB',
         'MAG_10_TOT_AB', 'MERR_10_TOT_AB',
         'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org',
+        'APCORR46',
     ]
     int32_cols = [
         'NMATCHES', 'INFOBITS_DIF', 'INFOBITS_REF',
@@ -62,7 +63,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 # Header keywords to broadcast from cal.fits HDU[0] to every source row
 _EPOCH_KEYS = [
     'OBSMJD', 'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
-    'SEEING', 'MAGLIM', 'NMATCHES', 'INFOBITS_DIF',
+    'SEEING', 'MAGLIM', 'NMATCHES', 'INFOBITS_DIF', 'APCORR46',
 ]
 
 # Columns to drop before writing (redundant, derivable, or replaced by metadata)

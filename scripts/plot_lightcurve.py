@@ -128,7 +128,7 @@ def _pick_comps(clean: pd.DataFrame, tgt_obj, tgt_med: float,
     return cands.sort_values("delta").index[:n_comp].tolist()
 
 
-def make_fig4_lightcurves(lc_path: Path, out_path: Path,
+def make_lightcurves(lc_path: Path, out_path: Path,
                           target_ra: float, target_dec: float,
                           tag: str = "",
                           vet_catalog: Path | None = None,
