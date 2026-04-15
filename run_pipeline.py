@@ -348,6 +348,25 @@ def main() -> None:
         purge_images(base_dir, quadrants, sci=True, ref=True, dry_run=args.dry_run)
         return
 
+    # ── purge-batch on a fresh target: derive quadrants from epoch cache ─────────
+    # find_quadrants() only finds files already on disk. For a brand-new target
+    # nothing has been downloaded yet, so quadrants is empty and _run_purge_batch
+    # would silently do nothing. Derive the expected quadrant list from the cache.
+    if not quadrants and args.purge_batch and epochs is not None:
+        _seen_q: set = set()
+        for _, _row in epochs[["field", "filtercode", "ccdid", "qid"]].drop_duplicates().iterrows():
+            _key = (int(_row["field"]), str(_row["filtercode"]),
+                    int(_row["ccdid"]),  int(_row["qid"]))
+            if _key not in _seen_q:
+                _seen_q.add(_key)
+                quadrants.append({"field": _key[0], "filtercode": _key[1],
+                                  "ccdid": _key[2], "qid": _key[3],
+                                  "ref_dir": base_dir / "Reference",
+                                  "sci_dir": base_dir / "Science"})
+        if quadrants:
+            logger.info(f"purge-batch: {len(quadrants)} quadrant(s) derived from epoch cache "
+                        f"(no files on disk yet)")
+
     remaining = [s for s in steps if s not in ("lookup", "download")]
     if remaining and not quadrants:
         sys.exit("No quadrants found on disk. Run lookup and download first.")
