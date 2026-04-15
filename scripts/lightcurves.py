@@ -164,7 +164,7 @@ def step_lightcurves(
             if tbl.empty:
                 continue
 
-            # Cross-match epoch detections to reference catalog (1.5 arcsec)
+            # Cross-match epoch detections to reference catalog (3.0 arcsec)
             ep_ra  = pd.to_numeric(tbl.get('ALPHAWIN_J2000', tbl.get('ALPHA_J2000')), errors='coerce').values
             ep_dec = pd.to_numeric(tbl.get('DELTAWIN_J2000', tbl.get('DELTA_J2000')), errors='coerce').values
             valid  = np.isfinite(ep_ra) & np.isfinite(ep_dec)
@@ -173,7 +173,7 @@ def step_lightcurves(
 
             ep_coords = SkyCoord(ra=ep_ra[valid], dec=ep_dec[valid], unit='deg')
             ref_idx, sep, _ = ep_coords.match_to_catalog_sky(ref_coords)
-            matched = sep.arcsec < 1.5
+            matched = sep.arcsec < 3.0
 
             if matched.sum() == 0:
                 continue
@@ -236,7 +236,8 @@ def step_lightcurves(
 
 # ── Step: merge quadrants ─────────────────────────────────────────────────────
 
-def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False) -> None:
+def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
+               target_ra: float | None = None, target_dec: float | None = None) -> None:
     """
     Cross-calibrate and merge per-quadrant light curves for each band.
 
@@ -258,4 +259,9 @@ def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False) -> No
         if len(band_qs) < 2:
             logger.info(f"merge [{band}]: only 1 quadrant — skipping cross-calibration")
             continue
-        merge_band(lc_root=lc_root, band=band, quadrants=band_qs, force=force)
+        if target_ra is None or target_dec is None:
+            logger.error("merge: --ra and --dec are required to determine output directory")
+            continue
+        out_dir = lc_root / "merged" / f"{target_ra:.5f}_{target_dec:+.5f}" / band
+        merge_band(lc_root=lc_root, band=band, quadrants=band_qs, force=force,
+                   out_dir=out_dir)

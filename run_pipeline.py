@@ -322,6 +322,21 @@ def main() -> None:
     quadrants = find_quadrants(base_dir, bands=args.bands,
                                field=args.field, ccdid=args.ccdid, qid=args.qid)
 
+    # Filter to fields belonging to this target using the epoch cache
+    if args.ra is not None and args.dec is not None:
+        import pandas as _pd
+        bands_str  = "-".join(sorted(args.bands or ["g", "i", "r"]))
+        cache_path = base_dir / "Epochs" / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{bands_str}.epochs.parquet"
+        if cache_path.exists():
+            _cache     = _pd.read_parquet(cache_path)
+            _fields    = set(_cache["field"].dropna().astype(int).tolist())
+            _before    = len(quadrants)
+            quadrants  = [q for q in quadrants if q["field"] in _fields]
+            logger.info(f"Epoch cache filter: {_before} → {len(quadrants)} quadrants "
+                        f"(keeping fields {sorted(_fields)})")
+        else:
+            logger.warning(f"No epoch cache found at {cache_path} — using all quadrants on disk")
+
     if args.status:
         _print_status(base_dir, quadrants)
         return
@@ -388,7 +403,8 @@ def main() -> None:
         step_lightcurves(base_dir, quadrants, force=args.force,
                          use_calibrated="calibrate" in steps)
 
-    if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force)
+    if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
+                                          target_ra=args.ra, target_dec=args.dec)
 
     if "plots"      in steps:
         logger.info("─── plots ───")
@@ -396,8 +412,9 @@ def main() -> None:
         if str(_SCRIPTS) not in _sys.path:
             _sys.path.insert(0, str(_SCRIPTS))
         from make_diagnostic_plots import (
-            make_fig_calibration, make_fig_precision,
-            make_fig_spatial, make_fig_lightcurve,
+            make_spatial_rms, make_spatial_iqr,
+            make_fig2_rms, make_fig3_precision,
+            make_fig4_lightcurves,
         )
 
         plot_root = base_dir / "Plots"
@@ -405,36 +422,48 @@ def main() -> None:
             plot_root = plot_root / f"{args.ra:.5f}_{args.dec:+.5f}"
         plot_root.mkdir(parents=True, exist_ok=True)
 
-        lc_paths_for_target: list[tuple] = []
-
         for q in quadrants:
             f, fc, ccd, qid_ = q["field"], q["filtercode"], q["ccdid"], q["qid"]
             tag = f"{f:06d}_{fc}_c{ccd:02d}_q{qid_}"
-            quad_plot_dir = plot_root / tag
-            quad_plot_dir.mkdir(parents=True, exist_ok=True)
 
-            cal_dir = base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)
-            lc_path = (base_dir / "LightCurves" / f"{f:06d}" / fc
-                       / f"ccd{ccd:02d}" / f"q{qid_}" / "lightcurves.parquet")
+            cal_dir   = base_dir / "Calibrated"          / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)
+            resid_dir = base_dir / "FlatfieldResiduals"  / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)
+            lc_path   = (base_dir / "LightCurves" / f"{f:06d}" / fc
+                         / f"ccd{ccd:02d}" / f"q{qid_}" / "lightcurves.parquet")
 
-            if cal_dir.exists() and any(cal_dir.glob("*_cal.fits")):
-                make_fig_calibration(cal_dir,
-                                     quad_plot_dir / "fig_calibration.png", tag)
+            has_cal   = cal_dir.exists()   and any(cal_dir.glob("*_cal.fits"))
+            has_resid = resid_dir.exists() and any(resid_dir.glob("*_resid.npz"))
+            has_lc    = lc_path.exists()
+
+            if has_resid:
+                make_spatial_rms(resid_dir,
+                                 plot_root / f"spatial_rms_{tag}.png", tag)
+                make_spatial_iqr(resid_dir,
+                                 plot_root / f"spatial_IQR_{tag}.png", tag)
             else:
-                logger.info(f"  [{tag}] no calibrated FITS — skipping calibration plot")
+                logger.info(f"  [{tag}] no residual NPZ files — skipping spatial_rms/IQR")
 
-            if lc_path.exists():
-                make_fig_precision(lc_path, quad_plot_dir / "fig_precision.png",
-                                   tag, args.ra, args.dec)
-                make_fig_spatial(lc_path, quad_plot_dir / "fig_spatial.png", tag)
-                lc_paths_for_target.append((lc_path, fc))
+            if has_cal:
+                make_fig2_rms(cal_dir,
+                              plot_root / f"rms_{tag}.png", tag)
             else:
-                logger.info(f"  [{tag}] no light-curve parquet — skipping precision/spatial plots")
+                logger.info(f"  [{tag}] no calibrated FITS — skipping rms")
 
-        if args.ra is not None and args.dec is not None and lc_paths_for_target:
-            make_fig_lightcurve(lc_paths_for_target,
-                                plot_root / "fig_lightcurve.png",
-                                args.ra, args.dec)
+            if has_lc:
+                vet_cat = cal_dir / "vet_calib_stars.fits"
+                vet_cat_arg = vet_cat if vet_cat.exists() else None
+                make_fig3_precision(lc_path,
+                                    plot_root / f"precision_{tag}.png",
+                                    tag, args.ra, args.dec,
+                                    vet_catalog=vet_cat_arg)
+                if args.ra is not None and args.dec is not None:
+                    make_fig4_lightcurves(lc_path,
+                                          plot_root / f"lightcurves_{tag}.png",
+                                          args.ra, args.dec,
+                                          tag=tag,
+                                          vet_catalog=vet_cat_arg)
+            else:
+                logger.info(f"  [{tag}] no light-curve parquet — skipping precision/lightcurves")
 
     logger.info(f"Done in {time.time() - t0:.1f}s")
     _print_status(base_dir, quadrants)

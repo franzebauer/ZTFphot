@@ -104,7 +104,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                 cat_ref_vet = SkyCoord(ra=raref, dec=decref, unit='deg')
                 cat_vet     = SkyCoord(ra=vet_ra, dec=vet_dec, unit='deg')
                 idx, sep, _ = match_coordinates_sky(cat_vet, cat_ref_vet, nthneighbor=1)
-                matched_vet = sep.arcsec < 1.5
+                matched_vet = sep.arcsec < 3.0
                 is_good_calib[idx[matched_vet]] = vet_good[matched_vet]
                 print(f"  Vet catalog: {np.sum(~is_good_calib)} bad calibration stars masked")
             except Exception as e:
@@ -154,7 +154,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     img_coord = SkyCoord(ra=alpha, dec=delta, unit='deg')
     ind, ang, _ = match_coordinates_sky(cat_coord, img_coord, nthneighbor=1)
     ang0 = np.array(ang)
-    n    = np.where(ang0 < 0.000416667)[0]   # 1.5 arcsec
+    n    = np.where(ang0 < 0.00083333)[0]   # 3.0 arcsec
 
     # Reference frame centre for polynomial normalisation
     ra0  = float(np.mean(raref))
@@ -168,7 +168,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         _dec_m  = np.array(delta[_pos0])
         _sep_sq = (_ra_m - target_ra)**2 + (_dec_m - target_dec)**2
         _j = int(np.argmin(_sep_sq))
-        if np.sqrt(_sep_sq[_j]) < 1.5 / 3600.0:
+        if np.sqrt(_sep_sq[_j]) < 3.0 / 3600.0:
             tgt_in_matched = _j
 
     # Per-step RMS accumulators (recorded for k=1, primary aperture)
@@ -465,7 +465,11 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                              ra_4=ra_c,        dec_4=dec_c,
                              dm_4=_dm_st4,
                              ra_5=ra_c,        dec_5=dec_c,
-                             dm_5=_dm_st5)
+                             dm_5=_dm_st5,
+                             ra_all=alphafin.astype(float),
+                             dec_all=deltafin.astype(float),
+                             dm_all_pre=(maginst_all - q_mag_all).astype(float),
+                             dm_all_post=(Q_cal[k] - q_mag_all).astype(float))
 
             interpolation = np.interp(Q_cal[k], median_mag_per_bin, rms_per_bin)
             Q_err[k]      = np.array([max(i, j) for i, j in zip(interpolation, errmagQi[k])])

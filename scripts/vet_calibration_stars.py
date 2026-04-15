@@ -116,7 +116,7 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
     cat_stats = SkyCoord(ra=stats['ra'].values * u.deg,
                          dec=stats['dec'].values * u.deg)
     idx, sep, _ = cat_stats.match_to_catalog_sky(cat_ref)
-    matched = sep.arcsec < 1.5
+    matched = sep.arcsec < 3.0
     stats = stats[matched].copy()
     stats['q_mag']   = ref['q_mag'].iloc[idx[matched]].values
     stats['ref_idx'] = idx[matched]
