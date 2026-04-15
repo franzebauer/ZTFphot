@@ -84,11 +84,11 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
 
     # ── Load and aggregate lightcurves ────────────────────────────────────────
     df = pd.read_parquet(parquet_path)
-    clean = df[df['FLAG_CLEAN'].astype(bool) & df['FLAG_DET'].astype(bool)].copy()
-    clean['mag'] = _flux_to_mag(clean['FLUX_4_TOT_AB'].values)
+    clean = df[df['INFOBITS_DIF'] == 0].copy()
+    clean['mag'] = pd.to_numeric(clean['MAG_4_TOT_AB'], errors='coerce')
     clean = clean[clean['mag'].notna()]
 
-    grp   = clean.groupby('ID_REF')
+    grp   = clean.groupby('object_index')
     stats = grp.agg(
         ra        = ('ALPHAWIN_REF', 'first'),
         dec       = ('DELTAWIN_REF', 'first'),
@@ -97,13 +97,12 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
         std_mag   = ('mag', 'std'),
     ).reset_index()
 
-    # Pull per-source reference properties
-    for col, new in [('CLASS_STAR_REF', 'class_star'), ('FLAG_SE_REF', 'flag_se')]:
-        if col in clean.columns:
-            stats = stats.join(clean.groupby('ID_REF')[col].first()
-                               .rename(new), on='ID_REF')
-        else:
-            stats[new] = 0 if new == 'flag_se' else np.nan
+    # FLAG_SE_REF still stored per-source in the parquet
+    if 'FLAG_SE_REF' in clean.columns:
+        stats = stats.join(clean.groupby('object_index')['FLAG_SE_REF'].first()
+                           .rename('flag_se'), on='object_index')
+    else:
+        stats['flag_se'] = 0
 
     # ── Match to reference catalog to get q_mag ───────────────────────────────
     ref = pd.read_csv(ref_csv_path)
@@ -118,8 +117,13 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
     idx, sep, _ = cat_stats.match_to_catalog_sky(cat_ref)
     matched = sep.arcsec < 3.0
     stats = stats[matched].copy()
-    stats['q_mag']   = ref['q_mag'].iloc[idx[matched]].values
-    stats['ref_idx'] = idx[matched]
+    stats['q_mag']    = ref['q_mag'].iloc[idx[matched]].values
+    stats['ref_idx']  = idx[matched]
+    # class_star from reference CSV (CLASS_STAR column)
+    if 'CLASS_STAR' in ref.columns:
+        stats['class_star'] = pd.to_numeric(ref['CLASS_STAR'].iloc[idx[matched]].values, errors='coerce')
+    else:
+        stats['class_star'] = np.nan
 
     # ── Restrict to calibration-eligible sources ──────────────────────────────
     calib = stats[

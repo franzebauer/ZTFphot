@@ -31,6 +31,8 @@ conda activate ztf
 
 This installs Python, numpy, astropy, scipy, matplotlib, pandas, ztfquery, and SExtractor.
 
+> **Note:** The `sex` step requires SExtractor. On most systems: `conda install -n ztf -c conda-forge source-extractor`. On HPC clusters it is often available via `module load sextractor` (or `module avail sex` to check).
+
 ### 3. Configure IRSA credentials
 
 IRSA credentials are required to download image products. Add them to `~/.netrc`:
@@ -57,8 +59,6 @@ All pipeline data is written to `data/` in your current working directory, creat
 
 ## Quick start
 
-Run from any directory — `data/` is created automatically in your current working directory.
-
 ### Full pipeline from scratch
 
 ```bash
@@ -67,15 +67,15 @@ python /path/to/ZTFphot/run_pipeline.py --ra 330.34158 --dec 0.72143
 
 This runs all steps in order: field lookup → image download → decompress → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → re-calibrate → light curves → merge → plots.
 
-> **Note:** The `sex` step requires SExtractor. On most systems: `conda install -n ztf -c conda-forge source-extractor`. On HPC clusters it is often available via `module load sextractor` (or `module avail sex` to check).
-
 ### Common quality cuts for download (all optional)
 
 ```bash
 python run_pipeline.py --ra 330.34158 --dec 0.72143 \
-    --max-seeing 3.0        \  # skip epochs with seeing FWHM > 3.0 arcsec
-    --min-maglim 19.5       \  # skip epochs with 5σ limiting mag < 19.5
-    --skip-flagged          \  # also skip cautionary-flagged epochs
+    --max-seeing 3.0          \  # skip epochs with seeing FWHM > 3.0 arcsec
+    --min-maglim 19.5         \  # skip epochs with 5σ limiting mag < 19.5
+    --mjd-min 59000           \  # skip epochs before this MJD
+    --mjd-max 60000           \  # skip epochs after this MJD
+    --skip-flagged            \  # also skip cautionary-flagged epochs
     --min-epochs-per-quad 30
 ```
 
@@ -160,11 +160,26 @@ data/                       ← created in your working directory on first run
   Reference/                ← reference images and catalogs
   Catalogs/                 ← reference star CSV catalogs
   SExCatalogs/              ← SExtractor LDAC output
-  Calibrated/               ← calibrated catalogs, flatfield, vet catalog
-  FlatfieldResiduals/       ← per-epoch residual maps
+  Calibrated/               ← calibrated FITS catalogs per epoch
+  FlatfieldResiduals/       ← per-epoch NPZ residual maps
   LightCurves/              ← assembled light curves (parquet)
   Plots/                    ← diagnostic plots per target and quadrant
 ```
+
+### Output file locations
+
+| Output | Path |
+|--------|------|
+| Epoch metadata | `data/Epochs/lookup_{ra}_{dec}_{bands}.epochs.parquet` |
+| Reference catalog | `data/Catalogs/{field}_{fc}_c{ccd}_q{qid}(REFERENCE)[OBJECTS].csv` |
+| SEx LDAC catalogs | `data/SExCatalogs/000/{field}/{fc}/{ccd}/{qid}/*.fits` |
+| Calibrated FITS | `data/Calibrated/000/{field}/{fc}/{ccd}/{qid}/*_cal.fits` |
+| NPZ residuals | `data/FlatfieldResiduals/000/{field}/{fc}/{ccd}/{qid}/*_resid.npz` |
+| Flatfield map | `data/Calibrated/000/{field}/{fc}/{ccd}/{qid}/flatfield.npz` |
+| Vet catalog | `data/Calibrated/000/{field}/{fc}/{ccd}/{qid}/vet_calib_stars.fits` |
+| Light curves | `data/LightCurves/{field}/{fc}/ccd{ccd}/q{qid}/lightcurves.parquet` |
+| Merged LCs | `data/LightCurves/merged/{ra}_{dec}/{fc}/*.parquet` |
+| Plots | `data/Plots/{ra}_{dec}/{field}_{fc}_c{ccd}_q{qid}/*.png` |
 
 ---
 
@@ -172,6 +187,8 @@ data/                       ← created in your working directory on first run
 
 | Step | CLI name | Description |
 |------|----------|-------------|
+| Field lookup | `lookup` | Query IRSA for ZTF field/CCD/quadrant coverage at the target position |
+| Download | `download` | Fetch science and reference images from IRSA |
 | Decompress | `funpack` | Decompress `.fits.fz` difference images |
 | Reference catalog | `catalog` | Build reference CSV from `refsexcat.fits` |
 | Simulate | `simulate` | Build simulated detection images (PSF at reference positions) |
@@ -181,27 +198,59 @@ data/                       ← created in your working directory on first run
 | Flatfield | `flatfield` | Rebuild spatial flatfield from post-polynomial residuals |
 | Light curves | `lightcurves` | Assemble per-object parquet light curves from calibrated FITS |
 | Merge | `merge` | Cross-calibrate and merge multiple quadrants per band |
-| Plots | `plots` | Diagnostic plots (spatial residuals, RMS, precision, quality, light curves) |
+| Plots | `plots` | Diagnostic plots (spatial residuals, RMS, precision, light curves) |
 
 ---
 
 ## Key CLI options
 
+### Target and scope
+
 | Option | Description |
 |--------|-------------|
-| `--base-dir PATH` | Data directory (default: `./data` in current working directory) |
-| `--ra / --dec` | Target RA/Dec (deg) — required for lookup and download steps |
-| `--field N` | ZTF field number (filter to specific field) |
-| `--bands zg zr zi` | Filter(s) to process (default: all present) |
-| `--ccdid N` | CCD number (filter to specific CCD) |
-| `--qid N` | Quadrant ID (filter to specific quadrant) |
+| `--base-dir PATH` | Data directory (default: `./data`) |
+| `--ra / --dec` | Target RA/Dec (deg) — required for lookup, download, merge, and plots |
+| `--bands zg zr zi` | Bands to process (default: all present on disk) |
+| `--field N` | Restrict to a specific ZTF field number |
+| `--ccdid N` | Restrict to a specific CCD |
+| `--qid N` | Restrict to a specific quadrant |
+| `--steps STEP ...` | Run only named steps (default: all) |
 | `--workers N` | Parallel workers (default: 4) |
-| `--force` | Re-run even if output files exist |
-| `--poly-degree N` | Spatial polynomial degree for calibration (default: 2) |
+| `--force` | Re-run even if output files already exist |
+| `--verbose` | Increase log verbosity |
 | `--status` | Print file-existence summary and exit |
-| `--purge-batch N` | Low-disk mode: process N epochs at a time, deleting imaging products after each batch's sex step. Only SEx catalogs are kept on disk. |
-| `--clean-up` | Delete all imaging products (Science/, Reference/) for discovered quadrants. Safe once the sex step is complete. |
-| `--dry-run` | Preview what `--purge-batch` or `--clean-up` would delete without touching disk. |
+
+### Download quality cuts
+
+Applied when `download` is in `--steps`. All optional; default is no cuts.
+
+| Option | Description |
+|--------|-------------|
+| `--max-seeing ARCSEC` | Skip epochs with seeing FWHM above this value |
+| `--min-maglim MAG` | Skip epochs with 5σ limiting magnitude below this value |
+| `--mjd-min MJD` | Skip epochs before this MJD |
+| `--mjd-max MJD` | Skip epochs after this MJD |
+| `--skip-flagged` | Skip cautionary-flagged epochs (in addition to hard-rejected ones) |
+| `--min-epochs-per-quad N` | Skip quadrants with fewer than N epochs after filtering |
+
+### Calibration options
+
+| Option | Description |
+|--------|-------------|
+| `--poly-degree N` | Degree of the spatial calibration polynomial (default: 2) |
+| `--ff-bins N` | Number of spatial bins per axis for the flatfield grid (default: 16) |
+| `--ff-min-count N` | Minimum detections per flatfield bin to use (default: 5) |
+| `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
+
+### Disk management
+
+| Option | Description |
+|--------|-------------|
+| `--purge-batch N` | Low-disk mode: process N epochs at a time, deleting imaging products after each batch |
+| `--clean-up` | Delete all imaging products (Science/, Reference/) and exit |
+| `--dry-run` | Preview what `--purge-batch` or `--clean-up` would delete, without touching disk |
+| `--purge-hard-reject` | Delete on-disk files for hard-rejected epochs and exit |
+| `--epochs-parquet PATH` | Path to epoch cache parquet (used with `--purge-hard-reject`) |
 
 ---
 
@@ -230,3 +279,49 @@ python run_pipeline.py --steps calibrate flatfield lightcurves plots \
 ```
 
 The vet catalog is discovered automatically from its standard location in `data/Calibrated/`.
+
+---
+
+## Calibrated FITS header keywords
+
+| Keyword | Description |
+|---------|-------------|
+| `OBSMJD` | Observation MJD |
+| `SEEING` | Seeing FWHM (arcsec) |
+| `MAGLIM` | 5σ limiting magnitude |
+| `num_stars` | Number of calibration stars used |
+| `NC_RMS0` | Calibrator RMS before any correction (mmag) |
+| `NC_RMS1` | Calibrator RMS after linear ZP fit (mmag) |
+| `NC_RMS2` | Calibrator RMS after 3σ clip (mmag) |
+| `NC_RMS3` | Calibrator RMS after faint correction (mmag) |
+| `NC_RMS4` | Calibrator RMS after 2D polynomial (mmag) |
+| `NC_RMSFC` | Calibrator RMS after spatial flatfield (mmag) |
+| `CALIB_N` | Linear fit intercept (mag) |
+| `CALIB_M` | Linear fit slope |
+| `CALIB_ZP` | ZP correction evaluated at mag 17 (mag) |
+| `NC_FC_00–06` | Per-bin faint correction at mag 18.75–21.75 (mmag; −999 if empty bin) |
+| `TGT_MRAW` | Raw instrumental mag of target (mmag; −999 if not detected) |
+| `TGT_DCLIN` | Linear ZP correction applied to target (mmag) |
+| `TGT_DCPOL` | 2D polynomial correction applied to target (mmag) |
+| `TGT_DCFF` | Flatfield correction applied to target (mmag) |
+
+---
+
+## SExtractor configuration
+
+- **Aperture diameters**: 3, 4, 6, 10 pixels (radii 1.5, 2, 3, 5 px) — these are diameters, matching the original pipeline
+- **Primary aperture**: k=1 (4 px diameter) → stored as `MAG_4_TOT_AB` / `FLUX_4_TOT_AB`
+- **Detection**: dual-image mode — detect on simulated image, measure on difference image
+- **Background**: `BACK_TYPE=MANUAL, BACK_VALUE=0.0` — difference images have zero mean background
+- **Source matching**: 3 arcsec radius (set empirically from nearest-neighbour separation distribution)
+
+---
+
+## TODO
+
+The following scripts exist in `scripts/` but are not yet implemented:
+
+| Script | Planned function |
+|--------|-----------------|
+| `forced_photometry.py` | Forced-position photometry at the target RA/Dec across all epochs, including non-detections |
+| `transient_catalog.py` | Build a catalog of transient/variable candidates from the merged light curves |

@@ -12,7 +12,7 @@ Panel widths are equal (colorbar occupies a dedicated narrow column).
 
 Key parquet columns used:
     MAG_4_TOT_AB, MERR_4_TOT_AB  — calibrated magnitude and error
-    FLAG_CLEAN, FLAG_DET          — quality flags
+    INFOBITS_DIF                  — quality flag (== 0 for clean epochs)
     OBSMJD, MAGLIM                — epoch metadata
     CLASS_STAR, CLASS_STAR_OBJ    — stellarity
     ALPHAWIN_REF, DELTAWIN_REF    — reference-catalog positions
@@ -151,7 +151,7 @@ def make_fig4_lightcurves(lc_path: Path, out_path: Path,
         return
 
     df[_MAG_COL] = pd.to_numeric(df[_MAG_COL], errors="coerce")
-    clean = df[df["FLAG_CLEAN"].astype(bool) & df["FLAG_DET"].astype(bool)].copy()
+    clean = df[df["INFOBITS_DIF"] == 0].copy()
 
     tgt_coord = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
     tgt_obj, tgt_med = _find_target(clean, tgt_coord)

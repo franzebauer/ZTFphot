@@ -15,70 +15,45 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# ── Quality-flag constants ────────────────────────────────────────────────────
-
-_HARD_REJECT_MASK = (1 << 0) | (1 << 1) | (1 << 25)          # = 33554435
-_CAUTIONARY_MASK  = (
-    (1 << 2)  | (1 << 3)  | (1 << 4)  | (1 << 5)  | (1 << 6)
-  | (1 << 11) | (1 << 21) | (1 << 22) | (1 << 26) | (1 << 27)
-)
-
-
-def _add_quality_flags(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add boolean quality-flag columns based on INFOBITS_DIF.
-
-    FLAG_HARD_REJECT — bits 0, 1, 25 set (no valid astrometric/photometric calib)
-    FLAG_CAUTIONARY  — cautionary bits set but not hard-rejected
-    FLAG_CLEAN       — INFOBITS_DIF == 0 (most conservative clean sample)
-    FLAG_USABLE      — not hard-rejected (clean + cautionary)
-    """
-    bits = pd.to_numeric(df["INFOBITS_DIF"], errors="coerce").fillna(-1).astype("int64")
-
-    hard_reject = (bits & _HARD_REJECT_MASK) != 0
-    cautionary  = (~hard_reject) & ((bits & _CAUTIONARY_MASK) != 0)
-    clean       = (~hard_reject) & (~cautionary) & (bits >= 0)
-
-    df["FLAG_HARD_REJECT"] = hard_reject
-    df["FLAG_CAUTIONARY"]  = cautionary
-    df["FLAG_CLEAN"]       = clean
-    df["FLAG_USABLE"]      = ~hard_reject
-    return df
-
 
 def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Cast all light-curve columns to correct numeric types before writing Parquet.
+    Cast light-curve columns to correct numeric types before writing Parquet.
+    FITS LDAC header keywords are parsed as raw strings; this coerces them.
 
-    FITS LDAC header keywords are parsed as raw strings; mixed string+numeric
-    dtypes cannot be serialised to Parquet. Uses pd.to_numeric(errors='coerce').
+    float64: OBSMJD (MJD precision), ALPHAWIN_REF, DELTAWIN_REF, ALPHA_OBJ,
+             DELTA_OBJ (astrometric precision at RA~330 deg)
+    float32: all photometric quantities and per-epoch scalars
+    Int32:   integer indices and flag words
     """
-    float_cols = [
-        'OBSMJD', 'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
-        'SATURATE', 'SEEING', 'MAGLIM', 'DISTANCE',
-        'ALPHAWIN_REF', 'DELTAWIN_REF', 'MAGZP_REF', 'MAGZPRMS_REF',
-        'ALPHA_OBJ', 'DELTA_OBJ', 'ALPHAWIN_OBJ', 'DELTAWIN_OBJ',
-        'CLASS_STAR_REF', 'CLASS_STAR_OBJ',
-        'FLUX_3_DIF',  'FLUX_4_DIF',  'FLUX_6_DIF',  'FLUX_10_DIF',  'FLUX_AUTO_DIF',
-        'FERR_3_DIF',  'FERR_4_DIF',  'FERR_6_DIF',  'FERR_10_DIF',  'FERR_AUTO_DIF',
-        'FLUX_3_TOT_AB',  'FLUX_4_TOT_AB',  'FLUX_6_TOT_AB',
-        'FLUX_10_TOT_AB', 'FLUX_AUTO_TOT_AB',
-        'FERR_3_TOT_AB',  'FERR_4_TOT_AB',  'FERR_6_TOT_AB',
-        'FERR_10_TOT_AB', 'FERR_AUTO_TOT_AB',
-        'MAG_AP_3_REF', 'MAG_AP_4_REF', 'MAG_AP_6_REF',
-        'MAG_AP_10_REF', 'MAG_AP_AUTO_REF',
+    float64_cols = [
+        'OBSMJD',
+        'ALPHAWIN_REF', 'DELTAWIN_REF',
+        'ALPHA_OBJ', 'DELTA_OBJ',
     ]
-    int_cols = [
+    float32_cols = [
+        'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
+        'SEEING', 'MAGLIM', 'DISTANCE',
+        'CLASS_STAR_OBJ',
+        'MAG_3_TOT_AB', 'MERR_3_TOT_AB',
+        'MAG_4_TOT_AB', 'MERR_4_TOT_AB',
+        'MAG_6_TOT_AB', 'MERR_6_TOT_AB',
+        'MAG_10_TOT_AB', 'MERR_10_TOT_AB',
+        'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org',
+    ]
+    int32_cols = [
         'NMATCHES', 'INFOBITS_DIF', 'INFOBITS_REF',
-        'FLAG_SE_DIF', 'FLAG_SE_REF', 'object_index',
-        'field', 'ccdid', 'qid',
+        'FLAG_SE_REF', 'object_index',
     ]
-    for col in float_cols:
+    for col in float64_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype('float64')
-    for col in int_cols:
+    for col in float32_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('float32')
+    for col in int32_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int32')
     return df
 
 
@@ -87,8 +62,30 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 # Header keywords to broadcast from cal.fits HDU[0] to every source row
 _EPOCH_KEYS = [
     'OBSMJD', 'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
-    'SATURATE', 'SEEING', 'MAGLIM', 'NMATCHES', 'INFOBITS_DIF',
+    'SEEING', 'MAGLIM', 'NMATCHES', 'INFOBITS_DIF',
 ]
+
+# Columns to drop before writing (redundant, derivable, or replaced by metadata)
+_DROP_COLS = {
+    'ALPHAWIN_J2000', 'DELTAWIN_J2000',   # renamed to ALPHA_OBJ / DELTA_OBJ
+    'FLAGS',                               # = FLAG_SE_DIF; dropped
+    'FLUX_3_TOT_AB', 'FERR_3_TOT_AB',
+    'FLUX_4_TOT_AB', 'FERR_4_TOT_AB',
+    'FLUX_6_TOT_AB', 'FERR_6_TOT_AB',
+    'FLUX_10_TOT_AB', 'FERR_10_TOT_AB',
+    'FLUX_AUTO_TOT_AB', 'FERR_AUTO_TOT_AB',
+    'FLUX_3_DIF', 'FERR_3_DIF',
+    'FLUX_4_DIF', 'FERR_4_DIF',
+    'FLUX_6_DIF', 'FERR_6_DIF',
+    'FLUX_10_DIF', 'FERR_10_DIF',
+    'FLUX_AUTO_DIF', 'FERR_AUTO_DIF',
+    'ALPHA_J2000', 'DELTA_J2000',          # reference positions — kept in ALPHAWIN_REF/DELTAWIN_REF
+    'MAG_AP_3_REF', 'MAG_AP_4_REF', 'MAG_AP_6_REF', 'MAG_AP_10_REF', 'MAG_AP_AUTO_REF',
+    'SATURATE',
+    'MAG_3_TOT_AB_org', 'MERR_3_TOT_AB_org',   # only 4px _org retained
+    'MAG_6_TOT_AB_org', 'MERR_6_TOT_AB_org',
+    'MAG_10_TOT_AB_org', 'MERR_10_TOT_AB_org',
+}
 
 
 def step_lightcurves(
@@ -100,10 +97,17 @@ def step_lightcurves(
     Assemble light curves from calibrated per-epoch FITS for each quadrant.
     Reads Calibrated/{field}/{fc}/{ccd}/{qid}/*_cal.fits directly.
     Saves one Parquet per quadrant under LightCurves/.
+
+    Parquet metadata keys (not columns):
+      field, filtercode, ccdid, qid
+      MAGZP_REF_{field}_{fc}_c{ccd}_q{qid}
+      MAGZPRMS_REF_{field}_{fc}_c{ccd}_q{qid}
     """
     import numpy as np
     from astropy.io import fits as pyfits
     from astropy.coordinates import SkyCoord
+    import pyarrow as pa
+    import pyarrow.parquet as pq
 
     cat_dir = base_dir / "Catalogs"
     lc_root = base_dir / "LightCurves"
@@ -140,14 +144,17 @@ def step_lightcurves(
         ref_dec = pd.to_numeric(ref.get('DELTAWIN_J2000', ref.get('DEC')), errors='coerce').values
         ref_coords = SkyCoord(ra=ref_ra, dec=ref_dec, unit='deg')
 
-        # Reference-catalog per-source columns to carry into LC
+        # Per-source reference columns to carry into LC (MAGZP_REF/MAGZPRMS_REF → metadata)
         ref_cols = {}
         for src, dst in [('ALPHAWIN_J2000', 'ALPHAWIN_REF'), ('DELTAWIN_J2000', 'DELTAWIN_REF'),
-                         ('CLASS_STAR', 'CLASS_STAR_REF'), ('FLAGS', 'FLAG_SE_REF'),
-                         ('MAGZP_REF', 'MAGZP_REF'), ('MAGZPRMS_REF', 'MAGZPRMS_REF'),
+                         ('FLAGS', 'FLAG_SE_REF'),
                          ('INFOBITS', 'INFOBITS_REF')]:
             if src in ref.columns:
                 ref_cols[dst] = pd.to_numeric(ref[src], errors='coerce').values
+
+        # Extract MAGZP_REF / MAGZPRMS_REF as scalars for parquet metadata
+        magzp_ref_val    = float(pd.to_numeric(ref['MAGZP_REF'],    errors='coerce').iloc[0]) if 'MAGZP_REF'    in ref.columns else float('nan')
+        magzprms_ref_val = float(pd.to_numeric(ref['MAGZPRMS_REF'], errors='coerce').iloc[0]) if 'MAGZPRMS_REF' in ref.columns else float('nan')
 
         frames = []
         for cal_path in cal_files:
@@ -178,8 +185,8 @@ def step_lightcurves(
             if matched.sum() == 0:
                 continue
 
-            ep_rows      = tbl[valid][matched].copy().reset_index(drop=True)
-            ep_ref_idx   = ref_idx[matched]
+            ep_rows    = tbl[valid][matched].copy().reset_index(drop=True)
+            ep_ref_idx = ref_idx[matched]
 
             # Epoch metadata (broadcast to all sources)
             for key in _EPOCH_KEYS:
@@ -190,22 +197,11 @@ def step_lightcurves(
                 ep_rows[dst] = arr[ep_ref_idx]
 
             ep_rows['object_index'] = ep_ref_idx
-            ep_rows['ID_REF'] = [
-                f"{i}_{field:06d}_{fc}_c{ccd:02d}_q{qid_}" for i in ep_ref_idx
-            ]
-            ep_rows['ALPHAWIN_OBJ'] = ep_ra[valid][matched]
-            ep_rows['DELTAWIN_OBJ'] = ep_dec[valid][matched]
-            ep_rows['FLAG_DET']     = True
 
             # Rename cal.fits measurement columns to LC schema
             rename = {
                 'ALPHAWIN_J2000': 'ALPHA_OBJ', 'DELTAWIN_J2000': 'DELTA_OBJ',
-                'FLAGS': 'FLAG_SE_DIF', 'CLASS_STAR': 'CLASS_STAR_OBJ',
-                'FLUX_4_TOT_AB': 'FLUX_4_TOT_AB', 'FERR_4_TOT_AB': 'FERR_4_TOT_AB',
-                'FLUX_3_TOT_AB': 'FLUX_3_TOT_AB', 'FERR_3_TOT_AB': 'FERR_3_TOT_AB',
-                'FLUX_6_TOT_AB': 'FLUX_6_TOT_AB', 'FERR_6_TOT_AB': 'FERR_6_TOT_AB',
-                'FLUX_10_TOT_AB': 'FLUX_10_TOT_AB', 'FERR_10_TOT_AB': 'FERR_10_TOT_AB',
-                'MAG_4_TOT_AB': 'MAG_4_TOT_AB', 'MERR_4_TOT_AB': 'MERR_4_TOT_AB',
+                'CLASS_STAR': 'CLASS_STAR_OBJ',
             }
             ep_rows = ep_rows.rename(columns={k: v for k, v in rename.items() if k in ep_rows.columns})
 
@@ -216,15 +212,28 @@ def step_lightcurves(
             continue
 
         all_lcs = pd.concat(frames, ignore_index=True)
-        all_lcs["field"]      = field
-        all_lcs["filtercode"] = fc
-        all_lcs["ccdid"]      = ccd
-        all_lcs["qid"]        = qid_
-        all_lcs = _cast_lc_dtypes(all_lcs)
-        all_lcs = _add_quality_flags(all_lcs)
 
+        # Drop redundant / removed columns
+        drop = [c for c in _DROP_COLS if c in all_lcs.columns]
+        if drop:
+            all_lcs = all_lcs.drop(columns=drop)
+
+        all_lcs = _cast_lc_dtypes(all_lcs)
+
+        # Write parquet with quadrant identity and ZP info as file-level metadata
         lc_dir.mkdir(parents=True, exist_ok=True)
-        all_lcs.to_parquet(lc_out, index=False)
+        table = pa.Table.from_pandas(all_lcs, preserve_index=False)
+        existing_meta = table.schema.metadata or {}
+        extra_meta = {
+            b'field':      str(field).encode(),
+            b'filtercode': fc.encode(),
+            b'ccdid':      str(ccd).encode(),
+            b'qid':        str(qid_).encode(),
+            f'MAGZP_REF_{tag}'.encode():    str(magzp_ref_val).encode(),
+            f'MAGZPRMS_REF_{tag}'.encode(): str(magzprms_ref_val).encode(),
+        }
+        table = table.replace_schema_metadata({**existing_meta, **extra_meta})
+        pq.write_table(table, lc_out)
 
         n_obj = all_lcs['object_index'].nunique()
         logger.info(f"  → {n_obj} objects, {len(all_lcs)} rows → {lc_out}")
@@ -241,7 +250,7 @@ def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
     """
     Cross-calibrate and merge per-quadrant light curves for each band.
 
-    The quadrant with the most FLAG_CLEAN detection-epochs is adopted as the
+    The quadrant with the most clean detection-epochs is adopted as the
     photometric reference. All others are shifted by a median offset from
     stable common sources, then merged into LightCurves/merged/{band}/.
     """

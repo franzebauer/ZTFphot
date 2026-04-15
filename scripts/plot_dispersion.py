@@ -15,7 +15,7 @@ Fig 3 — Photometric precision and astrometric scatter (2×2):
 
 Key parquet columns used:
     MAG_4_TOT_AB, MERR_4_TOT_AB  — calibrated magnitude and error
-    FLAG_CLEAN, FLAG_DET          — quality flags
+    INFOBITS_DIF                  — quality flag (== 0 for clean epochs)
     CLASS_STAR                    — stellarity
     ALPHAWIN_REF, DELTAWIN_REF    — reference-catalog positions (for target match)
     ALPHA_OBJ, DELTA_OBJ          — per-epoch measured positions (for Δpos)
@@ -116,7 +116,7 @@ def make_fig3_precision(lc_path: Path, out_path: Path, tag: str = "",
 
     df[_MAG_COL] = pd.to_numeric(df[_MAG_COL], errors="coerce")
 
-    clean = df[df["FLAG_CLEAN"].astype(bool) & df["FLAG_DET"].astype(bool)].copy()
+    clean = df[df["INFOBITS_DIF"] == 0].copy()
 
     # ── per-source summary for top panels ─────────────────────────────────────
     agg = clean.groupby("object_index").agg(
