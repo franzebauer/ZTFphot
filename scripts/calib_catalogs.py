@@ -191,6 +191,21 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
 
     write = False
 
+    # ── Part 1: aperture correction from reference catalog (4px → 6px) ────────
+    # Uses calibration stars in the refcat; ref_zp cancels in the difference so
+    # this is purely MAG_APER_4px − MAG_APER_6px on the reference image PSF.
+    _apcorr_4_6 = 0.0
+    _ac_mask = (
+        (clas >= 0.7) &
+        (mag_ref_tot[1] > 14.) & (mag_ref_tot[1] < 19.0) &
+        (mag_ref_tot_err[1] < 0.3) &
+        is_good_calib
+    )
+    if _ac_mask.sum() >= 5:
+        _apcorr_4_6 = float(np.median(
+            mag_ref_tot[1][_ac_mask] - mag_ref_tot[2][_ac_mask]))
+        print(f"  AperCorr 4→6px: {_apcorr_4_6*1000:.1f} mmag  ({_ac_mask.sum()} stars)")
+
     for k in range(4):
         if len(n) == 0:
             continue
@@ -214,6 +229,9 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         flux_tot[k]     = np.float64(flux_ref_tot[k]) + np.float64(flux_dif_tmp)
 
         maginst  = np.float64(magzp_dif) - 2.5 * np.log10(flux_tot[k])
+        # ── Part 2: apply aperture correction (4px aperture only) ─────────────
+        if k == 1:
+            maginst = maginst - _apcorr_4_6
         magQi[k] = maginst
 
         errinst    = 1.0857 / (flux_tot[k] / flux_dif_err_tmp)
@@ -529,6 +547,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         head['CALIB_N']      = _hv(_calib_n)
         head['CALIB_M']      = _hv(_calib_m)
         head['CALIB_ZP']     = _hv(_calib_n + _calib_m * 17.0)
+        head['APCORR46']     = _hv(_apcorr_4_6 * 1000)        # mmag, 4px→6px
 
         head['NC_RMS0']      = _hv(_nc_rms0)
         head['NC_RMS1']      = _hv(_nc_rms1)
