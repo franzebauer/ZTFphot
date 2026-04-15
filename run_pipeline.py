@@ -352,6 +352,12 @@ def main() -> None:
     # find_quadrants() only finds files already on disk. With --purge-batch some or
     # all quadrants may not have been downloaded yet. Always merge the cache list so
     # every expected quadrant is processed (whether partially done or brand-new).
+    if args.purge_batch and epochs is None and args.ra is not None and args.dec is not None:
+        import pandas as _pd2
+        _bs = "-".join(sorted(args.bands or ["g", "i", "r"]))
+        _cp = base_dir / "Epochs" / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{_bs}.epochs.parquet"
+        if _cp.exists():
+            epochs = _pd2.read_parquet(_cp)
     if args.purge_batch and epochs is not None:
         _on_disk = {(q["field"], q["filtercode"], q["ccdid"], q["qid"]) for q in quadrants}
         _added: list = []
