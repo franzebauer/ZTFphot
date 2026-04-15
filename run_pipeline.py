@@ -359,10 +359,14 @@ def main() -> None:
                     int(_row["ccdid"]),  int(_row["qid"]))
             if _key not in _seen_q:
                 _seen_q.add(_key)
-                quadrants.append({"field": _key[0], "filtercode": _key[1],
-                                  "ccdid": _key[2], "qid": _key[3],
-                                  "ref_dir": base_dir / "Reference",
-                                  "sci_dir": base_dir / "Science"})
+                _f, _fc, _ccd, _qid = _key
+                quadrants.append({
+                    "field": _f, "filtercode": _fc, "ccdid": _ccd, "qid": _qid,
+                    "ref_dir": (base_dir / "Reference"
+                                / f"{_f:06d}" / _fc / f"ccd{_ccd:02d}" / f"q{_qid}"),
+                    "sci_dir": (base_dir / "Science"
+                                / f"{_f:06d}" / _fc / f"ccd{_ccd:02d}" / f"q{_qid}"),
+                })
         if quadrants:
             logger.info(f"purge-batch: {len(quadrants)} quadrant(s) derived from epoch cache "
                         f"(no files on disk yet)")
