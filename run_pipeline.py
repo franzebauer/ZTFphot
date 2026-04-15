@@ -349,7 +349,7 @@ def main() -> None:
         return
 
     remaining = [s for s in steps if s not in ("lookup", "download")]
-    if remaining and not quadrants:
+    if remaining and not quadrants and not args.purge_batch:
         sys.exit("No quadrants found on disk. Run lookup and download first.")
 
     logger.info(f"Quadrants ({len(quadrants)}):")
