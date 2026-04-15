@@ -348,28 +348,30 @@ def main() -> None:
         purge_images(base_dir, quadrants, sci=True, ref=True, dry_run=args.dry_run)
         return
 
-    # ── purge-batch on a fresh target: derive quadrants from epoch cache ─────────
-    # find_quadrants() only finds files already on disk. For a brand-new target
-    # nothing has been downloaded yet, so quadrants is empty and _run_purge_batch
-    # would silently do nothing. Derive the expected quadrant list from the cache.
-    if not quadrants and args.purge_batch and epochs is not None:
-        _seen_q: set = set()
+    # ── purge-batch: supplement on-disk quadrants with any missing from epoch cache ─
+    # find_quadrants() only finds files already on disk. With --purge-batch some or
+    # all quadrants may not have been downloaded yet. Always merge the cache list so
+    # every expected quadrant is processed (whether partially done or brand-new).
+    if args.purge_batch and epochs is not None:
+        _on_disk = {(q["field"], q["filtercode"], q["ccdid"], q["qid"]) for q in quadrants}
+        _added: list = []
         for _, _row in epochs[["field", "filtercode", "ccdid", "qid"]].drop_duplicates().iterrows():
             _key = (int(_row["field"]), str(_row["filtercode"]),
                     int(_row["ccdid"]),  int(_row["qid"]))
-            if _key not in _seen_q:
-                _seen_q.add(_key)
+            if _key not in _on_disk:
                 _f, _fc, _ccd, _qid = _key
-                quadrants.append({
+                _added.append({
                     "field": _f, "filtercode": _fc, "ccdid": _ccd, "qid": _qid,
                     "ref_dir": (base_dir / "Reference"
                                 / f"{_f:06d}" / _fc / f"ccd{_ccd:02d}" / f"q{_qid}"),
                     "sci_dir": (base_dir / "Science"
                                 / f"{_f:06d}" / _fc / f"ccd{_ccd:02d}" / f"q{_qid}"),
                 })
-        if quadrants:
-            logger.info(f"purge-batch: {len(quadrants)} quadrant(s) derived from epoch cache "
-                        f"(no files on disk yet)")
+        if _added:
+            quadrants.extend(_added)
+            logger.info(f"purge-batch: added {len(_added)} quadrant(s) from epoch cache "
+                        f"not yet on disk: "
+                        + ", ".join(f"{q['filtercode']}" for q in _added))
 
     remaining = [s for s in steps if s not in ("lookup", "download")]
     if remaining and not quadrants:
