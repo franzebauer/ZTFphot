@@ -228,7 +228,11 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         flux_ref_tot[k] = 10.0**(0.4 * (np.float64(magzp_dif) - np.float64(q_mag)))
         flux_tot[k]     = np.float64(flux_ref_tot[k]) + np.float64(flux_dif_tmp)
 
-        maginst  = np.float64(magzp_dif) - 2.5 * np.log10(flux_tot[k])
+        maginst  = np.where(
+            flux_tot[k] > 0,
+            np.float64(magzp_dif) - 2.5 * np.log10(np.maximum(flux_tot[k], 1e-30)),
+            np.nan,
+        )
         # ── Part 2: apply aperture correction (4px aperture only) ─────────────
         if k == 1:
             maginst = maginst - _apcorr_4_6
@@ -487,7 +491,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                              ra_all=alphafin.astype(float),
                              dec_all=deltafin.astype(float),
                              dm_all_pre=(maginst_all - q_mag_all).astype(float),
-                             dm_all_post=(Q_cal[k] - q_mag_all).astype(float))
+                             dm_all_post=(Q_cal[k] - q_mag_all).astype(float),
+                             apcorr_4_6=np.float64(_apcorr_4_6))
 
             interpolation = np.interp(Q_cal[k], median_mag_per_bin, rms_per_bin)
             Q_err[k]      = np.array([max(i, j) for i, j in zip(interpolation, errmagQi[k])])

@@ -74,7 +74,16 @@ def _stack_stage(epochs: list[dict], rk: str, dk: str, mk: str):
         if rk in e and mk in e:
             ras.append(e[rk])
             decs.append(e[dk])
-            dms.append(e[mk] * 1000)   # mag → mmag
+            dm = e[mk] * 1000   # mag → mmag
+            # dm_0 / dm_all_pre carry a bulk offset (aperture correction + any
+            # per-epoch ZP shift) that has not yet been removed.  Zero-centre
+            # each epoch independently so the spatial pattern is centred near
+            # zero.  This works for all NPZ files regardless of age.
+            if mk in ("dm_0", "dm_all_pre"):
+                epoch_med = float(np.nanmedian(dm[np.isfinite(dm)])) if np.any(np.isfinite(dm)) else 0.0
+                if np.isfinite(epoch_med):
+                    dm = dm - epoch_med
+            dms.append(dm)
     if not ras:
         return None, None, None
     return np.concatenate(ras), np.concatenate(decs), np.concatenate(dms)
@@ -94,7 +103,7 @@ def _bin_grid(ra, dec, dm, nbins, stat_fn):
         for j in range(nbins):
             sel = dm[(ri == i) & (di == j)]
             sel = sel[np.isfinite(sel)]
-            if len(sel) >= 3:
+            if len(sel) >= 1:
                 grid[j, i] = stat_fn(sel)
     return grid, ra_edges, dec_edges
 
