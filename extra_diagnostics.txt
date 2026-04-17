@@ -1,2 +1,1 @@
-how much does the target source position shift by in science images, compared to calibration stars, in pixels or arcsec.
-
+TODO LIST of diagnostics
