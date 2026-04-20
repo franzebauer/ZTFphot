@@ -209,7 +209,7 @@ data/                       ← created in your working directory on first run
 | Option | Description |
 |--------|-------------|
 | `--base-dir PATH` | Data directory (default: `./data`) |
-| `--ra / --dec` | Target RA/Dec (deg) — required for lookup, download, merge, and plots |
+| `--ra / --dec` | Target RA/Dec (deg) — required for lookup, download, merge, and plots - forced if no match |
 | `--bands zg zr zi` | Bands to process (default: all present on disk) |
 | `--field N` | Restrict to a specific ZTF field number |
 | `--ccdid N` | Restrict to a specific CCD |
