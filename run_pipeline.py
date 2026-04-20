@@ -128,7 +128,8 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             if "catalog" in steps:
                 step_make_catalog(base_dir, [q], force=args.force)
             if "simulate" in steps:
-                step_simulate(base_dir, [q], workers=args.workers, force=args.force)
+                step_simulate(base_dir, [q], workers=args.workers, force=args.force,
+                              target_ra=args.ra, target_dec=args.dec)
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose)
@@ -194,7 +195,8 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
 
             if "simulate" in steps:
                 step_simulate(base_dir, [q], workers=args.workers,
-                              force=args.force, filefracdays=ffds_set)
+                              force=args.force, filefracdays=ffds_set,
+                              target_ra=args.ra, target_dec=args.dec)
 
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
@@ -399,7 +401,8 @@ def main() -> None:
     else:
         if "funpack"    in steps: step_funpack(base_dir, force=args.force)
         if "catalog"    in steps: step_make_catalog(base_dir, quadrants, force=args.force)
-        if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force)
+        if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,
+                                                  target_ra=args.ra, target_dec=args.dec)
         if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
                                                   force=args.force, verbose=args.verbose)
     if "vet"        in steps: step_vet(base_dir, quadrants)

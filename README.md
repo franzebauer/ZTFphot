@@ -115,10 +115,10 @@ On systems with limited disk space, use `--purge-batch N` to process images in b
 
 ```bash
 # Full pipeline, 5 epochs at a time (~4 GB peak disk usage per quadrant):
-python run_pipeline.py --ra 0.20323 --dec -7.15322 --purge-batch 5 --workers 8
+python run_pipeline.py --ra 0.20323 --dec -7.15322 --purge-batch 10 --workers 8
 
 # Preview what would be deleted without touching disk:
-python run_pipeline.py --ra 0.20323 --dec -7.15322 --purge-batch 5 --dry-run
+python run_pipeline.py --ra 0.20323 --dec -7.15322 --purge-batch 10 --dry-run
 ```
 
 After a full run (without `--purge-batch`), you can also clean up imaging products retroactively:
@@ -313,7 +313,7 @@ The vet catalog is discovered automatically from its standard location in `data/
 - **Primary aperture**: k=1 (4 px diameter) → stored as `MAG_4_TOT_AB` / `FLUX_4_TOT_AB`
 - **Detection**: dual-image mode — detect on simulated image, measure on difference image
 - **Background**: `BACK_TYPE=MANUAL, BACK_VALUE=0.0` — difference images have zero mean background
-- **Source matching**: 3 arcsec radius (set empirically from nearest-neighbour separation distribution)
+- **Source matching**: 3 arcsec radius (adopted empirically from nearest-neighbour separation distribution)
 
 ---
 

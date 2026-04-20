@@ -108,7 +108,7 @@ def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False
 
 def _simulate_one(args: tuple) -> tuple[str, bool, str]:
     """Worker function for parallel simulate step."""
-    diff_path, refcat_path, sim_path = args
+    diff_path, refcat_path, sim_path, target_ra, target_dec = args
     import sys
     _scripts = Path(__file__).parent
     if str(_scripts) not in sys.path:
@@ -119,6 +119,8 @@ def _simulate_one(args: tuple) -> tuple[str, bool, str]:
             source_img=str(diff_path),
             source_cat=str(refcat_path),
             save_name=str(sim_path),
+            target_ra=target_ra,
+            target_dec=target_dec,
         )
         return (str(sim_path), True, "ok")
     except Exception as exc:
@@ -129,6 +131,8 @@ def step_simulate(
     base_dir: Path, quadrants: list[dict],
     workers: int = 4, force: bool = False,
     filefracdays: set | None = None,
+    target_ra: float | None = None,
+    target_dec: float | None = None,
 ) -> int:
     """Build a simulated detection image for each science epoch.
     filefracdays: if given, only process files matching those epoch IDs."""
@@ -149,7 +153,7 @@ def step_simulate(
             sim_path = diff_path.with_name(diff_path.stem + "_simulated.fits")
             if sim_path.exists() and not force:
                 continue
-            tasks.append((diff_path, refcat_path, sim_path))
+            tasks.append((diff_path, refcat_path, sim_path, target_ra, target_dec))
 
     if not tasks:
         logger.info("simulate: all simulated images already exist")

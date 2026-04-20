@@ -37,7 +37,8 @@ def makeGaussian(size, fwhm = 3, center=None):
 
     return np.exp(-4*np.log(2) * ((x-x0)**2 + (y-y0)**2) / fwhm**2)
 
-def build_simulated_image(source_img, source_cat,  save_name):
+def build_simulated_image(source_img, source_cat, save_name,
+                          target_ra=None, target_dec=None):
 
     difimg = fits.open(source_img)
     catalog = fits.open(source_cat)
@@ -63,6 +64,20 @@ def build_simulated_image(source_img, source_cat,  save_name):
 
             psf = makeGaussian(size=size, fwhm=fwhm, center=( size//2 + (x - x_), size//2 + (y - y_)) ) * intensity[idx]['FLUX_BEST']
             paint_psf(difimg[0].data, y_ , x_, psf)
+
+    if target_ra is not None and target_dec is not None:
+        tgt = SkyCoord(ra=target_ra, dec=target_dec, unit='deg')
+        seps = tgt.separation(catalog)
+        if seps.min().arcsec >= 3.0:
+            x, y = wcs.world_to_pixel(tgt)
+            x_, y_ = int(np.floor(x)), int(np.floor(y))
+            nrows, ncols = difimg[0].data.shape
+            if 0 <= x_ < ncols and 0 <= y_ < nrows:
+                clean_flux = intensity['FLUX_BEST'][intensity['FLAGS'] == 0]
+                med_flux = float(np.median(clean_flux)) if len(clean_flux) > 0 else 1.0
+                psf = makeGaussian(size=size, fwhm=fwhm,
+                                   center=(size//2 + (x - x_), size//2 + (y - y_))) * med_flux
+                paint_psf(difimg[0].data, y_, x_, psf)
 
     difimg.writeto(save_name, overwrite=True)
 

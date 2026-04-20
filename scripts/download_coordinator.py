@@ -97,7 +97,7 @@ REF_SUFFIXES = [
 
 # Max parallel download threads. IRSA handles ~40 concurrently without rate-limiting.
 # Each thread gets its own Session+ConnectionPool so they don't contend.
-DEFAULT_WORKERS = 40
+DEFAULT_WORKERS = 50
 
 # ---------------------------------------------------------------------------
 # Infobits quality masks
