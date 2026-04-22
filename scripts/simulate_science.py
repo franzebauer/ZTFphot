@@ -67,8 +67,11 @@ def build_simulated_image(source_img, source_cat, save_name,
 
     if target_ra is not None and target_dec is not None:
         tgt = SkyCoord(ra=target_ra, dec=target_dec, unit='deg')
-        seps = tgt.separation(catalog)
-        if seps.min().arcsec >= 3.0:
+        clean_mask = intensity['FLAGS'] == 0
+        painted_catalog = catalog[clean_mask]
+        no_clean_match = (len(painted_catalog) == 0 or
+                          tgt.separation(painted_catalog).min().arcsec >= 3.0)
+        if no_clean_match:
             x, y = wcs.world_to_pixel(tgt)
             x_, y_ = int(np.floor(x)), int(np.floor(y))
             nrows, ncols = difimg[0].data.shape
