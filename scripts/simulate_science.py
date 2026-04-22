@@ -56,22 +56,17 @@ def build_simulated_image(source_img, source_cat, save_name,
     difimg[0].data = np.reshape( list( map( lambda x: np.nan if np.isnan(x) else 0.0, difimg[0].data.flatten())), difimg[0].shape)
 
     for idx, object in enumerate(catalog):
-        if intensity[idx]['FLAGS'] == 0:
-            # Weirdness have to invert x and y
-            x, y = wcs.world_to_pixel(object)
+        # Weirdness have to invert x and y
+        x, y = wcs.world_to_pixel(object)
 
-            x_, y_ = int(np.floor(x)), int(np.floor(y)) # we need the int part
+        x_, y_ = int(np.floor(x)), int(np.floor(y)) # we need the int part
 
-            psf = makeGaussian(size=size, fwhm=fwhm, center=( size//2 + (x - x_), size//2 + (y - y_)) ) * intensity[idx]['FLUX_BEST']
-            paint_psf(difimg[0].data, y_ , x_, psf)
+        psf = makeGaussian(size=size, fwhm=fwhm, center=( size//2 + (x - x_), size//2 + (y - y_)) ) * intensity[idx]['FLUX_BEST']
+        paint_psf(difimg[0].data, y_ , x_, psf)
 
     if target_ra is not None and target_dec is not None:
         tgt = SkyCoord(ra=target_ra, dec=target_dec, unit='deg')
-        clean_mask = intensity['FLAGS'] == 0
-        painted_catalog = catalog[clean_mask]
-        no_clean_match = (len(painted_catalog) == 0 or
-                          tgt.separation(painted_catalog).min().arcsec >= 3.0)
-        if no_clean_match:
+        if len(catalog) == 0 or tgt.separation(catalog).min().arcsec >= 3.0:
             x, y = wcs.world_to_pixel(tgt)
             x_, y_ = int(np.floor(x)), int(np.floor(y))
             nrows, ncols = difimg[0].data.shape
