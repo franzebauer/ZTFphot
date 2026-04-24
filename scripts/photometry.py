@@ -106,6 +106,38 @@ def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False
 
 # ── Step 2: simulated detection images ───────────────────────────────────────
 
+def _write_assoc_catalog(ref_csv_path: Path, assoc_path: Path,
+                         target_ra: float | None = None,
+                         target_dec: float | None = None) -> None:
+    """Write a SExtractor ASSOC catalog (world coords, 1-based object_index).
+
+    Format per line: ``object_index RA Dec``
+    Index is 1-based so that SExtractor's unmatched default of 0 is
+    distinguishable from a real source.  If target_ra/target_dec is given and
+    lies ≥3″ from every reference source, the target is appended as the last
+    entry (index = N+1).
+    """
+    import numpy as np
+    import pandas as pd
+    ref = pd.read_csv(ref_csv_path)
+    ra_col  = 'ALPHAWIN_J2000' if 'ALPHAWIN_J2000' in ref.columns else 'RA'
+    dec_col = 'DELTAWIN_J2000' if 'DELTAWIN_J2000' in ref.columns else 'DEC'
+    ra  = pd.to_numeric(ref[ra_col],  errors='coerce').values.astype(float)
+    dec = pd.to_numeric(ref[dec_col], errors='coerce').values.astype(float)
+    with open(assoc_path, 'w') as f:
+        for i, (r, d) in enumerate(zip(ra, dec)):
+            f.write(f"{i + 1} {r:.8f} {d:.8f}\n")
+        if target_ra is not None and target_dec is not None:
+            from astropy.coordinates import SkyCoord
+            import astropy.units as u
+            tgt = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
+            valid = np.isfinite(ra) & np.isfinite(dec)
+            if valid.sum() == 0 or tgt.separation(
+                    SkyCoord(ra=ra[valid], dec=dec[valid], unit='deg')
+            ).min().arcsec >= 3.0:
+                f.write(f"{len(ref) + 1} {target_ra:.8f} {target_dec:.8f}\n")
+
+
 def _simulate_one(args: tuple) -> tuple[str, bool, str]:
     """Worker function for parallel simulate step."""
     diff_path, refcat_path, sim_path, target_ra, target_dec = args
@@ -200,7 +232,7 @@ def _sex_header_params(diff_path: Path) -> dict:
 
 def _sex_one(args: tuple) -> tuple[str, bool, str]:
     """Worker function for parallel SExtractor step."""
-    sim_path, diff_path, out_cat, sex_conf, sex_param, sex_nnw, verbose = args
+    sim_path, diff_path, out_cat, sex_conf, sex_param, sex_nnw, verbose, assoc_path = args
 
     hdr = _sex_header_params(diff_path)
     cmd = [
@@ -221,6 +253,16 @@ def _sex_one(args: tuple) -> tuple[str, bool, str]:
         "-PIXEL_SCALE",     str(hdr["PIXSCALE"]),
         "-VERBOSE_TYPE",    "FULL" if verbose else "QUIET",
     ]
+    if assoc_path is not None and Path(assoc_path).exists():
+        cmd += [
+            "-ASSOC_NAME",       str(assoc_path),
+            "-ASSOC_DATA",       "1",
+            "-ASSOC_PARAMS",     "2,3",
+            "-ASSOCCOORD_TYPE",  "WORLD",
+            "-ASSOC_RADIUS",     "3.0",
+            "-ASSOC_TYPE",       "NEAREST",
+            "-ASSOCSELEC_TYPE",  "MATCHED",
+        ]
     out_cat.parent.mkdir(parents=True, exist_ok=True)
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=120)
@@ -239,6 +281,8 @@ def step_sextractor(
     base_dir: Path, quadrants: list[dict],
     workers: int = 4, force: bool = False, verbose: bool = False,
     filefracdays: set | None = None,
+    target_ra: float | None = None,
+    target_dec: float | None = None,
 ) -> int:
     """Run SExtractor dual-image mode for every epoch.
     filefracdays: if given, only process files matching those epoch IDs."""
@@ -260,6 +304,18 @@ def step_sextractor(
             / f"{field:06d}"
             / fc / f"{ccd:02d}" / str(qid_)
         )
+
+        # Build (or reuse) the per-quadrant ASSOC catalog
+        ref_csv = (base_dir / "Catalogs"
+                   / f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(REFERENCE)[OBJECTS].csv")
+        assoc_path = (base_dir / "Catalogs"
+                      / f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(ASSOC).cat")
+        if ref_csv.exists():
+            _write_assoc_catalog(ref_csv, assoc_path,
+                                 target_ra=target_ra, target_dec=target_dec)
+        else:
+            assoc_path = None
+
         for sim_path in sorted(sci_dir.glob("*_simulated.fits")):
             if filefracdays is not None and _ffd_from_path(sim_path) not in filefracdays:
                 continue
@@ -271,7 +327,7 @@ def step_sextractor(
             if out_cat.exists() and not force:
                 continue
             tasks.append((sim_path, diff_path, out_cat,
-                          sex_conf, sex_param, sex_nnw, verbose))
+                          sex_conf, sex_param, sex_nnw, verbose, assoc_path))
 
     if not tasks:
         logger.info("SExtractor: all catalogs already exist")

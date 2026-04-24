@@ -150,6 +150,16 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     flux_dif     = table['FLUX_APER']
     flux_dif_err = table['FLUXERR_APER']
 
+    # ASSOC-mode object index (1-based; 0 = unmatched)
+    _va_raw = table['VECTOR_ASSOC'] if 'VECTOR_ASSOC' in table.colnames else None
+    if _va_raw is not None:
+        _va_flat = np.array(_va_raw)
+        if _va_flat.ndim > 1:
+            _va_flat = _va_flat[:, 0]
+        vector_assoc = _va_flat.astype(int)
+    else:
+        vector_assoc = np.zeros(len(table), dtype=int)
+
     # Match reference catalog to SExtractor detections
     img_coord = SkyCoord(ra=alpha, dec=delta, unit='deg')
     ind, ang, _ = match_coordinates_sky(cat_coord, img_coord, nthneighbor=1)
@@ -217,6 +227,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         deltafin  = delta[pos]
         class_star = clas[n]
         alpfin    = alp[pos]
+        vector_assoc_fin = vector_assoc[pos]
         dltfin    = dlt[pos]
 
         flux_dif_tmp     = flux_dif[:, k][pos]
@@ -535,6 +546,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         pf.Column(name='MERR_4_TOT_AB_org', format='D', array=errmagQi[1]),
         pf.Column(name='ALPHA_J2000',       format='D', array=alpfin),
         pf.Column(name='DELTA_J2000',       format='D', array=dltfin),
+        pf.Column(name='VECTOR_ASSOC',      format='J', array=vector_assoc_fin),
     ]
     pf.BinTableHDU.from_columns(cols).writeto(output_catalog, overwrite=True)
 

@@ -132,7 +132,8 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                               target_ra=args.ra, target_dec=args.dec)
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
-                                force=args.force, verbose=args.verbose)
+                                force=args.force, verbose=args.verbose,
+                                target_ra=args.ra, target_dec=args.dec)
             continue
 
         n_batches = math.ceil(len(q_epochs) / N)
@@ -201,7 +202,8 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose,
-                                filefracdays=ffds_set)
+                                filefracdays=ffds_set,
+                                target_ra=args.ra, target_dec=args.dec)
 
             # Purge: always remove sci products; ref only after first batch
             purge_images(base_dir, [q],
@@ -404,7 +406,8 @@ def main() -> None:
         if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,
                                                   target_ra=args.ra, target_dec=args.dec)
         if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
-                                                  force=args.force, verbose=args.verbose)
+                                                  force=args.force, verbose=args.verbose,
+                                                  target_ra=args.ra, target_dec=args.dec)
     if "vet"        in steps: step_vet(base_dir, quadrants)
 
     # Load flatfield from disk for each quadrant (used in calibrate)

@@ -46,7 +46,7 @@ import astropy.units as u
 logger = logging.getLogger(__name__)
 
 # ── Tuning parameters ─────────────────────────────────────────────────────────
-MAX_SEP_ARCSEC = 3.0      # cross-match radius for common sources
+MAX_SEP_ARCSEC = 1.5      # cross-match radius for common sources
 MIN_EPOCHS     = 5        # min clean epochs per source per quadrant
 STD_CUT        = 0.15     # max mag std to qualify as a stable calibration source
 MIN_COMMON     = 10       # min number of common stable sources required for offset

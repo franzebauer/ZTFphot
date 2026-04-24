@@ -25,6 +25,8 @@ DELTAWIN_J2000           #windowed declination (J2000)                          
 CLASS_STAR               #S/G classifier output
 
 FLAGS                    #Extraction flags
+NUMBER_ASSOC             #Number of ASSOCiated IDs
+VECTOR_ASSOC(1)          #ASSOCiated parameter vector
 #FLAGS_WEIGHT             Weighted extraction flags
 #FLAGS_WIN                Flags for WINdowed parameters
 #############
