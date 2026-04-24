@@ -107,7 +107,6 @@ def step_lightcurves(
     """
     import numpy as np
     from astropy.io import fits as pyfits
-    from astropy.coordinates import SkyCoord
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -142,10 +141,6 @@ def step_lightcurves(
 
         # Load reference catalog — provides object positions and per-source metadata
         ref = pd.read_csv(ref_csv)
-        ref_ra  = pd.to_numeric(ref.get('ALPHAWIN_J2000', ref.get('RA')), errors='coerce').values
-        ref_dec = pd.to_numeric(ref.get('DELTAWIN_J2000', ref.get('DEC')), errors='coerce').values
-        ref_coords = SkyCoord(ra=ref_ra, dec=ref_dec, unit='deg')
-
         # Per-source reference columns to carry into LC (MAGZP_REF/MAGZPRMS_REF → metadata)
         ref_cols = {}
         for src, dst in [('ALPHAWIN_J2000', 'ALPHAWIN_REF'), ('DELTAWIN_J2000', 'DELTAWIN_REF'),
@@ -173,28 +168,13 @@ def step_lightcurves(
             if tbl.empty:
                 continue
 
-            # Assign object_index via ASSOC (1-based; 0 = unmatched) when available,
-            # otherwise fall back to 3″ positional matching on ALPHAWIN_J2000.
-            if 'VECTOR_ASSOC' in tbl.columns:
-                assoc_id = pd.to_numeric(tbl['VECTOR_ASSOC'], errors='coerce').fillna(0).astype(int)
-                matched  = assoc_id > 0
-                if matched.sum() == 0:
-                    continue
-                ep_rows    = tbl[matched].copy().reset_index(drop=True)
-                ep_ref_idx = (assoc_id[matched].values - 1)  # convert to 0-based
-            else:
-                ep_ra  = pd.to_numeric(tbl.get('ALPHAWIN_J2000', tbl.get('ALPHA_J2000')), errors='coerce').values
-                ep_dec = pd.to_numeric(tbl.get('DELTAWIN_J2000', tbl.get('DELTA_J2000')), errors='coerce').values
-                valid  = np.isfinite(ep_ra) & np.isfinite(ep_dec)
-                if valid.sum() == 0:
-                    continue
-                ep_coords = SkyCoord(ra=ep_ra[valid], dec=ep_dec[valid], unit='deg')
-                ref_idx, sep, _ = ep_coords.match_to_catalog_sky(ref_coords)
-                matched = sep.arcsec < 3.0
-                if matched.sum() == 0:
-                    continue
-                ep_rows    = tbl[valid][matched].copy().reset_index(drop=True)
-                ep_ref_idx = ref_idx[matched]
+            # VECTOR_ASSOC is 1-based; ASSOCSELEC_TYPE=MATCHED guarantees all rows > 0.
+            assoc_id = pd.to_numeric(tbl['VECTOR_ASSOC'], errors='coerce').fillna(0).astype(int)
+            matched  = assoc_id > 0
+            if matched.sum() == 0:
+                continue
+            ep_rows    = tbl[matched].copy().reset_index(drop=True)
+            ep_ref_idx = (assoc_id[matched].values - 1)  # 1-based to 0-based
 
             # Epoch metadata (broadcast to all sources)
             for key in _EPOCH_KEYS:

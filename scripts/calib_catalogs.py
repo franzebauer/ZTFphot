@@ -160,11 +160,10 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     else:
         vector_assoc = np.zeros(len(table), dtype=int)
 
-    # Match reference catalog to SExtractor detections
-    img_coord = SkyCoord(ra=alpha, dec=delta, unit='deg')
-    ind, ang, _ = match_coordinates_sky(cat_coord, img_coord, nthneighbor=1)
-    ang0 = np.array(ang)
-    n    = np.where(ang0 < 0.00083333)[0]   # 3.0 arcsec
+    # VECTOR_ASSOC is 1-based; ASSOCSELEC_TYPE=MATCHED guarantees all rows > 0.
+    matched_mask = vector_assoc > 0
+    n   = vector_assoc[matched_mask] - 1  # 0-based ref catalog indices
+    pos = np.where(matched_mask)[0]        # sexout row indices
 
     # Reference frame centre for polynomial normalisation
     ra0  = float(np.mean(raref))
@@ -173,9 +172,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     # Find target in matched-source array (same position for all apertures)
     tgt_in_matched = -1
     if target_ra is not None and target_dec is not None and len(n) > 0:
-        _pos0   = ind[n]
-        _ra_m   = np.array(alpha[_pos0])
-        _dec_m  = np.array(delta[_pos0])
+        _ra_m   = np.array(alpha[pos])
+        _dec_m  = np.array(delta[pos])
         _sep_sq = (_ra_m - target_ra)**2 + (_dec_m - target_dec)**2
         _j = int(np.argmin(_sep_sq))
         if np.sqrt(_sep_sq[_j]) < 3.0 / 3600.0:
@@ -220,7 +218,6 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         if len(n) == 0:
             continue
 
-        pos       = ind[n]
         flags_tmp = flags[pos]
         flagsfin  = flags_tmp
         alphafin  = alpha[pos]

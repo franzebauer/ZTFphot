@@ -259,7 +259,7 @@ def _sex_one(args: tuple) -> tuple[str, bool, str]:
             "-ASSOC_DATA",       "1",
             "-ASSOC_PARAMS",     "2,3",
             "-ASSOCCOORD_TYPE",  "WORLD",
-            "-ASSOC_RADIUS",     "3.0",
+            "-ASSOC_RADIUS",     "0.5",
             "-ASSOC_TYPE",       "NEAREST",
             "-ASSOCSELEC_TYPE",  "MATCHED",
         ]
