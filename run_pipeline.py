@@ -4,7 +4,6 @@ run_pipeline.py — ZTF difference-image photometry pipeline
 Steps (run in order, or select with --steps):
     lookup       — query IRSA for field/epoch coverage and cache results
     download     — fetch science and reference images from IRSA
-    funpack      — decompress .fits.fz difference images
     catalog      — build reference CSV catalogs from refsexcat.fits
     simulate     — build simulated detection images (PSF at reference positions)
     sex          — SExtractor dual-image aperture photometry
@@ -41,7 +40,7 @@ if str(_SCRIPTS) not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-ALL_STEPS = ["lookup", "download", "funpack", "catalog", "simulate", "sex",
+ALL_STEPS = ["lookup", "download", "catalog", "simulate", "sex",
              "vet", "calibrate", "flatfield", "lightcurves", "merge", "plots"]
 
 
@@ -74,7 +73,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
     import math
     import pandas as pd
     from download_coordinator import download_all, purge_images, filter_epochs
-    from photometry import step_funpack, step_make_catalog, step_simulate, step_sextractor
+    from photometry import step_make_catalog, step_simulate, step_sextractor
 
     N = args.purge_batch
     steps = set(args.steps)
@@ -186,9 +185,6 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 band = fc[1:]   # zg→g, zr→r, zi→i
                 download_all(batch, base_dir=base_dir, bands=[band],
                              max_workers=args.workers)
-
-            if "funpack" in steps:
-                step_funpack(base_dir, force=args.force, filefracdays=ffds_set)
 
             if "catalog" in steps and not catalog_done:
                 step_make_catalog(base_dir, [q], force=args.force)
@@ -392,7 +388,7 @@ def main() -> None:
         logger.info(f"  {q['field']:06d} {q['filtercode']} ccd{q['ccdid']:02d} q{q['qid']}")
 
     # ── Import step modules ───────────────────────────────────────────────────
-    from photometry  import step_funpack, step_make_catalog, step_simulate, step_sextractor
+    from photometry  import step_make_catalog, step_simulate, step_sextractor
     from calibrate   import step_vet, step_calibrate, step_build_flatfield
     from lightcurves import step_lightcurves, step_merge
 
@@ -401,7 +397,6 @@ def main() -> None:
     if args.purge_batch and any(s in steps for s in ("funpack", "catalog", "simulate", "sex")):
         _run_purge_batch(base_dir, epochs, quadrants, args)
     else:
-        if "funpack"    in steps: step_funpack(base_dir, force=args.force)
         if "catalog"    in steps: step_make_catalog(base_dir, quadrants, force=args.force)
         if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,
                                                   target_ra=args.ra, target_dec=args.dec)

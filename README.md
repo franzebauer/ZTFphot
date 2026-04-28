@@ -65,7 +65,7 @@ By default, all pipeline data is written to `data/` in your current working dire
 python /path/to/ZTFphot/run_pipeline.py --ra 182.635755 --dec 39.405849
 ```
 
-This runs all steps in order: field lookup → image download → decompress → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → re-calibrate → light curves → merge → plots.
+This runs all steps in order: field lookup → image download → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → re-calibrate → light curves → merge → plots.
 
 ### Common quality cuts for download (all optional)
 
@@ -101,7 +101,7 @@ python run_pipeline.py --steps lookup download \
     --ra 182.635755 --dec 39.405849 --workers 8
 
 # 2. Prepare images and run SExtractor (requires ztf env)
-python run_pipeline.py --steps funpack catalog simulate sex \
+python run_pipeline.py --steps catalog simulate sex \
     --ra 182.635755 --dec 39.405849 --workers 8
 
 # 3. Calibrate → flatfield → re-calibrate → light curves
@@ -199,7 +199,6 @@ data/                       ← created in your working directory on first run
 |------|----------|-------------|
 | Field lookup | `lookup` | Query IRSA for ZTF field/CCD/quadrant coverage at the target position |
 | Download | `download` | Fetch science and reference images from IRSA |
-| Decompress | `funpack` | Decompress `.fits.fz` difference images |
 | Reference catalog | `catalog` | Build reference CSV from `refsexcat.fits` |
 | Simulate | `simulate` | Build simulated detection images (PSF at reference positions; injects target if absent from reference catalog) |
 | SExtractor | `sex` | Dual-image aperture photometry on difference images |

@@ -39,38 +39,6 @@ DEFAULT_PIXEL_SCALE = 1.01   # arcsec/pixel for ZTF
 _SEX_DIR = Path(__file__).parent / "SExtractor"
 
 
-# ── Step 0: funpack ───────────────────────────────────────────────────────────
-
-def step_funpack(base_dir: Path, force: bool = False,
-                 filefracdays: set | None = None) -> int:
-    """Decompress .fits.fz files under base_dir/Science/.
-    filefracdays: if given, only process files matching those epoch IDs."""
-    sci_root = base_dir / "Science"
-    fz_files = sorted(sci_root.rglob("*.fits.fz"))
-    if filefracdays is not None:
-        fz_files = [f for f in fz_files if _ffd_from_path(f) in filefracdays]
-
-    if not fz_files:
-        logger.info("No .fits.fz files found — nothing to funpack")
-        return 0
-
-    n_done = n_skip = 0
-    for fz in fz_files:
-        unpacked = fz.with_name(fz.name.replace(".fits.fz", ".fits"))
-        if unpacked.exists() and not force:
-            n_skip += 1
-            continue
-        result = subprocess.run(["funpack", "-D", str(fz)], capture_output=True)
-        if result.returncode == 0:
-            n_done += 1
-            logger.debug(f"Funpacked: {fz.name}")
-        else:
-            logger.warning(f"funpack failed on {fz.name}: {result.stderr.decode().strip()}")
-
-    logger.info(f"Funpack: {n_done} files unpacked, {n_skip} already exist")
-    return n_done
-
-
 # ── Step 1: reference CSV catalogs ───────────────────────────────────────────
 
 def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False) -> int:
