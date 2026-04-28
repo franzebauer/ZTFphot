@@ -53,7 +53,7 @@ An IRSA account is free at [irsa.ipac.caltech.edu](https://irsa.ipac.caltech.edu
 
 ### 4. Data directory
 
-All pipeline data is written to `data/` in your current working directory, created automatically on first use. To use a different location pass `--base-dir /path/to/data` to any command.
+By default, all pipeline data is written to `data/` in your current working directory, created automatically on first use. To use a different location pass `--base-dir /path/to/data` to any command.
 
 ---
 
@@ -62,7 +62,7 @@ All pipeline data is written to `data/` in your current working directory, creat
 ### Full pipeline from scratch
 
 ```bash
-python /path/to/ZTFphot/run_pipeline.py --ra 330.34158 --dec 0.72143
+python /path/to/ZTFphot/run_pipeline.py --ra 182.635755 --dec 39.405849
 ```
 
 This runs all steps in order: field lookup → image download → decompress → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → re-calibrate → light curves → merge → plots.
@@ -70,7 +70,7 @@ This runs all steps in order: field lookup → image download → decompress →
 ### Common quality cuts for download (all optional)
 
 ```bash
-python run_pipeline.py --ra 330.34158 --dec 0.72143 \
+python run_pipeline.py --ra 182.635755 --dec 39.405849 \
     --max-seeing 3.0          \  # skip epochs with seeing FWHM > 3.0 arcsec
     --min-maglim 19.5         \  # skip epochs with 5σ limiting mag < 19.5
     --mjd-min 59000           \  # skip epochs before this MJD
@@ -86,7 +86,7 @@ Steps are idempotent — existing outputs are skipped unless `--force` is passed
 ```bash
 # Re-calibrate and rebuild light curves for one quadrant
 python run_pipeline.py --steps calibrate lightcurves \
-    --ra 330.34158 --dec 0.72143 \
+    --ra 182.635755 --dec 39.405849 \
     --field 443 --bands zg --ccdid 16 --qid 2 --workers 8 --force
 
 # Check what's on disk
@@ -98,15 +98,15 @@ python run_pipeline.py --status
 ```bash
 # 1. Lookup + download (no SExtractor needed)
 python run_pipeline.py --steps lookup download \
-    --ra 330.34158 --dec 0.72143 --workers 8
+    --ra 182.635755 --dec 39.405849 --workers 8
 
 # 2. Prepare images and run SExtractor (requires ztf env)
 python run_pipeline.py --steps funpack catalog simulate sex \
-    --ra 330.34158 --dec 0.72143 --workers 8
+    --ra 182.635755 --dec 39.405849 --workers 8
 
 # 3. Calibrate → flatfield → re-calibrate → light curves
 python run_pipeline.py --steps calibrate flatfield calibrate lightcurves \
-    --ra 330.34158 --dec 0.72143 --workers 8 --force
+    --ra 182.635755 --dec 39.405849 --workers 8 --force
 ```
 
 ### Low-disk mode
@@ -115,10 +115,10 @@ On systems with limited disk space, use `--purge-batch N` to process images in b
 
 ```bash
 # Full pipeline, 5 epochs at a time (~4 GB peak disk usage per quadrant):
-python run_pipeline.py --ra 0.20323 --dec -7.15322 --purge-batch 10 --workers 8
+python run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --workers 8
 
 # Preview what would be deleted without touching disk:
-python run_pipeline.py --ra 0.20323 --dec -7.15322 --purge-batch 10 --dry-run
+python run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --dry-run
 ```
 
 After a full run (without `--purge-batch`), you can also clean up imaging products retroactively:
@@ -148,17 +148,26 @@ ZTFphot/                    ← this repository
     ztf_field_lookup.py
     download_coordinator.py
     photometry.py
+    simulate_science.py
+    make_catalog.py
+    calib_catalogs.py
     calibrate.py
     lightcurves.py
-    calib_catalogs.py
+    merge_fields.py
     vet_calibration_stars.py
+    transient_catalog.py
+    plot_calibration.py
+    plot_diagnostics.py
+    plot_lightcurve.py
+    plot_precision.py
+    plot_residuals.py
     SExtractor/
 
 data/                       ← created in your working directory on first run
   Epochs/                   ← IRSA epoch cache and download logs
   Science/                  ← difference images per field/fc/ccd/qid
   Reference/                ← reference images and catalogs
-  Catalogs/                 ← reference star CSV catalogs
+  Catalogs/                 ← reference star CSV catalogs and ASSOC position catalogs
   SExCatalogs/              ← SExtractor LDAC output
   Calibrated/               ← calibrated FITS catalogs per epoch
   FlatfieldResiduals/       ← per-epoch NPZ residual maps
@@ -172,6 +181,7 @@ data/                       ← created in your working directory on first run
 |--------|------|
 | Epoch metadata | `data/Epochs/lookup_{ra}_{dec}_{bands}.epochs.parquet` |
 | Reference catalog | `data/Catalogs/{field}_{fc}_c{ccd}_q{qid}(REFERENCE)[OBJECTS].csv` |
+| ASSOC position catalog | `data/Catalogs/{field}_{fc}_c{ccd}_q{qid}(ASSOC).cat` |
 | SEx LDAC catalogs | `data/SExCatalogs/000/{field}/{fc}/{ccd}/{qid}/*.fits` |
 | Calibrated FITS | `data/Calibrated/000/{field}/{fc}/{ccd}/{qid}/*_cal.fits` |
 | NPZ residuals | `data/FlatfieldResiduals/000/{field}/{fc}/{ccd}/{qid}/*_resid.npz` |
@@ -191,7 +201,7 @@ data/                       ← created in your working directory on first run
 | Download | `download` | Fetch science and reference images from IRSA |
 | Decompress | `funpack` | Decompress `.fits.fz` difference images |
 | Reference catalog | `catalog` | Build reference CSV from `refsexcat.fits` |
-| Simulate | `simulate` | Build simulated detection images (PSF at reference positions) |
+| Simulate | `simulate` | Build simulated detection images (PSF at reference positions; injects target if absent from reference catalog) |
 | SExtractor | `sex` | Dual-image aperture photometry on difference images |
 | Vet | `vet` | Flag variable/bad calibration stars by multi-epoch RMS |
 | Calibrate | `calibrate` | Linear ZP → 3σ clip → faint correction → 2D polynomial → flatfield |
@@ -313,15 +323,14 @@ The vet catalog is discovered automatically from its standard location in `data/
 - **Primary aperture**: k=1 (4 px diameter) → stored as `MAG_4_TOT_AB` / `FLUX_4_TOT_AB`
 - **Detection**: dual-image mode — detect on simulated image, measure on difference image
 - **Background**: `BACK_TYPE=MANUAL, BACK_VALUE=0.0` — difference images have zero mean background
-- **Source matching**: 3 arcsec radius (adopted empirically from nearest-neighbour separation distribution)
+- **Source identification**: SExtractor ASSOC mode with `ASSOCSELEC_TYPE=MATCHED`; each detection is tagged with a 1-based reference catalog index (`VECTOR_ASSOC`) carried through to the calibrated FITS and parquet light curves as `object_index`. Match radius is 0.5 arcsec (PSFs are painted at exact reference positions, so the WCS round-trip error is the only tolerance needed).
 
 ---
 
-## TODO
+## Standalone utilities
 
-The following scripts exist in `scripts/` but are not yet implemented:
+These scripts are not wired into `run_pipeline.py` but can be run directly:
 
-| Script | Planned function |
-|--------|-----------------|
-| `forced_photometry.py` | Forced-position photometry at the target RA/Dec across all epochs, including non-detections |
-| `transient_catalog.py` | Build a catalog of transient/variable candidates from the merged light curves |
+| Script | Function |
+|--------|----------|
+| `transient_catalog.py` | Augments the reference SExtractor catalog with additional sources (e.g. from TNS or a user CSV) before the simulate step. Needed when the target brightened after the ZTF reference epoch and is therefore absent from the reference catalog. Pass `--refsexcat` and `--input` (or `--ra/--dec` for a TNS cone search) to produce an augmented catalog for `simulate_science.py`. |
