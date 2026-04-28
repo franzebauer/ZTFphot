@@ -291,6 +291,68 @@ The vet catalog is discovered automatically from its standard location in `data/
 
 ---
 
+## Light curve parquet columns
+
+### Per-quadrant (`LightCurves/{field}/{fc}/ccd{ccd}/q{qid}/lightcurves.parquet`)
+
+#### Source identity (reference catalog)
+| Column | Type | Description |
+|--------|------|-------------|
+| `ALPHAWIN_REF` | float64 | Reference catalog RA (deg) |
+| `DELTAWIN_REF` | float64 | Reference catalog Dec (deg) |
+| `object_index` | int32 | 0-based index into the reference catalog |
+
+#### Per-detection measurement
+| Column | Type | Description |
+|--------|------|-------------|
+| `ALPHA_OBJ` | float64 | Measured RA of detection (deg); less precise than `ALPHAWIN_REF` |
+| `DELTA_OBJ` | float64 | Measured Dec of detection (deg); less precise than `DELTAWIN_REF` |
+| `CLASS_STAR_OBJ` | float32 | SExtractor star/galaxy classifier (0=galaxy, 1=star) |
+| `MAG_3_TOT_AB` | float32 | Calibrated AB mag, 3 px diameter aperture |
+| `MERR_3_TOT_AB` | float32 | Magnitude error, 3 px aperture |
+| `MAG_4_TOT_AB` | float32 | Calibrated AB mag, 4 px diameter aperture (primary) |
+| `MERR_4_TOT_AB` | float32 | Magnitude error, 4 px aperture |
+| `MAG_6_TOT_AB` | float32 | Calibrated AB mag, 6 px diameter aperture |
+| `MERR_6_TOT_AB` | float32 | Magnitude error, 6 px aperture |
+| `MAG_10_TOT_AB` | float32 | Calibrated AB mag, 10 px diameter aperture |
+| `MERR_10_TOT_AB` | float32 | Magnitude error, 10 px aperture |
+| `MAG_4_TOT_AB_org` | float32 | Raw (pre-calibration) 4 px magnitude |
+| `MERR_4_TOT_AB_org` | float32 | Raw magnitude error, 4 px aperture |
+
+#### Per-epoch metadata (broadcast from image header)
+| Column | Type | Description |
+|--------|------|-------------|
+| `OBSMJD` | float64 | Observation MJD |
+| `AIRMASS` | float32 | Airmass at time of observation |
+| `SEEING` | float32 | Seeing FWHM (arcsec) |
+| `MAGLIM` | float32 | 5σ limiting magnitude |
+| `MAGZP_DIF` | float32 | ZTF photometric zero point |
+| `MAGZPRMS_DIF` | float32 | Zero point RMS |
+| `CLRCOEFF` | float32 | Color coefficient (already applied internally by ZTF) |
+| `NMATCHES` | int32 | Number of calibration stars used |
+| `INFOBITS_DIF` | int32 | Image quality flags (see ZTF documentation) |
+| `APCORR46` | float32 | Aperture correction from 4 px to 6 px (mag) |
+
+File-level metadata keys: `field`, `filtercode`, `ccdid`, `qid`, `MAGZP_REF_{tag}`, `MAGZPRMS_REF_{tag}`.
+
+---
+
+### Merged (`LightCurves/merged/{ra}_{dec}/{fc}/lightcurves_merged.parquet`)
+
+Contains all per-quadrant columns above, with `norm_offset` added directly to all `MAG_*` columns so that magnitudes from different field/ccdid/qids are normalized to a common photometric scale throughout. Plus:
+
+| Column        | Type    | Description |
+|---------------|---------|-------------|
+| `field`       | int64   | ZTF field number |
+| `filtercode`  | str     | Filter code (`zg`, `zr`, `zi`) |
+| `ccdid`       | int64   | CCD number |
+| `qid`         | int64   | Quadrant number |
+| `norm_offset` | float32 | Offset (mag) added to all `MAG_*` columns to bring this quadrant onto the dominant scale; 0.0 for the dominant quadrant |
+
+File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each contributing quadrant, plus `dominant_quadrant` (e.g. `000521_zg_c15_q3`) identifying the photometric reference quadrant.
+
+---
+
 ## Calibrated FITS header keywords
 
 | Keyword | Description |

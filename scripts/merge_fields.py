@@ -6,30 +6,28 @@ Cross-calibrate and merge per-quadrant light curve parquets for one band.
 Algorithm
 ---------
 1.  Load all per-quadrant lightcurves.parquet files for the requested band.
-2.  Use MAG_4_TOT_AB directly as calibrated magnitude.
-3.  Determine the **dominant quadrant**: the one with the most clean epochs
+2.  Determine the **dominant quadrant**: the one with the most clean epochs
     (INFOBITS_DIF == 0).
-4.  For every non-dominant quadrant, find sources common to both quadrants
+3.  For every non-dominant quadrant, find sources common to both quadrants
     (matched within MAX_SEP arcsec).  Keep only stable non-variable sources
     (std_mag < STD_CUT, N_clean >= MIN_EPOCHS in both quadrants).
-5.  Compute the median magnitude offset:
+4.  Compute the median magnitude offset:
         offset = median( median_mag_dominant[source] - median_mag_minority[source] )
-    over all common stable sources.  Apply offset to the minority parquet's
-    calibrated magnitude column.
-6.  Concatenate all quadrants (with origin columns), sort by OBSMJD, and
+    over all common stable sources.  Apply offset directly to all MAG_* columns
+    in the minority parquet.
+5.  Concatenate all quadrants (with origin columns), sort by OBSMJD, and
     write to LightCurves/merged/{band}/lightcurves_merged.parquet.
 
 Output parquet extra columns (beyond per-quadrant schema)
 ----------------------------------------------------------
-    mag_calib     float32   MAG_4_TOT_AB + normalization offset
-    mag_calib_err float32   MERR_4_TOT_AB
-    norm_offset   float32   offset applied to bring this quadrant onto dominant scale
-    quadrant_id   str       "{field:06d}_{filtercode}_c{ccdid:02d}_q{qid}"
-    is_dominant   bool      True for the dominant quadrant
-    field         Int32     origin field number
+    norm_offset   float32   offset applied to all MAG_* columns (0.0 for dominant quadrant)
+    field         int64     origin field number
     filtercode    str       origin filter code
-    ccdid         Int32     origin CCD ID
-    qid           Int32     origin quadrant ID
+    ccdid         int64     origin CCD ID
+    qid           int64     origin quadrant ID
+
+File-level metadata key added:
+    dominant_quadrant   "{field:06d}_{filtercode}_c{ccdid:02d}_q{qid}"
 """
 
 from __future__ import annotations
@@ -52,19 +50,22 @@ STD_CUT        = 0.15     # max mag std to qualify as a stable calibration sourc
 MIN_COMMON     = 10       # min number of common stable sources required for offset
 
 
+_MAG_COLS = ['MAG_3_TOT_AB', 'MAG_4_TOT_AB', 'MAG_6_TOT_AB', 'MAG_10_TOT_AB', 'MAG_4_TOT_AB_org']
+
+
 def _per_source_stats(df: pd.DataFrame, min_epochs: int = MIN_EPOCHS) -> pd.DataFrame:
     """
     Return one row per object_index with ra, dec, n_clean, median_mag, std_mag.
     Only sources with n_clean >= min_epochs are returned.
     """
-    clean = df[(df['INFOBITS_DIF'] == 0) & df['mag_calib'].notna()].copy()
+    clean = df[(df['INFOBITS_DIF'] == 0) & df['MAG_4_TOT_AB'].notna()].copy()
     stats = (clean.groupby('object_index')
              .agg(
                  ra        =('ALPHAWIN_REF', 'first'),
                  dec       =('DELTAWIN_REF', 'first'),
-                 n_clean   =('mag_calib', 'count'),
-                 median_mag=('mag_calib', 'median'),
-                 std_mag   =('mag_calib', 'std'),
+                 n_clean   =('MAG_4_TOT_AB', 'count'),
+                 median_mag=('MAG_4_TOT_AB', 'median'),
+                 std_mag   =('MAG_4_TOT_AB', 'std'),
              )
              .reset_index())
     return stats[stats['n_clean'] >= min_epochs]
@@ -173,11 +174,10 @@ def merge_band(
 
         df = pf.to_pandas()
         # Restore origin columns from quadrant dict (stored as metadata in per-quadrant files)
-        df['field']      = field
-        df['filtercode'] = fc
-        df['ccdid']      = ccd
-        df['qid']        = qid
-        df['quadrant_id'] = f"{field:06d}_{fc}_c{ccd:02d}_q{qid}"
+        df['field']       = field
+        df['filtercode']  = fc
+        df['ccdid']       = ccd
+        df['qid']         = qid
         df['norm_offset'] = np.float32(0.0)
         frames.append(df)
 
@@ -185,42 +185,36 @@ def merge_band(
         logger.warning(f"merge [{band}]: fewer than 2 quadrants with data — nothing to merge")
         return None
 
-    # ── 2. Set mag_calib from MAG_4_TOT_AB ───────────────────────────────────
-    for df in frames:
-        df['mag_calib']     = pd.to_numeric(df['MAG_4_TOT_AB'],  errors='coerce').astype('float32')
-        df['mag_calib_err'] = pd.to_numeric(df.get('MERR_4_TOT_AB', pd.Series(dtype='float32')),
-                                            errors='coerce').astype('float32')
-
-    # ── 3. Determine dominant quadrant ───────────────────────────────────────
+    # ── 2. Determine dominant quadrant ───────────────────────────────────────
     def _n_clean_epochs(df: pd.DataFrame) -> int:
         return int((df['INFOBITS_DIF'] == 0).sum())
 
+    def _quad_tag(df: pd.DataFrame) -> str:
+        return (f"{int(df['field'].iloc[0]):06d}_{df['filtercode'].iloc[0]}"
+                f"_c{int(df['ccdid'].iloc[0]):02d}_q{int(df['qid'].iloc[0])}")
+
     n_clean = [_n_clean_epochs(df) for df in frames]
     dom_idx = int(np.argmax(n_clean))
-    logger.info(f"merge [{band}]: dominant quadrant = {frames[dom_idx]['quadrant_id'].iloc[0]} "
-                f"({n_clean[dom_idx]} clean det-epochs)")
+    dom_tag = _quad_tag(frames[dom_idx])
+    logger.info(f"merge [{band}]: dominant quadrant = {dom_tag} ({n_clean[dom_idx]} clean det-epochs)")
     for i, (df, n) in enumerate(zip(frames, n_clean)):
-        logger.info(f"  {'[DOM]' if i == dom_idx else '     '} "
-                    f"{df['quadrant_id'].iloc[0]}: {n} clean det-epochs")
+        logger.info(f"  {'[DOM]' if i == dom_idx else '     '} {_quad_tag(df)}: {n} clean det-epochs")
 
-    frames[dom_idx]['is_dominant'] = True
-    for i, df in enumerate(frames):
-        if i != dom_idx:
-            df['is_dominant'] = False
-
-    # ── 4 & 5. Compute and apply normalization offsets ────────────────────────
+    # ── 3 & 4. Compute and apply normalization offsets to all MAG_* columns ──
     stats_dom = _per_source_stats(frames[dom_idx])
 
     for i, df in enumerate(frames):
         if i == dom_idx:
             continue
-        qid_str = df['quadrant_id'].iloc[0]
+        qid_str = _quad_tag(df)
         try:
             stats_min = _per_source_stats(df)
             offset, n_used = _compute_offset(stats_dom, stats_min)
             logger.info(f"merge [{band}]: offset {qid_str} → dominant = "
                         f"{offset:+.4f} mag  (N_common={n_used})")
-            df['mag_calib']   = (df['mag_calib'] + offset).astype('float32')
+            for col in _MAG_COLS:
+                if col in df.columns:
+                    df[col] = (pd.to_numeric(df[col], errors='coerce') + offset).astype('float32')
             df['norm_offset'] = np.float32(offset)
         except ValueError as exc:
             logger.warning(f"merge [{band}]: cannot normalize {qid_str}: {exc}. "
@@ -234,10 +228,14 @@ def merge_band(
 
     import pyarrow as pa
     table = pa.Table.from_pandas(merged, preserve_index=False)
-    table = table.replace_schema_metadata({**all_meta, **(table.schema.metadata or {})})
+    table = table.replace_schema_metadata({
+        **all_meta,
+        **(table.schema.metadata or {}),
+        b'dominant_quadrant': dom_tag.encode(),
+    })
     pq_io.write_table(table, out_path)
 
-    n_src_quads = merged.groupby(['quadrant_id', 'object_index']).ngroups
+    n_src_quads = merged.groupby(['field', 'filtercode', 'ccdid', 'qid', 'object_index']).ngroups
     logger.info(f"merge [{band}]: {len(merged)} rows, {n_src_quads} source×quadrant combinations "
                 f"→ {out_path}")
     return out_path
