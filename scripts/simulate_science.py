@@ -48,35 +48,36 @@ def build_simulated_image(source_img, source_cat, save_name,
     size = 25
     # size = (np.ceil(fwhm) // 2 * 4 + 1)
 
+    _FIXED_FLUX = 1000  # all sources painted at the same flux; only positions matter
+
     wcs = WCS(difimg[0].header)
-    intensity = Table(catalog[1].data)['FLAGS', 'FLUX_BEST']
     catalog = Table(catalog[1].data)
     catalog = SkyCoord(ra=catalog['ALPHAWIN_J2000'], dec=catalog['DELTAWIN_J2000'], unit='deg')
 
-    difimg[0].data = np.reshape( list( map( lambda x: np.nan if np.isnan(x) else 0.0, difimg[0].data.flatten())), difimg[0].shape)
+    data = np.zeros(difimg[0].data.shape, dtype=np.float32)
+    # preserve NaN mask from the diff image (bad pixels / edge regions)
+    nan_mask = np.isnan(difimg[0].data)
 
-    for idx, object in enumerate(catalog):
-        # Weirdness have to invert x and y
+    for object in catalog:
         x, y = wcs.world_to_pixel(object)
-
-        x_, y_ = int(np.floor(x)), int(np.floor(y)) # we need the int part
-
-        psf = makeGaussian(size=size, fwhm=fwhm, center=( size//2 + (x - x_), size//2 + (y - y_)) ) * intensity[idx]['FLUX_BEST']
-        paint_psf(difimg[0].data, y_ , x_, psf)
+        x_, y_ = int(np.floor(x)), int(np.floor(y))
+        psf = makeGaussian(size=size, fwhm=fwhm, center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX
+        paint_psf(data, y_, x_, psf)
 
     if target_ra is not None and target_dec is not None:
         tgt = SkyCoord(ra=target_ra, dec=target_dec, unit='deg')
         if len(catalog) == 0 or tgt.separation(catalog).min().arcsec >= 3.0:
             x, y = wcs.world_to_pixel(tgt)
             x_, y_ = int(np.floor(x)), int(np.floor(y))
-            nrows, ncols = difimg[0].data.shape
+            nrows, ncols = data.shape
             if 0 <= x_ < ncols and 0 <= y_ < nrows:
-                clean_flux = intensity['FLUX_BEST'][intensity['FLAGS'] == 0]
-                med_flux = float(np.median(clean_flux)) if len(clean_flux) > 0 else 1.0
                 psf = makeGaussian(size=size, fwhm=fwhm,
-                                   center=(size//2 + (x - x_), size//2 + (y - y_))) * med_flux
-                paint_psf(difimg[0].data, y_, x_, psf)
+                                   center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX
+                paint_psf(data, y_, x_, psf)
 
+    data = np.clip(data, 0, 32767).astype(np.int16)
+    data[nan_mask] = 0  # replace NaNs with 0; int16 has no NaN
+    difimg[0].data = data
     difimg.writeto(save_name, overwrite=True)
 
 
