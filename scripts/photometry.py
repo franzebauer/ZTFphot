@@ -282,7 +282,9 @@ def step_sextractor(
             _write_assoc_catalog(ref_csv, assoc_path,
                                  target_ra=target_ra, target_dec=target_dec)
         else:
-            assoc_path = None
+            logger.warning(f"Reference catalog missing for {field:06d}_{fc}_c{ccd:02d}_q{qid_} "
+                           f"— skipping SExtractor (run catalog step first)")
+            continue
 
         for sim_path in sorted(sci_dir.glob("*_simulated.fits")):
             if filefracdays is not None and _ffd_from_path(sim_path) not in filefracdays:
