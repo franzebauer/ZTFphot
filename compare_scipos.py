@@ -91,7 +91,8 @@ def compare_quadrant(ref_pq: Path, sci_pq: Path, out_path: Path, tag: str) -> No
     ax.set_title("Magnitude offset (sci − ref)")
     ax.legend(fontsize=9)
     ax.grid(True, lw=0.3, alpha=0.5)
-
+    ax.set_ylim(-0.02,0.02)
+    
     # ── Right: scatter improvement ──────────────────────────────────────────
     ax = axes[1]
     c = np.where(d_sigma < 0, "forestgreen", "tomato")
@@ -106,7 +107,8 @@ def compare_quadrant(ref_pq: Path, sci_pq: Path, out_path: Path, tag: str) -> No
     ax.set_title(f"Scatter change (sci − ref)   {n_better}/{len(common)} sources improved")
     ax.legend(fontsize=9)
     ax.grid(True, lw=0.3, alpha=0.5)
-
+    ax.set_ylim(-10,10)
+    
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")

@@ -148,6 +148,7 @@ ZTFphot/                    ← this repository
     ztf_field_lookup.py
     download_coordinator.py
     photometry.py
+    photometry_scipos.py
     simulate_science.py
     make_catalog.py
     calib_catalogs.py
@@ -168,11 +169,15 @@ data/                       ← created in your working directory on first run
   Science/                  ← difference images per field/fc/ccd/qid
   Reference/                ← reference images and catalogs
   Catalogs/                 ← reference star CSV catalogs and ASSOC position catalogs
-  SExCatalogs/              ← SExtractor LDAC output
-  Calibrated/               ← calibrated FITS catalogs per epoch
-  FlatfieldResiduals/       ← per-epoch NPZ residual maps
-  LightCurves/              ← assembled light curves (parquet)
-  Plots/                    ← diagnostic plots per target and quadrant
+  SExCatalogs/              ← SExtractor LDAC output (ref-pos)
+  SExCatalogs_sci/          ← SExtractor LDAC output (sci-pos)
+  Calibrated/               ← calibrated FITS catalogs per epoch (ref-pos)
+  Calibrated_sci/           ← calibrated FITS catalogs per epoch (sci-pos)
+  FlatfieldResiduals/       ← per-epoch NPZ residual maps (ref-pos)
+  FlatfieldResiduals_sci/   ← per-epoch NPZ residual maps (sci-pos)
+  LightCurves/              ← assembled light curves (parquet); both variants share this root
+  Plots/                    ← diagnostic plots (ref-pos)
+  Plots_sci/                ← diagnostic plots (sci-pos)
 ```
 
 ### Output file locations
@@ -200,8 +205,10 @@ data/                       ← created in your working directory on first run
 | Field lookup | `lookup` | Query IRSA for ZTF field/CCD/quadrant coverage at the target position |
 | Download | `download` | Fetch science and reference images from IRSA |
 | Reference catalog | `catalog` | Build reference CSV from `refsexcat.fits` |
-| Simulate | `simulate` | Build simulated detection images (PSF at reference positions; injects target if absent from reference catalog) |
-| SExtractor | `sex` | Dual-image aperture photometry on difference images |
+| Simulate (ref-pos) | `simulate` | Build simulated detection images (PSF at reference positions; injects target if absent from reference catalog) |
+| SExtractor (ref-pos) | `sex` | Dual-image aperture photometry on difference images using reference positions |
+| Simulate (sci-pos) | `simulate_sci` | Build simulated detection images from per-epoch science sexcat positions |
+| SExtractor (sci-pos) | `sex_sci` | Dual-image aperture photometry using science-image positions (1.5 arcsec ASSOC radius) |
 | Vet | `vet` | Flag variable/bad calibration stars by multi-epoch RMS |
 | Calibrate | `calibrate` | Linear ZP → 3σ clip → faint correction → 2D polynomial → flatfield |
 | Flatfield | `flatfield` | Rebuild spatial flatfield from post-polynomial residuals |
@@ -251,6 +258,15 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--ff-min-count N` | Minimum detections per flatfield bin to use (default: 5) |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
 
+### Photometry variant
+
+| Option | Description |
+|--------|-------------|
+| `--scipos` | Run calibrate/lightcurves/plots using sci-pos photometry (reads `SExCatalogs_sci/`, writes `Calibrated_sci/`, `Plots_sci/`) |
+| `--both` | Run simulate+sex for both ref-pos and sci-pos (sharing the same diff images), then run calibrate/lightcurves/plots for both variants in sequence |
+
+With `--both` and `--purge-batch`, sci-pos steps run within each batch before the diff images are deleted.
+
 ### Disk management
 
 | Option | Description |
@@ -293,6 +309,15 @@ The vet catalog is discovered automatically from its standard location in `data/
 
 ## Light curve parquet columns
 
+Two variants are produced per quadrant, sharing the same `LightCurves/` root but with different filenames:
+
+| File | Positions used | Epoch position column |
+|------|----------------|-----------------------|
+| `lightcurves.parquet` | Reference catalog (fixed) | — (dropped; centroid on simulated PSF is not meaningful) |
+| `lightcurves_sci.parquet` | Per-epoch science sexcat | `ALPHA_SCI`, `DELTA_SCI` |
+
+Both files share the same `object_index` and can be joined on `(object_index, OBSMJD)`. Sources not detected in the science image for a given epoch are absent from `lightcurves_sci.parquet` for that epoch (no forced photometry).
+
 ### Per-quadrant (`LightCurves/{field}/{fc}/ccd{ccd}/q{qid}/lightcurves.parquet`)
 
 #### Source identity (reference catalog)
@@ -305,8 +330,6 @@ The vet catalog is discovered automatically from its standard location in `data/
 #### Per-detection measurement
 | Column | Type | Description |
 |--------|------|-------------|
-| `ALPHA_OBJ` | float64 | Measured RA of detection (deg); less precise than `ALPHAWIN_REF` |
-| `DELTA_OBJ` | float64 | Measured Dec of detection (deg); less precise than `DELTAWIN_REF` |
 | `CLASS_STAR_OBJ` | float32 | SExtractor star/galaxy classifier (0=galaxy, 1=star) |
 | `MAG_3_TOT_AB` | float32 | Calibrated AB mag, 3 px diameter aperture |
 | `MERR_3_TOT_AB` | float32 | Magnitude error, 3 px aperture |
@@ -334,6 +357,15 @@ The vet catalog is discovered automatically from its standard location in `data/
 | `APCORR46` | float32 | Aperture correction from 4 px to 6 px (mag) |
 
 File-level metadata keys: `field`, `filtercode`, `ccdid`, `qid`, `MAGZP_REF_{tag}`, `MAGZPRMS_REF_{tag}`.
+
+### Per-quadrant sci-pos (`LightCurves/{field}/{fc}/ccd{ccd}/q{qid}/lightcurves_sci.parquet`)
+
+Identical schema to the ref-pos file above, with one addition:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `ALPHA_SCI` | float64 | Science-image RA of detection (deg) |
+| `DELTA_SCI` | float64 | Science-image Dec of detection (deg) |
 
 ---
 
@@ -395,3 +427,5 @@ These scripts are not wired into `run_pipeline.py` but can be run directly:
 | Script | Function |
 |--------|----------|
 | `transient_catalog.py` | Augments the reference SExtractor catalog with additional sources (e.g. from TNS or a user CSV) before the simulate step. Needed when the target brightened after the ZTF reference epoch and is therefore absent from the reference catalog. Pass `--refsexcat` and `--input` (or `--ra/--dec` for a TNS cone search) to produce an augmented catalog for `simulate_science.py`. |
+| `compare_scipos.py` | Compares ref-pos and sci-pos photometry for all quadrants that have both `lightcurves.parquet` and `lightcurves_sci.parquet`. Produces a two-panel plot per quadrant: magnitude offset (sci − ref) and scatter difference (σ_sci − σ_ref) vs magnitude, with binned median curves. Run: `python compare_scipos.py --base-dir data --ra RA --dec DEC [--band zg]` |
+| `migrate_parquets.py` | Converts old-format merged parquets (containing `mag_calib`, `quadrant_id`, `is_dominant` columns) to the current schema. Accepts files and/or directories as arguments. Use `--dry-run` to preview. |
