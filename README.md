@@ -62,7 +62,7 @@ By default, all pipeline data is written to `data/` in your current working dire
 ### Full pipeline from scratch
 
 ```bash
-python /path/to/ZTFphot/run_pipeline.py --ra 182.635755 --dec 39.405849
+python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849
 ```
 
 This runs all steps in order: field lookup → image download → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → re-calibrate → light curves → merge → plots.
@@ -70,7 +70,7 @@ This runs all steps in order: field lookup → image download → reference cata
 ### Common quality cuts for download (all optional)
 
 ```bash
-python run_pipeline.py --ra 182.635755 --dec 39.405849 \
+python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849 \
     --max-seeing 3.0          \  # skip epochs with seeing FWHM > 3.0 arcsec
     --min-maglim 19.5         \  # skip epochs with 5σ limiting mag < 19.5
     --mjd-min 59000           \  # skip epochs before this MJD
@@ -85,27 +85,27 @@ Steps are idempotent — existing outputs are skipped unless `--force` is passed
 
 ```bash
 # Re-calibrate and rebuild light curves for one quadrant
-python run_pipeline.py --steps calibrate lightcurves \
+python ZTFphot/scripts/run_pipeline.py --steps calibrate lightcurves \
     --ra 182.635755 --dec 39.405849 \
     --field 443 --bands zg --ccdid 16 --qid 2 --workers 8 --force
 
 # Check what's on disk
-python run_pipeline.py --status
+python ZTFphot/scripts/run_pipeline.py --status
 ```
 
 ### Recommended workflow for a new field
 
 ```bash
 # 1. Lookup + download (no SExtractor needed)
-python run_pipeline.py --steps lookup download \
+python ZTFphot/scripts/run_pipeline.py --steps lookup download \
     --ra 182.635755 --dec 39.405849 --workers 8
 
 # 2. Prepare images and run SExtractor (requires ztf env)
-python run_pipeline.py --steps catalog simulate sex \
+python ZTFphot/scripts/run_pipeline.py --steps catalog simulate sex \
     --ra 182.635755 --dec 39.405849 --workers 8
 
 # 3. Calibrate → flatfield → re-calibrate → light curves
-python run_pipeline.py --steps calibrate flatfield calibrate lightcurves \
+python ZTFphot/scripts/run_pipeline.py --steps calibrate flatfield calibrate lightcurves \
     --ra 182.635755 --dec 39.405849 --workers 8 --force
 ```
 
@@ -115,17 +115,17 @@ On systems with limited disk space, use `--purge-batch N` to process images in b
 
 ```bash
 # Full pipeline, 5 epochs at a time (~4 GB peak disk usage per quadrant):
-python run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --workers 8
+python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --workers 8
 
 # Preview what would be deleted without touching disk:
-python run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --dry-run
+python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --dry-run
 ```
 
 After a full run (without `--purge-batch`), you can also clean up imaging products retroactively:
 
 ```bash
-python run_pipeline.py --clean-up          # delete all imaging products
-python run_pipeline.py --clean-up --dry-run  # preview first
+python ZTFphot/scripts/run_pipeline.py --clean-up          # delete all imaging products
+python ZTFphot/scripts/run_pipeline.py --clean-up --dry-run  # preview first
 ```
 
 **Typical disk budget** (10 quadrants, ~400 epochs each):
@@ -143,8 +143,9 @@ python run_pipeline.py --clean-up --dry-run  # preview first
 
 ```
 ZTFphot/                    ← this repository
-  run_pipeline.py
   scripts/
+    run_pipeline.py         ← main entry point
+    batch_pipeline.py       ← batch processing for lists of targets
     ztf_field_lookup.py
     download_coordinator.py
     photometry.py
@@ -157,6 +158,9 @@ ZTFphot/                    ← this repository
     merge_fields.py
     vet_calibration_stars.py
     transient_catalog.py
+    compare_scipos.py
+    migrate_parquets.py
+    find_corrupt_simulated.py
     plot_calibration.py
     plot_diagnostics.py
     plot_lightcurve.py
@@ -296,10 +300,10 @@ Within `calibrate`, each epoch is corrected in five stages:
 Bad reference stars inflate calibration scatter. After an initial calibration run:
 
 ```bash
-python scripts/vet_calibration_stars.py \
+python ZTFphot/scripts/vet_calibration_stars.py \
     --field 443 --band zg --ccd 16 --qid 2
 
-python run_pipeline.py --steps calibrate flatfield lightcurves plots \
+python ZTFphot/scripts/run_pipeline.py --steps calibrate flatfield lightcurves plots \
     --field 443 --bands zg --ccdid 16 --qid 2 --workers 8 --force
 ```
 
@@ -422,10 +426,11 @@ File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each
 
 ## Standalone utilities
 
-These scripts are not wired into `run_pipeline.py` but can be run directly:
+These scripts are not wired into `run_pipeline.py` but can be run directly from the `scripts/` directory:
 
 | Script | Function |
 |--------|----------|
 | `transient_catalog.py` | Augments the reference SExtractor catalog with additional sources (e.g. from TNS or a user CSV) before the simulate step. Needed when the target brightened after the ZTF reference epoch and is therefore absent from the reference catalog. Pass `--refsexcat` and `--input` (or `--ra/--dec` for a TNS cone search) to produce an augmented catalog for `simulate_science.py`. |
-| `compare_scipos.py` | Compares ref-pos and sci-pos photometry for all quadrants that have both `lightcurves.parquet` and `lightcurves_sci.parquet`. Produces a two-panel plot per quadrant: magnitude offset (sci − ref) and scatter difference (σ_sci − σ_ref) vs magnitude, with binned median curves. Run: `python compare_scipos.py --base-dir data --ra RA --dec DEC [--band zg]` |
+| `compare_scipos.py` | Compares ref-pos and sci-pos photometry for all quadrants that have both `lightcurves.parquet` and `lightcurves_sci.parquet`. Produces a two-panel plot per quadrant: magnitude offset (sci − ref) and scatter difference (σ_sci − σ_ref) vs magnitude, with binned median curves. Run: `python ZTFphot/scripts/compare_scipos.py --base-dir data --ra RA --dec DEC [--band zg]` |
+| `batch_pipeline.py` | Process a list of RA/Dec targets in sequence, keeping only the final LC parquets and plots for each. Run: `python ZTFphot/scripts/batch_pipeline.py coords.txt [--both] [--bands g r] [--workers 20]` |
 | `migrate_parquets.py` | Converts old-format merged parquets (containing `mag_calib`, `quadrant_id`, `is_dominant` columns) to the current schema. Accepts files and/or directories as arguments. Use `--dry-run` to preview. |

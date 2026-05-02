@@ -34,7 +34,7 @@ import numpy as np
 warnings.filterwarnings("ignore", category=FutureWarning,
                         message=".*DataFrame concatenation with empty or all-NA entries.*")
 
-_SCRIPTS = Path(__file__).parent / "scripts"
+_SCRIPTS = Path(__file__).parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
