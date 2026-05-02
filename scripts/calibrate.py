@@ -20,9 +20,10 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def _cal_quad_dir(base_dir: Path, field: int, fc: str, ccd: int, qid: int) -> Path:
-    """Return the Calibrated per-quadrant directory (same layout as Calibrated FITS files)."""
-    return (base_dir / "Calibrated"
+def _cal_quad_dir(base_dir: Path, field: int, fc: str, ccd: int, qid: int,
+                  suffix: str = "") -> Path:
+    """Return the Calibrated per-quadrant directory."""
+    return (base_dir / f"Calibrated{suffix}"
             / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid))
 
 
@@ -106,17 +107,18 @@ def step_calibrate(
     target_ra: Optional[float] = None,
     target_dec: Optional[float] = None,
     save_residuals: bool = False,
+    suffix: str = "",
 ) -> int:
     """
     Apply per-epoch photometric calibration (linear ZP → 3σ clip → faint
     correction → 2D polynomial → flatfield) to every SExtractor LDAC catalog.
 
-    Reads from  SExCatalogs/{prefix}/{field}/{fc}/{ccd}/{qid}/*_sexout.fits
-    Writes to   Calibrated/{prefix}/{field}/{fc}/{ccd}/{qid}/*_cal.fits
+    Reads from  SExCatalogs{suffix}/{field}/{fc}/{ccd}/{qid}/*_sexout.fits
+    Writes to   Calibrated{suffix}/{field}/{fc}/{ccd}/{qid}/*_cal.fits
     """
     cat_dir  = base_dir / "Catalogs"
-    sex_root = base_dir / "SExCatalogs"
-    cal_root = base_dir / "Calibrated"
+    sex_root = base_dir / f"SExCatalogs{suffix}"
+    cal_root = base_dir / f"Calibrated{suffix}"
 
     tasks = []
     for q in quadrants:
@@ -143,6 +145,7 @@ def step_calibrate(
                 continue
 
             # Auto-discover vet catalog if not explicitly provided
+            # Always look in the standard Calibrated/ dir (not _sci) for vet catalog
             vet_cat = None
             if vet_catalog is not None and vet_catalog.exists():
                 vet_cat = vet_catalog
@@ -153,7 +156,7 @@ def step_calibrate(
 
             resid_out = None
             if save_residuals:
-                resid_dir = (base_dir / "FlatfieldResiduals"
+                resid_dir = (base_dir / f"FlatfieldResiduals{suffix}"
                              / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid_))
                 resid_dir.mkdir(parents=True, exist_ok=True)
                 resid_out = resid_dir / ldac.name.replace("_sexout.fits", "_resid.npz")
@@ -195,6 +198,7 @@ def step_calibrate(
 def step_build_flatfield(
     base_dir: Path, quadrants: list[dict],
     nbins: int = 20, min_count: int = 50,
+    suffix: str = "",
 ) -> dict:
     """
     Stack per-epoch NPZ residual files from step_calibrate(save_residuals=True)
@@ -210,7 +214,7 @@ def step_build_flatfield(
         field = q["field"]; fc = q["filtercode"]
         ccd = q["ccdid"]; qid_ = q["qid"]
 
-        resid_dir = (base_dir / "FlatfieldResiduals"
+        resid_dir = (base_dir / f"FlatfieldResiduals{suffix}"
                      / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid_))
         resid_files = sorted(resid_dir.glob("*.npz")) if resid_dir.exists() else []
 
@@ -266,7 +270,7 @@ def step_build_flatfield(
                   ra_edges=ra_e.astype(np.float64),
                   dec_edges=dec_e.astype(np.float64))
 
-        out_path = _cal_quad_dir(base_dir, field, fc, ccd, qid_) / "flatfield.npz"
+        out_path = _cal_quad_dir(base_dir, field, fc, ccd, qid_, suffix) / "flatfield.npz"
         np.savez(str(out_path), **ff, nobs=nobs.astype(np.int32))
         logger.info(f"flatfield saved → {out_path}")
 

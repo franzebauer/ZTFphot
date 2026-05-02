@@ -129,6 +129,7 @@ def merge_band(
     quadrants: list[dict],
     force: bool = False,
     out_dir: Optional[Path] = None,
+    lc_suffix: str = "",
 ) -> Optional[Path]:
     """
     Cross-calibrate and merge all quadrant light curves for one band.
@@ -162,7 +163,7 @@ def merge_band(
         if q['filtercode'] != band:
             continue
         field, fc, ccd, qid = q['field'], q['filtercode'], q['ccdid'], q['qid']
-        pq_path = lc_root / f"{field:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid}" / 'lightcurves.parquet'
+        pq_path = lc_root / f"{field:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid}" / f'lightcurves{lc_suffix}.parquet'
         if not pq_path.exists():
             logger.warning(f"merge [{band}]: parquet missing for {field:06d} {fc} c{ccd:02d} q{qid} — skipped")
             continue

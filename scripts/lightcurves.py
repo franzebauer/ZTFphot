@@ -29,7 +29,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     float64_cols = [
         'OBSMJD',
         'ALPHAWIN_REF', 'DELTAWIN_REF',
-        'ALPHA_OBJ', 'DELTA_OBJ',
+        'ALPHA_SCI', 'DELTA_SCI',
     ]
     float32_cols = [
         'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
@@ -68,7 +68,7 @@ _EPOCH_KEYS = [
 
 # Columns to drop before writing (redundant, derivable, or replaced by metadata)
 _DROP_COLS = {
-    'ALPHAWIN_J2000', 'DELTAWIN_J2000',   # renamed to ALPHA_OBJ / DELTA_OBJ
+    'ALPHAWIN_J2000', 'DELTAWIN_J2000',   # dropped in ref-pos; renamed to ALPHA_SCI/DELTA_SCI in sci-pos
     'FLAGS',                               # = FLAG_SE_DIF; dropped
     'FLUX_3_TOT_AB', 'FERR_3_TOT_AB',
     'FLUX_4_TOT_AB', 'FERR_4_TOT_AB',
@@ -94,6 +94,7 @@ def step_lightcurves(
     base_dir: Path, quadrants: list[dict],
     force: bool = False,
     use_calibrated: bool = True,
+    suffix: str = "",
 ) -> int:
     """
     Assemble light curves from calibrated per-epoch FITS for each quadrant.
@@ -120,7 +121,7 @@ def step_lightcurves(
         tag = f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}"
 
         lc_dir = lc_root / f"{field:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid_}"
-        lc_out = lc_dir / "lightcurves.parquet"
+        lc_out = lc_dir / f"lightcurves{suffix}.parquet"
 
         if lc_out.exists() and not force:
             n_skip += 1
@@ -131,7 +132,7 @@ def step_lightcurves(
             logger.warning(f"Reference catalog not found: {ref_csv}")
             continue
 
-        cal_dir   = base_dir / "Calibrated" / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid_)
+        cal_dir   = base_dir / f"Calibrated{suffix}" / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid_)
         cal_files = sorted(cal_dir.glob("*_cal.fits"))
         if not cal_files:
             logger.warning(f"No calibrated FITS found in {cal_dir}")
@@ -186,11 +187,11 @@ def step_lightcurves(
 
             ep_rows['object_index'] = ep_ref_idx
 
-            # Rename cal.fits measurement columns to LC schema
-            rename = {
-                'ALPHAWIN_J2000': 'ALPHA_OBJ', 'DELTAWIN_J2000': 'DELTA_OBJ',
-                'CLASS_STAR': 'CLASS_STAR_OBJ',
-            }
+            # Rename cal.fits measurement columns to LC schema.
+            # Sci-pos: keep epoch positions as ALPHA_SCI/DELTA_SCI.
+            # Ref-pos: drop them (meaningless centroid on simulated PSF); _DROP_COLS handles removal.
+            pos_rename = {'ALPHAWIN_J2000': 'ALPHA_SCI', 'DELTAWIN_J2000': 'DELTA_SCI'} if suffix == "_sci" else {}
+            rename = {'CLASS_STAR': 'CLASS_STAR_OBJ', **pos_rename}
             ep_rows = ep_rows.rename(columns={k: v for k, v in rename.items() if k in ep_rows.columns})
 
             frames.append(ep_rows)
@@ -234,7 +235,8 @@ def step_lightcurves(
 # ── Step: merge quadrants ─────────────────────────────────────────────────────
 
 def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
-               target_ra: float | None = None, target_dec: float | None = None) -> None:
+               target_ra: float | None = None, target_dec: float | None = None,
+               suffix: str = "") -> None:
     """
     Cross-calibrate and merge per-quadrant light curves for each band.
 
@@ -259,6 +261,6 @@ def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
         if target_ra is None or target_dec is None:
             logger.error("merge: --ra and --dec are required to determine output directory")
             continue
-        out_dir = lc_root / "merged" / f"{target_ra:.5f}_{target_dec:+.5f}" / band
+        out_dir = lc_root / "merged" / f"{target_ra:.5f}_{target_dec:+.5f}" / f"{band}{suffix}"
         merge_band(lc_root=lc_root, band=band, quadrants=band_qs, force=force,
-                   out_dir=out_dir)
+                   out_dir=out_dir, lc_suffix=suffix)
