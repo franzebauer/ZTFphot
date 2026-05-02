@@ -523,39 +523,39 @@ def main() -> None:
                 lc_path   = (base_dir / "LightCurves" / f"{f:06d}" / fc
                              / f"ccd{ccd:02d}" / f"q{qid_}" / f"lightcurves{suffix}.parquet")
 
-            has_cal   = cal_dir.exists()   and any(cal_dir.glob("*_cal.fits"))
-            has_resid = resid_dir.exists() and any(resid_dir.glob("*_resid.npz"))
-            has_lc    = lc_path.exists()
+                has_cal   = cal_dir.exists()   and any(cal_dir.glob("*_cal.fits"))
+                has_resid = resid_dir.exists() and any(resid_dir.glob("*_resid.npz"))
+                has_lc    = lc_path.exists()
 
-            if has_resid:
-                make_spatial_rms(resid_dir,
-                                 plot_root / f"spatial_rms_{tag}.png", tag)
-                make_spatial_iqr(resid_dir,
-                                 plot_root / f"spatial_IQR_{tag}.png", tag)
-            else:
-                logger.info(f"  [{tag}] no residual NPZ files — skipping spatial_rms/IQR")
+                if has_resid:
+                    make_spatial_rms(resid_dir,
+                                     plot_root / f"spatial_rms_{tag}.png", tag)
+                    make_spatial_iqr(resid_dir,
+                                     plot_root / f"spatial_IQR_{tag}.png", tag)
+                else:
+                    logger.info(f"  [{tag}] no residual NPZ files — skipping spatial_rms/IQR")
 
-            if has_cal:
-                make_rms(cal_dir,
-                              plot_root / f"rms_{tag}.png", tag)
-            else:
-                logger.info(f"  [{tag}] no calibrated FITS — skipping rms")
+                if has_cal:
+                    make_rms(cal_dir,
+                             plot_root / f"rms_{tag}.png", tag)
+                else:
+                    logger.info(f"  [{tag}] no calibrated FITS — skipping rms")
 
-            if has_lc:
-                vet_cat = (base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)) / "vet_calib_stars.fits"
-                vet_cat_arg = vet_cat if vet_cat.exists() else None
-                make_precision(lc_path,
-                                    plot_root / f"precision_{tag}.png",
-                                    tag, args.ra, args.dec,
-                                    vet_catalog=vet_cat_arg)
-                if args.ra is not None and args.dec is not None:
-                    make_lightcurves(lc_path,
-                                          plot_root / f"lightcurves_{tag}.png",
-                                          args.ra, args.dec,
-                                          tag=tag,
-                                          vet_catalog=vet_cat_arg)
-            else:
-                logger.info(f"  [{tag}] no light-curve parquet — skipping precision/lightcurves")
+                if has_lc:
+                    vet_cat = (base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)) / "vet_calib_stars.fits"
+                    vet_cat_arg = vet_cat if vet_cat.exists() else None
+                    make_precision(lc_path,
+                                   plot_root / f"precision_{tag}.png",
+                                   tag, args.ra, args.dec,
+                                   vet_catalog=vet_cat_arg)
+                    if args.ra is not None and args.dec is not None:
+                        make_lightcurves(lc_path,
+                                         plot_root / f"lightcurves_{tag}.png",
+                                         args.ra, args.dec,
+                                         tag=tag,
+                                         vet_catalog=vet_cat_arg)
+                else:
+                    logger.info(f"  [{tag}] no light-curve parquet — skipping precision/lightcurves")
 
     logger.info(f"Done in {time.time() - t0:.1f}s")
     _print_status(base_dir, quadrants)
