@@ -41,21 +41,47 @@ _COMP_COLORS = ["C1", "C2", "C3", "C4", "C5"]
 
 
 def _find_target(clean: pd.DataFrame, tgt_coord: SkyCoord):
-    """Return (object_index, median_mag) of the closest source to tgt_coord."""
+    """Return (object_index, median_mag, sep_arcsec) of closest source to tgt_coord.
+
+    sep_arcsec is always the nearest-source distance regardless of the 3\" threshold,
+    so callers can report it even when the target is not found.
+    """
     if "ALPHAWIN_REF" not in clean.columns:
-        return None, np.nan
+        return None, np.nan, np.nan
     srcs = clean.groupby("object_index")[["ALPHAWIN_REF", "DELTAWIN_REF"]].first().dropna()
     if srcs.empty:
-        return None, np.nan
+        return None, np.nan, np.nan
     cats = SkyCoord(ra=srcs["ALPHAWIN_REF"].values * u.deg,
                     dec=srcs["DELTAWIN_REF"].values * u.deg)
     idx, sep, _ = tgt_coord.match_to_catalog_sky(cats)
-    if sep[0].arcsec > 3.0:
-        return None, np.nan
+    sep_arcsec = float(sep[0].arcsec)
+    if sep_arcsec > 3.0:
+        return None, np.nan, sep_arcsec
     tgt_obj  = srcs.index[int(idx)]
     tgt_mags = pd.to_numeric(
         clean.loc[clean["object_index"] == tgt_obj, _MAG_COL], errors="coerce")
-    return tgt_obj, float(tgt_mags.median())
+    return tgt_obj, float(tgt_mags.median()), sep_arcsec
+
+
+def _make_no_target_plot(out_path: Path, tag: str,
+                         target_ra: float, target_dec: float,
+                         sep_arcsec: float) -> None:
+    """Generate a placeholder figure when the target is not found in the parquet."""
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.set_visible(False)
+    sep_str = f"{sep_arcsec:.1f}\"" if np.isfinite(sep_arcsec) else "unknown"
+    msg = (f"Target not found in {tag}\n"
+           f"RA = {target_ra:.5f}   Dec = {target_dec:+.5f}\n"
+           f"Nearest reference source: {sep_str} away\n"
+           f"Target likely falls on masked or edge pixels — no light curve available.")
+    fig.text(0.5, 0.5, msg, ha="center", va="center", fontsize=12,
+             color="firebrick", transform=fig.transFigure,
+             bbox=dict(boxstyle="round,pad=0.6", fc="mistyrose", ec="firebrick", lw=1.5))
+    fig.suptitle(f"Light curve — {tag}", fontsize=11)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  no-target placeholder → {out_path}")
 
 
 def _load_vet_good_indices(vet_catalog: Path, clean: pd.DataFrame) -> set:
@@ -154,9 +180,10 @@ def make_lightcurves(lc_path: Path, out_path: Path,
     clean = df[df["INFOBITS_DIF"] == 0].copy()
 
     tgt_coord = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
-    tgt_obj, tgt_med = _find_target(clean, tgt_coord)
+    tgt_obj, tgt_med, sep_arcsec = _find_target(clean, tgt_coord)
     if tgt_obj is None:
-        logger.warning(f"  target not found within 3\" in {tag}")
+        logger.warning(f"  target not found within 3\" in {tag} (nearest: {sep_arcsec:.1f}\")")
+        _make_no_target_plot(out_path, tag, target_ra, target_dec, sep_arcsec)
         return
 
     tgt_rows = (clean[clean["object_index"] == tgt_obj]

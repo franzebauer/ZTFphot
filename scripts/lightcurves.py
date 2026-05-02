@@ -95,6 +95,8 @@ def step_lightcurves(
     force: bool = False,
     use_calibrated: bool = True,
     suffix: str = "",
+    target_ra: float | None = None,
+    target_dec: float | None = None,
 ) -> int:
     """
     Assemble light curves from calibrated per-epoch FITS for each quadrant.
@@ -105,6 +107,7 @@ def step_lightcurves(
       field, filtercode, ccdid, qid
       MAGZP_REF_{field}_{fc}_c{ccd}_q{qid}
       MAGZPRMS_REF_{field}_{fc}_c{ccd}_q{qid}
+      target_sep_arcsec  (nearest ref source to target; NaN if target not given)
     """
     import numpy as np
     from astropy.io import fits as pyfits
@@ -153,6 +156,21 @@ def step_lightcurves(
         # Extract MAGZP_REF / MAGZPRMS_REF as scalars for parquet metadata
         magzp_ref_val    = float(pd.to_numeric(ref['MAGZP_REF'],    errors='coerce').iloc[0]) if 'MAGZP_REF'    in ref.columns else float('nan')
         magzprms_ref_val = float(pd.to_numeric(ref['MAGZPRMS_REF'], errors='coerce').iloc[0]) if 'MAGZPRMS_REF' in ref.columns else float('nan')
+
+        # Nearest ref source to target — stored as metadata for downstream diagnostics
+        target_sep_val = float('nan')
+        if target_ra is not None and target_dec is not None:
+            from astropy.coordinates import SkyCoord
+            import astropy.units as u
+            ra_col  = 'ALPHAWIN_J2000' if 'ALPHAWIN_J2000' in ref.columns else 'RA'
+            dec_col = 'DELTAWIN_J2000' if 'DELTAWIN_J2000' in ref.columns else 'DEC'
+            _ra  = pd.to_numeric(ref[ra_col],  errors='coerce').values
+            _dec = pd.to_numeric(ref[dec_col], errors='coerce').values
+            _ok  = np.isfinite(_ra) & np.isfinite(_dec)
+            if _ok.any():
+                _tgt  = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
+                _cats = SkyCoord(ra=_ra[_ok] * u.deg,  dec=_dec[_ok] * u.deg)
+                target_sep_val = float(_tgt.separation(_cats).arcsec.min())
 
         frames = []
         for cal_path in cal_files:
@@ -220,6 +238,7 @@ def step_lightcurves(
             b'qid':        str(qid_).encode(),
             f'MAGZP_REF_{tag}'.encode():    str(magzp_ref_val).encode(),
             f'MAGZPRMS_REF_{tag}'.encode(): str(magzprms_ref_val).encode(),
+            b'target_sep_arcsec':           str(target_sep_val).encode(),
         }
         table = table.replace_schema_metadata({**existing_meta, **extra_meta})
         pq.write_table(table, lc_out)

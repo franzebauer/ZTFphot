@@ -65,6 +65,47 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
     print("  * Diff imgs = 0 is expected after --purge-batch or --clean-up")
 
 
+def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
+                          target_ra: float, target_dec: float,
+                          threshold: float = 30.0) -> None:
+    """
+    For each quadrant, log a WARNING if the nearest reference catalog source
+    is more than `threshold` arcsec from the target — a sign the target falls
+    on masked or edge pixels and forced photometry will silently fail.
+    """
+    import pandas as pd
+    import numpy as np
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+
+    tgt = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
+    for q in quadrants:
+        field, fc = q['field'], q['filtercode']
+        ccd, qid_ = q['ccdid'], q['qid']
+        tag = f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}"
+        ref_csv = (base_dir / "Catalogs"
+                   / f"{tag}(REFERENCE)[OBJECTS].csv")
+        if not ref_csv.exists():
+            continue
+        ref = pd.read_csv(ref_csv)
+        ra_col  = 'ALPHAWIN_J2000' if 'ALPHAWIN_J2000' in ref.columns else 'RA'
+        dec_col = 'DELTAWIN_J2000' if 'DELTAWIN_J2000' in ref.columns else 'DEC'
+        ra  = pd.to_numeric(ref[ra_col],  errors='coerce').values
+        dec = pd.to_numeric(ref[dec_col], errors='coerce').values
+        ok  = np.isfinite(ra) & np.isfinite(dec)
+        if not ok.any():
+            logger.warning(f"  {tag}: ref catalog empty — target coverage unknown")
+            continue
+        sep = float(tgt.separation(SkyCoord(ra=ra[ok]*u.deg, dec=dec[ok]*u.deg)).arcsec.min())
+        if sep >= threshold:
+            logger.warning(
+                f"  {tag}: nearest ref source {sep:.1f}\" from target "
+                f"(threshold {threshold:.0f}\") — target likely on masked/edge pixels; "
+                f"forced photometry will produce no light curve")
+        else:
+            logger.info(f"  {tag}: nearest ref source {sep:.2f}\" from target — OK")
+
+
 def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> None:
     """
     Run funpack → (catalog once) → simulate → sex in batches of --purge-batch N,
@@ -447,7 +488,10 @@ def main() -> None:
     if args.purge_batch and any(s in steps for s in ("catalog", "simulate", "sex", "simulate_sci", "sex_sci")):
         _run_purge_batch(base_dir, epochs, quadrants, args)
     else:
-        if "catalog"    in steps: step_make_catalog(base_dir, quadrants, force=args.force)
+        if "catalog"    in steps:
+            step_make_catalog(base_dir, quadrants, force=args.force)
+            if args.ra is not None and args.dec is not None:
+                _warn_target_coverage(base_dir, quadrants, args.ra, args.dec)
         if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,
                                                   target_ra=args.ra, target_dec=args.dec)
         if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
@@ -492,7 +536,8 @@ def main() -> None:
 
         if "lightcurves" in steps:
             step_lightcurves(base_dir, quadrants, force=args.force,
-                             use_calibrated="calibrate" in steps, suffix=suffix)
+                             use_calibrated="calibrate" in steps, suffix=suffix,
+                             target_ra=args.ra, target_dec=args.dec)
 
         if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
                                               target_ra=args.ra, target_dec=args.dec,
