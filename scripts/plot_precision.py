@@ -154,10 +154,15 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
     # ── per-epoch Δposition for bottom panels ─────────────────────────────────
     pos_data = None
 
-    req_cols = {"ALPHA_OBJ", "DELTA_OBJ", "OBSMJD"}
-    if req_cols.issubset(clean.columns):
+    _ra_col  = "ALPHA_OBJ"  if "ALPHA_OBJ"  in clean.columns else \
+               "ALPHA_SCI" if "ALPHA_SCI" in clean.columns else None
+    _dec_col = "DELTA_OBJ"  if "DELTA_OBJ"  in clean.columns else \
+               "DELTA_SCI" if "DELTA_SCI" in clean.columns else None
+    req_cols = {_ra_col, _dec_col, "OBSMJD"} if _ra_col else set()
+    if req_cols and req_cols.issubset(clean.columns):
         pos = clean[["object_index", _MAG_COL, "OBSMJD",
-                     "ALPHA_OBJ", "DELTA_OBJ"]].copy()
+                     _ra_col, _dec_col]].copy()
+        pos = pos.rename(columns={_ra_col: "ALPHA_OBJ", _dec_col: "DELTA_OBJ"})
         for c in pos.columns:
             pos[c] = pd.to_numeric(pos[c], errors="coerce")
         pos = pos.dropna(subset=["ALPHA_OBJ", "DELTA_OBJ", _MAG_COL])
@@ -175,7 +180,8 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
     # ── nearest-neighbour separations ────────────────────────────────────────
     nn_data = None  # (sep_arcsec, med_mag) per source
     _pos_col = ("ALPHAWIN_REF", "DELTAWIN_REF") if "ALPHAWIN_REF" in df.columns \
-               else ("ALPHA_OBJ", "DELTA_OBJ") if "ALPHA_OBJ" in df.columns \
+               else ("ALPHA_OBJ",  "DELTA_OBJ")  if "ALPHA_OBJ"  in df.columns \
+               else ("ALPHA_SCI",  "DELTA_SCI")  if "ALPHA_SCI"  in df.columns \
                else (None, None)
     if _pos_col[0] is not None:
         srcs = df.groupby("object_index")[list(_pos_col)].first().dropna()
