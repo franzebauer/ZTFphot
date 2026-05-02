@@ -316,7 +316,7 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
         ax.legend(fontsize=8, loc="upper right")
         ax.set_title("Δpos distribution by magnitude bin", fontsize=10)
     else:
-        logger.warning("  ALPHA_OBJ/DELTA_OBJ not in parquet — skipping astrometry panels")
+        logger.info("  No per-epoch position column (ref-pos parquet) — astrometry panels skipped")
         for col_idx in range(2):
             axes[1, col_idx].set_visible(False)
 
