@@ -208,7 +208,7 @@ data/                       ← created in your working directory on first run
 |------|----------|-------------|
 | Field lookup | `lookup` | Query IRSA for ZTF field/CCD/quadrant coverage at the target position |
 | Download | `download` | Fetch science and reference images from IRSA |
-| Reference catalog | `catalog` | Build reference CSV from `refsexcat.fits` |
+| Reference catalog | `catalog` | Build reference CSV from `refsexcat.fits`; checks target coverage (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
 | Simulate (ref-pos) | `simulate` | Build simulated detection images (PSF at reference positions; injects target if absent from reference catalog) |
 | SExtractor (ref-pos) | `sex` | Dual-image aperture photometry on difference images using reference positions |
 | Simulate (sci-pos) | `simulate_sci` | Build simulated detection images from per-epoch science sexcat positions |
@@ -218,7 +218,7 @@ data/                       ← created in your working directory on first run
 | Flatfield | `flatfield` | Rebuild spatial flatfield from post-polynomial residuals |
 | Light curves | `lightcurves` | Assemble per-object parquet light curves from calibrated FITS |
 | Merge | `merge` | Cross-calibrate and merge multiple quadrants per band |
-| Plots | `plots` | Diagnostic plots (spatial residuals, RMS, precision, light curves) |
+| Plots | `plots` | Diagnostic plots (spatial residuals, RMS, precision, light curves); generates a placeholder if the target is not found (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
 
 ---
 
@@ -360,7 +360,7 @@ Both files share the same `object_index` and can be joined on `(object_index, OB
 | `INFOBITS_DIF` | int32 | Image quality flags (see ZTF documentation) |
 | `APCORR46` | float32 | Aperture correction from 4 px to 6 px (mag) |
 
-File-level metadata keys: `field`, `filtercode`, `ccdid`, `qid`, `MAGZP_REF_{tag}`, `MAGZPRMS_REF_{tag}`.
+File-level metadata keys: `field`, `filtercode`, `ccdid`, `qid`, `MAGZP_REF_{tag}`, `MAGZPRMS_REF_{tag}`, `target_sep_arcsec` (arcsec distance from target to the nearest reference catalog source; `nan` if `--ra`/`--dec` not provided).
 
 ### Per-quadrant sci-pos (`LightCurves/{field}/{fc}/ccd{ccd}/q{qid}/lightcurves_sci.parquet`)
 
@@ -424,6 +424,46 @@ File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each
 
 ---
 
+## Target coverage diagnostics
+
+ZTF field/CCD/quadrant assignments are based on nominal WCS footprints. Occasionally a target that nominally falls within a quadrant actually lands on **masked or edge pixels** in every science epoch — typically because the target is within ~2 arcmin of the chip boundary. In this case forced photometry silently produces no detection and the light curve is absent.
+
+The pipeline provides three layers of indication:
+
+### 1. Early warning at the `catalog` step
+
+After building each quadrant's reference catalog, the pipeline checks the distance from the target to the nearest reference source. A `WARNING` is logged for any quadrant where this distance exceeds 30 arcsec:
+
+```
+WARNING: 000396_zg_c15_q1: nearest ref source 117.9" from target (threshold 30") — target likely on masked/edge pixels; forced photometry will produce no light curve
+```
+
+This fires before any science images are downloaded so the quadrant can be excluded manually if desired.
+
+### 2. `target_sep_arcsec` metadata in the parquet
+
+Every per-quadrant light curve parquet records the nearest reference source distance (in arcsec) as file-level metadata under the key `target_sep_arcsec`. Read it with:
+
+```python
+import pyarrow.parquet as pq
+meta = pq.read_schema("lightcurves.parquet").metadata
+print(meta[b"target_sep_arcsec"])   # e.g. b"117.968"
+```
+
+A value much larger than the typical inter-source spacing (~5–10 arcsec in a ZTF field) indicates the target position is in an unpopulated or masked region.
+
+### 3. Placeholder lightcurves plot
+
+When `make_lightcurves` cannot find any parquet source within 3 arcsec of the target, instead of producing no file it writes a red-text placeholder:
+
+```
+lightcurves_000396_zg_c15_q1.png   ← "Target not found: nearest source 117.9" away — likely masked/edge pixels"
+```
+
+This makes the failure **visible in the plots directory** rather than requiring users to notice a missing file.
+
+---
+
 ## Standalone utilities
 
 These scripts are not wired into `run_pipeline.py` but can be run directly from the `scripts/` directory:
@@ -434,3 +474,4 @@ These scripts are not wired into `run_pipeline.py` but can be run directly from 
 | `compare_scipos.py` | Compares ref-pos and sci-pos photometry for all quadrants that have both `lightcurves.parquet` and `lightcurves_sci.parquet`. Produces a two-panel plot per quadrant: magnitude offset (sci − ref) and scatter difference (σ_sci − σ_ref) vs magnitude, with binned median curves. Run: `python ZTFphot/scripts/compare_scipos.py --base-dir data --ra RA --dec DEC [--band zg]` |
 | `batch_pipeline.py` | Process a list of RA/Dec targets in sequence, keeping only the final LC parquets and plots for each. Run: `python ZTFphot/scripts/batch_pipeline.py coords.txt [--both] [--bands g r] [--workers 20]` |
 | `migrate_parquets.py` | Converts old-format merged parquets (containing `mag_calib`, `quadrant_id`, `is_dominant` columns) to the current schema. Accepts files and/or directories as arguments. Use `--dry-run` to preview. |
+| `replot_merged.py` | Regenerate precision and light curve plots from a merged parquet when the original working directory has been deleted (e.g. after `batch_pipeline.py` cleanup). Run: `python ZTFphot/scripts/replot_merged.py lightcurves_merged.parquet --ra RA --dec DEC --out-dir plots/` |
