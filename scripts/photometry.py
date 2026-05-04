@@ -72,7 +72,7 @@ def step_funpack(base_dir: Path, force: bool = False,
     return n_done
 
 
-def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False) -> int:
+def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False, target_ra: float | None = None, target_dec: float | None = None) -> int:
     """Build a reference CSV catalog for each quadrant from its refsexcat.fits."""
     import sys
     _scripts = Path(__file__).parent
