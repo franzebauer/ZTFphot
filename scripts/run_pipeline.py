@@ -4,6 +4,7 @@ run_pipeline.py — ZTF difference-image photometry pipeline
 Steps (run in order, or select with --steps):
     lookup       — query IRSA for field/epoch coverage and cache results
     download     — fetch science and reference images from IRSA
+    funpack      — decompress .fits.fz difference images
     catalog      — build reference CSV catalogs from refsexcat.fits
     simulate     — build simulated detection images (PSF at reference positions)
     sex          — SExtractor dual-image aperture photometry
@@ -34,14 +35,13 @@ import numpy as np
 warnings.filterwarnings("ignore", category=FutureWarning,
                         message=".*DataFrame concatenation with empty or all-NA entries.*")
 
-_SCRIPTS = Path(__file__).parent
+_SCRIPTS = Path(__file__).parent / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 logger = logging.getLogger(__name__)
 
-ALL_STEPS = ["lookup", "download", "catalog", "simulate", "sex",
-             "simulate_sci", "sex_sci",
+ALL_STEPS = ["lookup", "download", "funpack", "catalog", "simulate", "sex",
              "vet", "calibrate", "flatfield", "lightcurves", "merge", "plots"]
 
 
@@ -65,47 +65,6 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
     print("  * Diff imgs = 0 is expected after --purge-batch or --clean-up")
 
 
-def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
-                          target_ra: float, target_dec: float,
-                          threshold: float = 30.0) -> None:
-    """
-    For each quadrant, log a WARNING if the nearest reference catalog source
-    is more than `threshold` arcsec from the target — a sign the target falls
-    on masked or edge pixels and forced photometry will silently fail.
-    """
-    import pandas as pd
-    import numpy as np
-    from astropy.coordinates import SkyCoord
-    import astropy.units as u
-
-    tgt = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
-    for q in quadrants:
-        field, fc = q['field'], q['filtercode']
-        ccd, qid_ = q['ccdid'], q['qid']
-        tag = f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}"
-        ref_csv = (base_dir / "Catalogs"
-                   / f"{tag}(REFERENCE)[OBJECTS].csv")
-        if not ref_csv.exists():
-            continue
-        ref = pd.read_csv(ref_csv)
-        ra_col  = 'ALPHAWIN_J2000' if 'ALPHAWIN_J2000' in ref.columns else 'RA'
-        dec_col = 'DELTAWIN_J2000' if 'DELTAWIN_J2000' in ref.columns else 'DEC'
-        ra  = pd.to_numeric(ref[ra_col],  errors='coerce').values
-        dec = pd.to_numeric(ref[dec_col], errors='coerce').values
-        ok  = np.isfinite(ra) & np.isfinite(dec)
-        if not ok.any():
-            logger.warning(f"  {tag}: ref catalog empty — target coverage unknown")
-            continue
-        sep = float(tgt.separation(SkyCoord(ra=ra[ok]*u.deg, dec=dec[ok]*u.deg)).arcsec.min())
-        if sep >= threshold:
-            logger.warning(
-                f"  {tag}: nearest ref source {sep:.1f}\" from target "
-                f"(threshold {threshold:.0f}\") — target likely on masked/edge pixels; "
-                f"forced photometry will produce no light curve")
-        else:
-            logger.info(f"  {tag}: nearest ref source {sep:.2f}\" from target — OK")
-
-
 def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> None:
     """
     Run funpack → (catalog once) → simulate → sex in batches of --purge-batch N,
@@ -115,8 +74,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
     import math
     import pandas as pd
     from download_coordinator import download_all, purge_images, filter_epochs
-    from photometry import step_make_catalog, step_simulate, step_sextractor
-    from photometry_scipos import step_simulate_scipos, step_sex_scipos
+    from photometry import step_funpack, step_make_catalog, step_simulate, step_sextractor
 
     N = args.purge_batch
     steps = set(args.steps)
@@ -168,18 +126,13 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                            "processing existing files only")
             # Still run catalog/simulate/sex on whatever is already on disk
             if "catalog" in steps:
-                step_make_catalog(base_dir, [q], force=args.force)
+                step_make_catalog(base_dir, [q], force=args.force,
+                                  target_ra=args.ra, target_dec=args.dec)
             if "simulate" in steps:
                 step_simulate(base_dir, [q], workers=args.workers, force=args.force,
                               target_ra=args.ra, target_dec=args.dec)
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
-                                force=args.force, verbose=args.verbose,
-                                target_ra=args.ra, target_dec=args.dec)
-            if "simulate_sci" in steps:
-                step_simulate_scipos(base_dir, [q], workers=args.workers, force=args.force)
-            if "sex_sci" in steps:
-                step_sex_scipos(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose,
                                 target_ra=args.ra, target_dec=args.dec)
             continue
@@ -194,18 +147,11 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
 
         sex_dir = (base_dir / "SExCatalogs" / f"{field:06d}" / fc
                    / f"{ccd:02d}" / str(qid_))
-        sci_sex_dir = (base_dir / "SExCatalogs_sci" / f"{field:06d}" / fc
-                       / f"{ccd:02d}" / str(qid_))
 
         def _sexcat_path(ffd):
             fname = (f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}"
                      f"_scimrefdiffimg_sexout.fits")
             return sex_dir / fname
-
-        def _sci_sexcat_path(ffd):
-            fname = (f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}"
-                     f"_scimrefdiffimg_sexout.fits")
-            return sci_sex_dir / fname
 
         # Load permanent 404s so epochs with no IRSA diff image are treated as done
         _perm404_log = base_dir / "Epochs" / "permanent_404s.log"
@@ -214,14 +160,10 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             _perm404_urls = set(_perm404_log.read_text().splitlines())
 
         def _epoch_done(ffd):
+            if _sexcat_path(ffd).exists():
+                return True
             needle = f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"
-            perm404 = any(needle in url for url in _perm404_urls)
-            ref_done = _sexcat_path(ffd).exists() or perm404
-            if not ref_done:
-                return False
-            if "simulate_sci" in steps or "sex_sci" in steps:
-                return _sci_sexcat_path(ffd).exists() or perm404
-            return True
+            return any(needle in url for url in _perm404_urls)
 
         for bi, start in enumerate(range(0, len(q_epochs), N)):
             batch    = q_epochs.iloc[start:start + N]
@@ -246,8 +188,12 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 download_all(batch, base_dir=base_dir, bands=[band],
                              max_workers=args.workers)
 
+            if "funpack" in steps:
+                step_funpack(base_dir, force=args.force, filefracdays=ffds_set)
+
             if "catalog" in steps and not catalog_done:
-                step_make_catalog(base_dir, [q], force=args.force)
+                step_make_catalog(base_dir, [q], force=args.force,
+                                  target_ra=args.ra, target_dec=args.dec)
                 catalog_done = True
 
             if "simulate" in steps:
@@ -257,15 +203,6 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
 
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
-                                force=args.force, verbose=args.verbose,
-                                filefracdays=ffds_set,
-                                target_ra=args.ra, target_dec=args.dec)
-
-            if "simulate_sci" in steps:
-                step_simulate_scipos(base_dir, [q], workers=args.workers,
-                                     force=args.force, filefracdays=ffds_set)
-            if "sex_sci" in steps:
-                step_sex_scipos(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose,
                                 filefracdays=ffds_set,
                                 target_ra=args.ra, target_dec=args.dec)
@@ -320,12 +257,6 @@ def main() -> None:
                    help="Process N epochs at a time, deleting imaging products after each "
                         "batch's sex step. Keeps only SEx catalogs on disk. "
                         "Use --dry-run to preview what would be deleted.")
-    p.add_argument("--scipos",        action="store_true",
-                   help="Use science-image sexcat positions instead of reference catalog positions. "
-                        "Reads from SExCatalogs_sci/, writes to Calibrated_sci/, LightCurves_sci/.")
-    p.add_argument("--both",          action="store_true",
-                   help="Run calibrate/lightcurves/merge/plots for both ref-pos and sci-pos. "
-                        "Also runs simulate_sci/sex_sci inside the purge-batch loop.")
     p.add_argument("--clean-up",     action="store_true",
                    help="Delete all imaging products (Science/, Reference/) for discovered "
                         "quadrants and exit. Safe once the sex step is complete.")
@@ -463,144 +394,116 @@ def main() -> None:
         logger.info(f"  {q['field']:06d} {q['filtercode']} ccd{q['ccdid']:02d} q{q['qid']}")
 
     # ── Import step modules ───────────────────────────────────────────────────
-    from photometry  import step_make_catalog, step_simulate, step_sextractor
-    from photometry_scipos import step_simulate_scipos, step_sex_scipos
+    from photometry  import step_funpack, step_make_catalog, step_simulate, step_sextractor
     from calibrate   import step_vet, step_calibrate, step_build_flatfield
     from lightcurves import step_lightcurves, step_merge
 
     t0 = time.time()
 
-    # --both: inject sci steps alongside ref steps so they share the same diff images
-    if args.both:
-        if "simulate" in steps and "simulate_sci" not in steps:
-            steps = steps + ["simulate_sci"]
-        if "sex" in steps and "sex_sci" not in steps:
-            steps = steps + ["sex_sci"]
-
-    # --both → both suffixes; --scipos → sci only; neither → ref only
-    if args.both:
-        suffixes = ["", "_sci"]
-    elif args.scipos:
-        suffixes = ["_sci"]
-    else:
-        suffixes = [""]
-
-    if args.purge_batch and any(s in steps for s in ("catalog", "simulate", "sex", "simulate_sci", "sex_sci")):
+    if args.purge_batch and any(s in steps for s in ("funpack", "catalog", "simulate", "sex")):
         _run_purge_batch(base_dir, epochs, quadrants, args)
     else:
-        if "catalog"    in steps:
-            step_make_catalog(base_dir, quadrants, force=args.force)
-            if args.ra is not None and args.dec is not None:
-                _warn_target_coverage(base_dir, quadrants, args.ra, args.dec)
+        if "funpack"    in steps: step_funpack(base_dir, force=args.force)
+        if "catalog"    in steps: step_make_catalog(base_dir, quadrants, force=args.force,
+                                                   target_ra=args.ra, target_dec=args.dec)
         if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,
                                                   target_ra=args.ra, target_dec=args.dec)
         if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
                                                   force=args.force, verbose=args.verbose,
                                                   target_ra=args.ra, target_dec=args.dec)
-        if "simulate_sci" in steps: step_simulate_scipos(base_dir, quadrants, workers=args.workers,
-                                                         force=args.force)
-        if "sex_sci"    in steps: step_sex_scipos(base_dir, quadrants, workers=args.workers,
-                                                  force=args.force, verbose=args.verbose,
-                                                  target_ra=args.ra, target_dec=args.dec)
     if "vet"        in steps: step_vet(base_dir, quadrants)
 
-    for suffix in suffixes:
-        logger.info(f"─── suffix='{suffix}' pass ───" if len(suffixes) > 1 else "")
+    # Load flatfield from disk for each quadrant (used in calibrate)
+    _ff_map: dict = {}
+    for q in quadrants:
+        ff = (base_dir / "Calibrated" / f"{q['field']:06d}"
+              / q['filtercode'] / f"{q['ccdid']:02d}" / str(q['qid']) / "flatfield.npz")
+        if ff.exists():
+            try:
+                d = np.load(str(ff))
+                _ff_map[(q['field'], q['filtercode'], q['ccdid'], q['qid'])] = dict(
+                    stat=d['stat'], ra_edges=d['ra_edges'], dec_edges=d['dec_edges'])
+            except Exception as e:
+                logger.warning(f"Could not load flatfield {ff}: {e}")
 
-        # Load flatfield from disk for each quadrant (used in calibrate)
-        _ff_map: dict = {}
+    if "flatfield"  in steps:
+        _ff_map = step_build_flatfield(base_dir, quadrants,
+                                       nbins=args.ff_bins, min_count=args.ff_min_count)
+
+    if "calibrate"  in steps:
         for q in quadrants:
-            ff = (base_dir / f"Calibrated{suffix}" / f"{q['field']:06d}"
-                  / q['filtercode'] / f"{q['ccdid']:02d}" / str(q['qid']) / "flatfield.npz")
-            if ff.exists():
-                try:
-                    d = np.load(str(ff))
-                    _ff_map[(q['field'], q['filtercode'], q['ccdid'], q['qid'])] = dict(
-                        stat=d['stat'], ra_edges=d['ra_edges'], dec_edges=d['dec_edges'])
-                except Exception as e:
-                    logger.warning(f"Could not load flatfield {ff}: {e}")
+            key = (q['field'], q['filtercode'], q['ccdid'], q['qid'])
+            step_calibrate(base_dir, [q], workers=args.workers, force=args.force,
+                           vet_catalog=args.vet_catalog, poly_degree=args.poly_degree,
+                           flatfield=_ff_map.get(key),
+                           target_ra=args.ra, target_dec=args.dec,
+                           save_residuals=True)
 
-        if "flatfield"  in steps:
-            _ff_map = step_build_flatfield(base_dir, quadrants,
-                                           nbins=args.ff_bins, min_count=args.ff_min_count,
-                                           suffix=suffix)
+    if "lightcurves" in steps:
+        step_lightcurves(base_dir, quadrants, force=args.force,
+                         use_calibrated="calibrate" in steps)
 
-        if "calibrate"  in steps:
-            for q in quadrants:
-                key = (q['field'], q['filtercode'], q['ccdid'], q['qid'])
-                step_calibrate(base_dir, [q], workers=args.workers, force=args.force,
-                               vet_catalog=args.vet_catalog, poly_degree=args.poly_degree,
-                               flatfield=_ff_map.get(key),
-                               target_ra=args.ra, target_dec=args.dec,
-                               save_residuals=True, suffix=suffix)
+    if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
+                                          target_ra=args.ra, target_dec=args.dec)
 
-        if "lightcurves" in steps:
-            step_lightcurves(base_dir, quadrants, force=args.force,
-                             use_calibrated="calibrate" in steps, suffix=suffix,
-                             target_ra=args.ra, target_dec=args.dec)
+    if "plots"      in steps:
+        logger.info("─── plots ───")
+        import sys as _sys
+        if str(_SCRIPTS) not in _sys.path:
+            _sys.path.insert(0, str(_SCRIPTS))
+        from plot_diagnostics import (
+            make_spatial_rms, make_spatial_iqr,
+            make_rms, make_precision,
+            make_lightcurves,
+        )
 
-        if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
-                                              target_ra=args.ra, target_dec=args.dec,
-                                              suffix=suffix)
+        plot_root = base_dir / "Plots"
+        if args.ra is not None and args.dec is not None:
+            plot_root = plot_root / f"{args.ra:.5f}_{args.dec:+.5f}"
+        plot_root.mkdir(parents=True, exist_ok=True)
 
-        if "plots"      in steps:
-            logger.info("─── plots ───")
-            import sys as _sys
-            if str(_SCRIPTS) not in _sys.path:
-                _sys.path.insert(0, str(_SCRIPTS))
-            from plot_diagnostics import (
-                make_spatial_rms, make_spatial_iqr,
-                make_rms, make_precision,
-                make_lightcurves,
-            )
+        for q in quadrants:
+            f, fc, ccd, qid_ = q["field"], q["filtercode"], q["ccdid"], q["qid"]
+            tag = f"{f:06d}_{fc}_c{ccd:02d}_q{qid_}"
 
-            plot_root = base_dir / f"Plots{suffix}"
-            if args.ra is not None and args.dec is not None:
-                plot_root = plot_root / f"{args.ra:.5f}_{args.dec:+.5f}"
-            plot_root.mkdir(parents=True, exist_ok=True)
+            cal_dir   = base_dir / "Calibrated"          / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)
+            resid_dir = base_dir / "FlatfieldResiduals"  / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)
+            lc_path   = (base_dir / "LightCurves" / f"{f:06d}" / fc
+                         / f"ccd{ccd:02d}" / f"q{qid_}" / "lightcurves.parquet")
 
-            for q in quadrants:
-                f, fc, ccd, qid_ = q["field"], q["filtercode"], q["ccdid"], q["qid"]
-                tag = f"{f:06d}_{fc}_c{ccd:02d}_q{qid_}"
+            has_cal   = cal_dir.exists()   and any(cal_dir.glob("*_cal.fits"))
+            has_resid = resid_dir.exists() and any(resid_dir.glob("*_resid.npz"))
+            has_lc    = lc_path.exists()
 
-                cal_dir   = base_dir / f"Calibrated{suffix}"         / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)
-                resid_dir = base_dir / f"FlatfieldResiduals{suffix}"  / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)
-                lc_path   = (base_dir / "LightCurves" / f"{f:06d}" / fc
-                             / f"ccd{ccd:02d}" / f"q{qid_}" / f"lightcurves{suffix}.parquet")
+            if has_resid:
+                make_spatial_rms(resid_dir,
+                                 plot_root / f"spatial_rms_{tag}.png", tag)
+                make_spatial_iqr(resid_dir,
+                                 plot_root / f"spatial_IQR_{tag}.png", tag)
+            else:
+                logger.info(f"  [{tag}] no residual NPZ files — skipping spatial_rms/IQR")
 
-                has_cal   = cal_dir.exists()   and any(cal_dir.glob("*_cal.fits"))
-                has_resid = resid_dir.exists() and any(resid_dir.glob("*_resid.npz"))
-                has_lc    = lc_path.exists()
+            if has_cal:
+                make_rms(cal_dir,
+                              plot_root / f"rms_{tag}.png", tag)
+            else:
+                logger.info(f"  [{tag}] no calibrated FITS — skipping rms")
 
-                if has_resid:
-                    make_spatial_rms(resid_dir,
-                                     plot_root / f"spatial_rms_{tag}.png", tag)
-                    make_spatial_iqr(resid_dir,
-                                     plot_root / f"spatial_IQR_{tag}.png", tag)
-                else:
-                    logger.info(f"  [{tag}] no residual NPZ files — skipping spatial_rms/IQR")
-
-                if has_cal:
-                    make_rms(cal_dir,
-                             plot_root / f"rms_{tag}.png", tag)
-                else:
-                    logger.info(f"  [{tag}] no calibrated FITS — skipping rms")
-
-                if has_lc:
-                    vet_cat = (base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)) / "vet_calib_stars.fits"
-                    vet_cat_arg = vet_cat if vet_cat.exists() else None
-                    make_precision(lc_path,
-                                   plot_root / f"precision_{tag}.png",
-                                   tag, args.ra, args.dec,
-                                   vet_catalog=vet_cat_arg)
-                    if args.ra is not None and args.dec is not None:
-                        make_lightcurves(lc_path,
-                                         plot_root / f"lightcurves_{tag}.png",
-                                         args.ra, args.dec,
-                                         tag=tag,
-                                         vet_catalog=vet_cat_arg)
-                else:
-                    logger.info(f"  [{tag}] no light-curve parquet — skipping precision/lightcurves")
+            if has_lc:
+                vet_cat = cal_dir / "vet_calib_stars.fits"
+                vet_cat_arg = vet_cat if vet_cat.exists() else None
+                make_precision(lc_path,
+                                    plot_root / f"precision_{tag}.png",
+                                    tag, args.ra, args.dec,
+                                    vet_catalog=vet_cat_arg)
+                if args.ra is not None and args.dec is not None:
+                    make_lightcurves(lc_path,
+                                          plot_root / f"lightcurves_{tag}.png",
+                                          args.ra, args.dec,
+                                          tag=tag,
+                                          vet_catalog=vet_cat_arg)
+            else:
+                logger.info(f"  [{tag}] no light-curve parquet — skipping precision/lightcurves")
 
     logger.info(f"Done in {time.time() - t0:.1f}s")
     _print_status(base_dir, quadrants)
