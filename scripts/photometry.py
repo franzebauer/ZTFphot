@@ -41,9 +41,7 @@ _SEX_DIR = Path(__file__).parent / "SExtractor"
 
 # ── Step 1: reference CSV catalogs ───────────────────────────────────────────
 
-def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False,
-                      target_ra: float | None = None,
-                      target_dec: float | None = None) -> int:
+def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False) -> int:
     """Build a reference CSV catalog for each quadrant from its refsexcat.fits."""
     import sys
     _scripts = Path(__file__).parent
@@ -65,8 +63,7 @@ def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False
             continue
         logger.info(f"Building reference catalog for {cat_name}")
         try:
-            make_catalog(save_path=str(cat_dir), refcats=str(q["ref_dir"]),
-                         target_ra=target_ra, target_dec=target_dec)
+            make_catalog(save_path=str(cat_dir), refcats=str(q["ref_dir"]))
             n_done += 1
         except Exception as exc:
             logger.error(f"make_catalog failed for {cat_name}: {exc}")
