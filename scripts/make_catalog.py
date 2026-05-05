@@ -48,7 +48,7 @@ def make_catalog(save_path, refcats):
 
             hdul.close()
         else:
-            infobits_ref = np.uint32 = np.uint32.max
+            infobits_ref = int(np.iinfo(np.uint32).max)
             magzp_ref = np.NAN
             magzprms_ref = np.NAN
 
@@ -69,8 +69,8 @@ def make_catalog(save_path, refcats):
         table['MAGERR_APER_4px'] = tmp['MAGERR_APER'][:, 2]
         table['MAGERR_APER_6px'] = tmp['MAGERR_APER'][:, 3]
         table['MAGERR_APER_10px'] = tmp['MAGERR_APER'][:, 4]
-        table['MAGZP_REF'] = magzp_ref,
-        table['MAGZPRMS_REF'] = magzprms_ref,
+        table['MAGZP_REF'] = magzp_ref
+        table['MAGZPRMS_REF'] = magzprms_ref
         table['INFOBITS_REF'] = infobits_ref
         table['ID'] = tmp['CLASS_STAR'].astype(str)
 

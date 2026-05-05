@@ -7,16 +7,14 @@ import numpy as np
 
 
 def paint_psf(catalog, x, y, psf):
-    X, Y = catalog.shape
-    psf_x, psf_y = psf.shape
-    psf_x, psf_xr = int(psf_x/2), psf_x % 2
-    psf_y, psf_yr = int(psf_y/2), psf_y % 2
-
-    for i in range(-psf_x, psf_x + psf_xr):
-        for j in range(-psf_y, psf_y + psf_yr):
-            if x + i >= 0 and x + i < X and y + j >= 0 and y + j < Y:
-                # if not np.isnan(catalog[x+i, y+j]):
-                catalog[x+i, y+j] += psf[psf_x + i, psf_y + j]
+    # x = row index, y = col index (matches call site: paint_psf(data, y_, x_, psf))
+    H, W = catalog.shape
+    ph, pw = psf.shape
+    r0, r1 = x - ph // 2, x - ph // 2 + ph
+    c0, c1 = y - pw // 2, y - pw // 2 + pw
+    ir0, ir1 = max(0, r0), min(H, r1)
+    ic0, ic1 = max(0, c0), min(W, c1)
+    catalog[ir0:ir1, ic0:ic1] += psf[ir0 - r0:ir1 - r0, ic0 - c0:ic1 - c0]
 
 def makeGaussian(size, fwhm = 3, center=None):
     """ Make a square gaussian kernel.
@@ -57,20 +55,37 @@ def build_simulated_image(source_img, source_cat, save_name,
     data = np.zeros(difimg[0].data.shape, dtype=np.float32)
     # preserve NaN mask from the diff image (bad pixels / edge regions)
     nan_mask = np.isnan(difimg[0].data)
+    nrows, ncols = data.shape
+
+    def _valid_frac(y_, x_):
+        """Fraction of unmasked pixels within 1.5×FWHM diameter centred on (y_, x_)."""
+        r     = 0.75 * fwhm
+        r_int = int(np.ceil(r))
+        sr0, sr1 = max(0, y_ - r_int), min(nrows, y_ + r_int + 1)
+        sc0, sc1 = max(0, x_ - r_int), min(ncols, x_ + r_int + 1)
+        dy = np.arange(sr0, sr1) - y_
+        dx = np.arange(sc0, sc1) - x_
+        rr, cc = np.meshgrid(dy, dx, indexing='ij')
+        in_circle   = (rr**2 + cc**2) <= r**2
+        n_in_circle = int(in_circle.sum())
+        return (float((~nan_mask[sr0:sr1, sc0:sc1])[in_circle].sum())
+                / n_in_circle) if n_in_circle > 0 else 0.0
 
     for object in catalog:
         x, y = wcs.world_to_pixel(object)
         x_, y_ = int(np.floor(x)), int(np.floor(y))
-        psf = makeGaussian(size=size, fwhm=fwhm, center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX
-        paint_psf(data, y_, x_, psf)
+        if not (0 <= x_ < ncols and 0 <= y_ < nrows):
+            continue
+        if _valid_frac(y_, x_) > 0.5:
+            psf = makeGaussian(size=size, fwhm=fwhm, center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX
+            paint_psf(data, y_, x_, psf)
 
     if target_ra is not None and target_dec is not None:
         tgt = SkyCoord(ra=target_ra, dec=target_dec, unit='deg')
         if len(catalog) == 0 or tgt.separation(catalog).min().arcsec >= 3.0:
             x, y = wcs.world_to_pixel(tgt)
             x_, y_ = int(np.floor(x)), int(np.floor(y))
-            nrows, ncols = data.shape
-            if 0 <= x_ < ncols and 0 <= y_ < nrows:
+            if 0 <= x_ < ncols and 0 <= y_ < nrows and _valid_frac(y_, x_) > 0.5:
                 psf = makeGaussian(size=size, fwhm=fwhm,
                                    center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX
                 paint_psf(data, y_, x_, psf)

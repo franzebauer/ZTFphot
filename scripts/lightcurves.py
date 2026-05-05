@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 import pandas as pd
+from astropy.table import Table as AstropyTable
 
 logger = logging.getLogger(__name__)
 
@@ -182,8 +183,7 @@ def step_lightcurves(
                 logger.warning(f"  Could not read {cal_path.name}: {e}")
                 continue
 
-            from astropy.table import Table
-            tbl = Table(data).to_pandas()
+            tbl = AstropyTable(data).to_pandas()
             if tbl.empty:
                 continue
 
