@@ -94,7 +94,8 @@ def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False
             continue
         logger.info(f"Building reference catalog for {cat_name}")
         try:
-            make_catalog(save_path=str(cat_dir), refcats=str(q["ref_dir"]))
+            make_catalog(save_path=str(cat_dir), refcats=str(q["ref_dir"]),
+                         target_ra=target_ra, target_dec=target_dec)
             n_done += 1
         except Exception as exc:
             logger.error(f"make_catalog failed for {cat_name}: {exc}")

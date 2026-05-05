@@ -271,6 +271,7 @@ def step_build_flatfield(
                   dec_edges=dec_e.astype(np.float64))
 
         out_path = _cal_quad_dir(base_dir, field, fc, ccd, qid_, suffix) / "flatfield.npz"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(str(out_path), **ff, nobs=nobs.astype(np.int32))
         logger.info(f"flatfield saved → {out_path}")
 
