@@ -65,6 +65,53 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
     print("  * Diff imgs = 0 is expected after --purge-batch or --clean-up")
 
 
+def _filter_quadrants_by_wcs(
+    base_dir: Path, quadrants: list[dict],
+    target_ra: float, target_dec: float,
+    margin: int = 50,
+) -> list[dict]:
+    """
+    Drop quadrants whose refimg.fits WCS places the target outside the active
+    detector area.  Handles the case where ztfquery returns a field/quadrant
+    whose nominal grid footprint contains the target but the actual image does
+    not (e.g. CCD gap, edge roll-off).
+
+    margin : pixels to subtract from each edge before declaring out-of-bounds,
+             to guard against sources right on the border with unreliable PSFs.
+    """
+    from astropy.wcs import WCS
+    from astropy.io import fits as _fits
+
+    kept = []
+    for q in quadrants:
+        field, fc = q["field"], q["filtercode"]
+        ccd, qid_ = q["ccdid"], q["qid"]
+        tag = f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}"
+        refimg = q["ref_dir"] / f"ztf_{tag}_refimg.fits"
+        if not refimg.exists():
+            logger.debug(f"  {tag}: refimg not found — keeping quadrant (not yet downloaded)")
+            kept.append(q)
+            continue
+        try:
+            with _fits.open(refimg, memmap=False) as hdul:
+                hdr = hdul[0].header
+                wcs = WCS(hdr)
+                naxis1 = int(hdr.get("NAXIS1", 0))
+                naxis2 = int(hdr.get("NAXIS2", 0))
+            x, y = wcs.world_to_pixel_values(target_ra, target_dec)
+            if margin <= x <= naxis1 - margin and margin <= y <= naxis2 - margin:
+                kept.append(q)
+            else:
+                logger.warning(
+                    f"  {tag}: target pixel ({x:.0f}, {y:.0f}) outside active area "
+                    f"[{margin}:{naxis1 - margin}, {margin}:{naxis2 - margin}] — dropping quadrant"
+                )
+        except Exception as exc:
+            logger.warning(f"  {tag}: WCS check failed ({exc}) — keeping quadrant")
+            kept.append(q)
+    return kept
+
+
 def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
                           target_ra: float, target_dec: float,
                           threshold: float = 30.0) -> None:
@@ -411,6 +458,9 @@ def main() -> None:
                         f"(keeping fields {sorted(_fields)})")
         else:
             logger.warning(f"No epoch cache found at {cache_path} — using all quadrants on disk")
+
+    if args.ra is not None and args.dec is not None:
+        quadrants = _filter_quadrants_by_wcs(base_dir, quadrants, args.ra, args.dec)
 
     if args.status:
         _print_status(base_dir, quadrants)
