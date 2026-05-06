@@ -250,10 +250,20 @@ def check_parquet_list(ra, dec, parquets, label):
     return all_found
 
 
-def _missing_path(missing_arg, suffix):
-    """Insert _ref or _sci before the file extension of the --missing path."""
-    p = Path(missing_arg)
-    return p.parent / (p.stem + suffix + p.suffix)
+_FC_RE = re.compile(r'_(z[gri])_')
+
+
+def _extract_filtercode(name):
+    """Extract zg/zr/zi from a parquet filename, or None if not found."""
+    m = _FC_RE.search(name)
+    return m.group(1) if m else None
+
+
+def _variant_path(arg, filtercode, suffix):
+    """Build output path: stem + _{filtercode} + suffix + ext.
+    E.g. redo.txt, zg, _ref → redo_zg_ref.txt"""
+    p = Path(arg)
+    return p.parent / (p.stem + '_' + filtercode + suffix + p.suffix)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -281,6 +291,7 @@ def main():
                         "FILE_ref.ext and FILE_sci.ext")
     args = p.parse_args()
 
+    # Each entry is (ra, dec, filtercode_or_None)
     good_coords        = []
     missing_ref_coords = []
     missing_sci_coords = []
@@ -293,10 +304,9 @@ def main():
 
         # ── Results-dir mode: parquet files given ────────────────────────────
         if parquet_files:
-            # Group into ref-pos and sci-pos by coordinate key
-            ref_groups = {}
-            sci_groups = {}
-            coord_map  = {}
+            # Group by (coord_key, filtercode) → {ref: [], sci: []}
+            groups    = {}
+            coord_map = {}
 
             for pq in sorted(parquet_files):
                 parsed = _parse_ra_dec(pq.name)
@@ -304,37 +314,43 @@ def main():
                     print(f"WARNING: cannot parse RA/Dec from '{pq.name}' — skipping",
                           file=sys.stderr)
                     continue
+                fc = _extract_filtercode(pq.name)
+                if fc is None:
+                    print(f"WARNING: cannot parse filtercode from '{pq.name}' — skipping",
+                          file=sys.stderr)
+                    continue
                 ra, dec = parsed
-                key = f"{ra:.5f}_{dec:+.5f}"
-                coord_map[key] = (ra, dec)
+                coord_key = f"{ra:.5f}_{dec:+.5f}"
+                coord_map[coord_key] = (ra, dec)
+                group_key = (coord_key, fc)
+                groups.setdefault(group_key, {'ref': [], 'sci': []})
                 if _is_sci(pq):
-                    sci_groups.setdefault(key, []).append(pq)
+                    groups[group_key]['sci'].append(pq)
                 else:
-                    ref_groups.setdefault(key, []).append(pq)
+                    groups[group_key]['ref'].append(pq)
 
-            all_keys = sorted(set(list(ref_groups) + list(sci_groups)))
-            if not all_keys:
+            if not groups:
                 sys.exit("No parseable parquet files found.")
 
-            for key in all_keys:
-                ra, dec = coord_map[key]
+            for (coord_key, fc) in sorted(groups):
+                ra, dec = coord_map[coord_key]
                 print(f"\n{'#'*60}")
-                print(f"  TARGET  RA={ra}  Dec={dec}")
+                print(f"  TARGET  RA={ra}  Dec={dec}  [{fc}]")
                 print(f"{'#'*60}")
 
-                found_ref = check_parquet_list(ra, dec, ref_groups.get(key, []), "ref-pos")
-                found_sci = check_parquet_list(ra, dec, sci_groups.get(key, []), "sci-pos")
+                found_ref = check_parquet_list(ra, dec, groups[(coord_key, fc)]['ref'], "ref-pos")
+                found_sci = check_parquet_list(ra, dec, groups[(coord_key, fc)]['sci'], "sci-pos")
 
                 ref_ok = found_ref is None or found_ref
                 sci_ok = found_sci is None or found_sci
 
                 if ref_ok and sci_ok:
-                    good_coords.append((ra, dec))
+                    good_coords.append((ra, dec, fc))
                 else:
                     if not ref_ok:
-                        missing_ref_coords.append((ra, dec))
+                        missing_ref_coords.append((ra, dec, fc))
                     if not sci_ok:
-                        missing_sci_coords.append((ra, dec))
+                        missing_sci_coords.append((ra, dec, fc))
 
         # ── Work-dir mode: directories given ─────────────────────────────────
         for d in directories:
@@ -351,9 +367,9 @@ def main():
                                          field=args.field, band=args.band,
                                          ccdid=args.ccdid, qid=args.qid)
             if found:
-                good_coords.append((ra, dec))
+                good_coords.append((ra, dec, None))
             else:
-                missing_ref_coords.append((ra, dec))
+                missing_ref_coords.append((ra, dec, None))
 
     else:
         # ── Single-target mode ────────────────────────────────────────────────
@@ -368,37 +384,77 @@ def main():
                                      field=args.field, band=args.band,
                                      ccdid=args.ccdid, qid=args.qid)
         if found:
-            good_coords.append((ra, dec))
+            good_coords.append((ra, dec, None))
         else:
-            missing_ref_coords.append((ra, dec))
+            missing_ref_coords.append((ra, dec, None))
 
     print()
 
     n_total = len(good_coords) + len(set(
-        [c for c in missing_ref_coords] + [c for c in missing_sci_coords]))
+        [(r, d, f) for r, d, f in missing_ref_coords] +
+        [(r, d, f) for r, d, f in missing_sci_coords]))
     if n_total > 1:
         print(f"Summary: {len(good_coords)} good, "
               f"{len(missing_ref_coords)} missing-ref, "
               f"{len(missing_sci_coords)} missing-sci "
               f"(out of {n_total})")
 
+    def _write_by_filter(path_arg, entries, label):
+        """Write one file per filtercode found in entries."""
+        # Collect unique filtercodes (None → write all to the base path)
+        fcs = sorted(set(fc for _, _, fc in entries if fc is not None))
+        if not fcs:
+            # work-dir mode: no filtercode, write single file
+            with open(path_arg, "w") as fh:
+                for ra, dec, _ in entries:
+                    fh.write(f"{ra},{dec}\n")
+            print(f"{label} → {path_arg}  ({len(entries)} entries)")
+            return
+        for fc in fcs:
+            subset = [(ra, dec) for ra, dec, f in entries if f == fc]
+            out = _variant_path(path_arg, fc, "")
+            with open(out, "w") as fh:
+                for ra, dec in subset:
+                    fh.write(f"{ra},{dec}\n")
+            print(f"{label} [{fc}] → {out}  ({len(subset)} targets)")
+
+    def _write_ref_sci_by_filter(path_arg, ref_entries, sci_entries):
+        fcs = sorted(set(
+            [fc for _, _, fc in ref_entries if fc is not None] +
+            [fc for _, _, fc in sci_entries if fc is not None]
+        ))
+        if not fcs:
+            # work-dir mode
+            with open(_variant_path(path_arg, "ref", ""), "w") as fh:
+                for ra, dec, _ in ref_entries:
+                    fh.write(f"{ra},{dec}\n")
+            print(f"missing-ref → {_variant_path(path_arg, 'ref', '')}  ({len(ref_entries)} targets)")
+            with open(_variant_path(path_arg, "sci", ""), "w") as fh:
+                for ra, dec, _ in sci_entries:
+                    fh.write(f"{ra},{dec}\n")
+            print(f"missing-sci → {_variant_path(path_arg, 'sci', '')}  ({len(sci_entries)} targets)")
+            return
+        for fc in fcs:
+            ref_sub = [(ra, dec) for ra, dec, f in ref_entries if f == fc]
+            sci_sub = [(ra, dec) for ra, dec, f in sci_entries if f == fc]
+            if ref_sub:
+                out = _variant_path(path_arg, fc, "_ref")
+                with open(out, "w") as fh:
+                    for ra, dec in ref_sub:
+                        fh.write(f"{ra},{dec}\n")
+                print(f"missing-ref [{fc}] → {out}  ({len(ref_sub)} targets)")
+            if sci_sub:
+                out = _variant_path(path_arg, fc, "_sci")
+                with open(out, "w") as fh:
+                    for ra, dec in sci_sub:
+                        fh.write(f"{ra},{dec}\n")
+                print(f"missing-sci [{fc}] → {out}  ({len(sci_sub)} targets)")
+
     if args.good is not None:
-        with open(args.good, "w") as f:
-            for ra, dec in good_coords:
-                f.write(f"{ra},{dec}\n")
-        print(f"good        → {args.good}  ({len(good_coords)} targets)")
+        _write_by_filter(args.good, good_coords, "good")
 
     if args.missing is not None:
-        ref_path = _missing_path(args.missing, "_ref")
-        sci_path = _missing_path(args.missing, "_sci")
-        with open(ref_path, "w") as f:
-            for ra, dec in missing_ref_coords:
-                f.write(f"{ra},{dec}\n")
-        print(f"missing-ref → {ref_path}  ({len(missing_ref_coords)} targets)")
-        with open(sci_path, "w") as f:
-            for ra, dec in missing_sci_coords:
-                f.write(f"{ra},{dec}\n")
-        print(f"missing-sci → {sci_path}  ({len(missing_sci_coords)} targets)")
+        _write_ref_sci_by_filter(args.missing, missing_ref_coords, missing_sci_coords)
 
 
 if __name__ == "__main__":
