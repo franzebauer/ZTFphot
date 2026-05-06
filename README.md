@@ -426,19 +426,17 @@ File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each
 
 ## Target coverage diagnostics
 
-ZTF field/CCD/quadrant assignments are based on nominal WCS footprints. Occasionally a target that nominally falls within a quadrant actually lands on **masked or edge pixels** in every science epoch — typically because the target is within ~2 arcmin of the chip boundary. In this case forced photometry silently produces no detection and the light curve is absent.
+ZTF field/CCD/quadrant assignments are based on nominal grid footprints. Occasionally a target that nominally falls within a quadrant's bounding box actually lands outside the active detector area — in a CCD gap or within ~50 px of the chip boundary. The pipeline detects and handles this at three levels.
 
-The pipeline provides three layers of indication:
+### 1. Automatic WCS exclusion at startup
 
-### 1. Early warning at the `catalog` step
-
-After building each quadrant's reference catalog, the pipeline checks the distance from the target to the nearest reference source. A `WARNING` is logged for any quadrant where this distance exceeds 30 arcsec:
+After discovering quadrants on disk, the pipeline opens each quadrant's `refimg.fits`, converts the target RA/Dec to pixel coordinates via the WCS, and drops any quadrant where the target falls outside the active area (with a 50 px margin):
 
 ```
-WARNING: 000396_zg_c15_q1: nearest ref source 117.9" from target (threshold 30") — target likely on masked/edge pixels; forced photometry will produce no light curve
+WARNING: 000396_zg_c15_q1: target pixel (24, 3071) outside active area [50:6094, 50:6094] — dropping quadrant
 ```
 
-This fires before any science images are downloaded so the quadrant can be excluded manually if desired.
+This runs before any pipeline step and prevents wasted computation on non-covering quadrants. No manual intervention is needed.
 
 ### 2. `target_sep_arcsec` metadata in the parquet
 
@@ -450,11 +448,11 @@ meta = pq.read_schema("lightcurves.parquet").metadata
 print(meta[b"target_sep_arcsec"])   # e.g. b"117.968"
 ```
 
-A value much larger than the typical inter-source spacing (~5–10 arcsec in a ZTF field) indicates the target position is in an unpopulated or masked region.
+A value much larger than the typical inter-source spacing (~5–10 arcsec in a ZTF field) indicates the target position is in an unpopulated or masked region that the WCS check did not catch (e.g. a vignetted corner with valid pixel coordinates but no real detections).
 
 ### 3. Placeholder lightcurves plot
 
-When `make_lightcurves` cannot find any parquet source within 3 arcsec of the target, instead of producing no file it writes a red-text placeholder:
+When the plots step cannot find any parquet source within 3 arcsec of the target, instead of producing no file it writes a red-text placeholder:
 
 ```
 lightcurves_000396_zg_c15_q1.png   ← "Target not found: nearest source 117.9" away — likely masked/edge pixels"
