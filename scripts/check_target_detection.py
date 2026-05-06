@@ -40,7 +40,7 @@ MATCH_RADIUS_ARCSEC = 3.0
 _PREFIX_RE = re.compile(r'^(\d+(?:\.\d+)?)_([+-]\d+(?:\.\d+)?)')
 
 
-def _parse_ra_dec(name: str) -> tuple[float, float] | None:
+def _parse_ra_dec(name: str):
     """Parse RA, Dec from a directory name or parquet filename."""
     stem = Path(name).name.removesuffix('.parquet')
     m = _PREFIX_RE.match(stem)
@@ -168,9 +168,7 @@ def check_lightcurve(lc_path: Path, tgt: SkyCoord) -> bool:
     return False
 
 
-def check_target_workdir(ra: float, dec: float, base_dir: Path,
-                         field: int | None, band: str | None,
-                         ccdid: int | None, qid: int | None) -> bool:
+def check_target_workdir(ra, dec, base_dir, field, band, ccdid, qid):
     """Check all pipeline stages for one target in a work-dir. Returns True if LC found."""
     tgt = SkyCoord(ra=ra, dec=dec, unit="deg")
 
@@ -232,10 +230,7 @@ def check_target_workdir(ra: float, dec: float, base_dir: Path,
 
 # ── Results-dir mode ──────────────────────────────────────────────────────────
 
-def check_results_parquets(
-    ra: float, dec: float,
-    parquets: list[Path],
-) -> bool:
+def check_results_parquets(ra, dec, parquets):
     """
     Check every ref-pos parquet for this target.
     Returns True only if the target is found in ALL of them.
@@ -272,8 +267,8 @@ def main() -> None:
                    help="Write RA,Dec of targets with a missing/incomplete LC to this file")
     args = p.parse_args()
 
-    good_coords:    list[tuple[float, float]] = []
-    missing_coords: list[tuple[float, float]] = []
+    good_coords    = []
+    missing_coords = []
 
     if args.paths:
         paths = [p_.resolve() for p_ in args.paths]
@@ -282,11 +277,12 @@ def main() -> None:
         parquet_files = [p_ for p_ in paths if p_.suffix == '.parquet']
         directories   = [p_ for p_ in paths if p_.is_dir()]
 
+        # Group parquets by coord key
+        groups    = {}
+        coord_map = {}
+
         # ── Results-dir mode: parquet files given ────────────────────────────
         if parquet_files:
-            # Group ref-pos parquets by (ra, dec) key
-            groups: dict[str, list[Path]] = {}
-            coord_map: dict[str, tuple[float, float]] = {}
             skipped = 0
             for pq in sorted(parquet_files):
                 if _is_sci(pq):
