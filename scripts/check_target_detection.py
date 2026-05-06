@@ -42,7 +42,9 @@ _PREFIX_RE = re.compile(r'^(\d+(?:\.\d+)?)_([+-]\d+(?:\.\d+)?)')
 
 def _parse_ra_dec(name: str):
     """Parse RA, Dec from a directory name or parquet filename."""
-    stem = Path(name).name.removesuffix('.parquet')
+    stem = Path(name).name
+    if stem.endswith('.parquet'):
+        stem = stem[:-8]
     m = _PREFIX_RE.match(stem)
     if m:
         return float(m.group(1)), float(m.group(2))
