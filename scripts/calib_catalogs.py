@@ -165,6 +165,12 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     n   = vector_assoc[matched_mask] - 1  # 0-based ref catalog indices
     pos = np.where(matched_mask)[0]        # sexout row indices
 
+    # Target row: ASSOC entry at 0-based index len(table_ref) has no ref catalog entry.
+    # Use n_safe for all ref-catalog lookups; override results for the target row after.
+    _is_tgt = (n == len(table_ref))
+    n_safe  = n.copy()
+    n_safe[_is_tgt] = 0
+
     # Reference frame centre for polynomial normalisation
     ra0  = float(np.mean(raref))
     dec0 = float(np.mean(decref))
@@ -222,7 +228,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         flagsfin  = flags_tmp
         alphafin  = alpha[pos]
         deltafin  = delta[pos]
-        class_star = clas[n]
+        class_star = clas[n_safe]
+        class_star[_is_tgt] = 0.0  # target not a calibration star
         alpfin    = alp[pos]
         vector_assoc_fin = vector_assoc[pos]
         dltfin    = dlt[pos]
@@ -230,10 +237,13 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         flux_dif_tmp     = flux_dif[:, k][pos]
         flux_dif_err_tmp = flux_dif_err[:, k][pos]
 
-        q_mag = mag_ref_tot[k][n]
-        q_err = mag_ref_tot_err[k][n]
+        q_mag = mag_ref_tot[k][n_safe]
+        q_err = mag_ref_tot_err[k][n_safe]
+        q_mag[_is_tgt] = np.nan  # target has no reference magnitude
+        q_err[_is_tgt] = np.nan
 
         flux_ref_tot[k] = 10.0**(0.4 * (np.float64(magzp_dif) - np.float64(q_mag)))
+        flux_ref_tot[k][_is_tgt] = 0.0  # target has no reference flux; use diff-image flux only
         flux_tot[k]     = np.float64(flux_ref_tot[k]) + np.float64(flux_dif_tmp)
 
         maginst  = np.where(
@@ -255,7 +265,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         q_mag_all    = q_mag.copy()
 
         # ── Calibrator selection ────────────────────────────────────────────
-        good_ref_mask = is_good_calib[n]
+        good_ref_mask = is_good_calib[n_safe]
+        good_ref_mask[_is_tgt] = False  # target excluded from calibrator selection
         fn = np.where(
             (class_star >= 0.7) & (flags_tmp == 0) &
             (q_mag > 14.) & (q_mag < 19.0) & (q_err < 0.3) &

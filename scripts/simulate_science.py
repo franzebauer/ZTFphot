@@ -82,12 +82,12 @@ def build_simulated_image(source_img, source_cat, save_name,
 
     if target_ra is not None and target_dec is not None:
         tgt = SkyCoord(ra=target_ra, dec=target_dec, unit='deg')
-        if len(catalog) == 0 or tgt.separation(catalog).min().arcsec >= 3.0:
+        if len(catalog) == 0 or tgt.separation(catalog).min().arcsec >= 1.0:
             x, y = wcs.world_to_pixel(tgt)
             x_, y_ = int(np.floor(x)), int(np.floor(y))
             if 0 <= x_ < ncols and 0 <= y_ < nrows and _valid_frac(y_, x_) > 0.5:
                 psf = makeGaussian(size=size, fwhm=fwhm,
-                                   center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX
+                                   center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX * 30
                 paint_psf(data, y_, x_, psf)
 
     data = np.clip(data, 0, 32767).astype(np.int16)

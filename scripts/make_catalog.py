@@ -55,8 +55,7 @@ def make_catalog(save_path, refcats):
         catname = catalog[catalog.rfind("ztf_")+4:catalog.rfind("_refsexcat")]
         hdul = fits.open(catalog)
         tmp = Table(hdul[1].data)
-        tmp = tmp[tmp['FLAGS'] == 0]
-        tmp = tmp[tmp['MAG_BEST'] <-5.6]
+        tmp = tmp[tmp['FLAGS'] < 4]
         table = Table()
         table = tmp['CLASS_STAR', 'ALPHAWIN_J2000',
                     'DELTAWIN_J2000', 'MAG_AUTO', 'MAGERR_AUTO']
