@@ -232,22 +232,33 @@ def check_target_workdir(ra, dec, base_dir, field, band, ccdid, qid):
 
 # ── Results-dir mode ──────────────────────────────────────────────────────────
 
-def check_results_parquets(ra, dec, parquets):
+def check_parquet_list(ra, dec, parquets, label):
     """
-    Check every ref-pos parquet for this target.
-    Returns True only if the target is found in ALL of them.
+    Check every parquet in the list for the target.
+    Prints per-file results.  Returns True only if ALL files contain the target.
+    Skips the check (returns None) if parquets is empty.
     """
+    if not parquets:
+        return None
     tgt = SkyCoord(ra=ra, dec=dec, unit="deg")
+    if label:
+        print(f"  --- {label} ---")
     all_found = True
-    for p in parquets:
+    for p in sorted(parquets):
         if not check_lightcurve(p, tgt):
             all_found = False
     return all_found
 
 
+def _missing_path(missing_arg, suffix):
+    """Insert _ref or _sci before the file extension of the --missing path."""
+    p = Path(missing_arg)
+    return p.parent / (p.stem + suffix + p.suffix)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+def main():
     p = argparse.ArgumentParser(
         description="Check target detection across pipeline stages.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -264,56 +275,66 @@ def main() -> None:
     p.add_argument("--ccdid",    type=int,   default=None)
     p.add_argument("--qid",      type=int,   default=None)
     p.add_argument("--good",     type=Path,  default=None, metavar="FILE",
-                   help="Write RA,Dec of targets with a detected LC to this file")
+                   help="Write RA,Dec of targets found in ALL parquets (ref + sci)")
     p.add_argument("--missing",  type=Path,  default=None, metavar="FILE",
-                   help="Write RA,Dec of targets with a missing/incomplete LC to this file")
+                   help="Stem for missing output files: FILE becomes "
+                        "FILE_ref.ext and FILE_sci.ext")
     args = p.parse_args()
 
-    good_coords    = []
-    missing_coords = []
+    good_coords        = []
+    missing_ref_coords = []
+    missing_sci_coords = []
 
     if args.paths:
         paths = [p_.resolve() for p_ in args.paths]
 
-        # Separate into parquet files and directories
         parquet_files = [p_ for p_ in paths if p_.suffix == '.parquet']
         directories   = [p_ for p_ in paths if p_.is_dir()]
 
-        # Group parquets by coord key
-        groups    = {}
-        coord_map = {}
-
         # ── Results-dir mode: parquet files given ────────────────────────────
         if parquet_files:
-            skipped = 0
+            # Group into ref-pos and sci-pos by coordinate key
+            ref_groups = {}
+            sci_groups = {}
+            coord_map  = {}
+
             for pq in sorted(parquet_files):
-                if _is_sci(pq):
-                    continue
                 parsed = _parse_ra_dec(pq.name)
                 if parsed is None:
                     print(f"WARNING: cannot parse RA/Dec from '{pq.name}' — skipping",
                           file=sys.stderr)
-                    skipped += 1
                     continue
                 ra, dec = parsed
                 key = f"{ra:.5f}_{dec:+.5f}"
-                groups.setdefault(key, []).append(pq)
                 coord_map[key] = (ra, dec)
+                if _is_sci(pq):
+                    sci_groups.setdefault(key, []).append(pq)
+                else:
+                    ref_groups.setdefault(key, []).append(pq)
 
-            if not groups:
+            all_keys = sorted(set(list(ref_groups) + list(sci_groups)))
+            if not all_keys:
                 sys.exit("No parseable parquet files found.")
 
-            for key in sorted(groups):
+            for key in all_keys:
                 ra, dec = coord_map[key]
-                pqs = sorted(groups[key])
                 print(f"\n{'#'*60}")
                 print(f"  TARGET  RA={ra}  Dec={dec}")
                 print(f"{'#'*60}")
-                found = check_results_parquets(ra, dec, pqs)
-                if found:
+
+                found_ref = check_parquet_list(ra, dec, ref_groups.get(key, []), "ref-pos")
+                found_sci = check_parquet_list(ra, dec, sci_groups.get(key, []), "sci-pos")
+
+                ref_ok = found_ref is None or found_ref
+                sci_ok = found_sci is None or found_sci
+
+                if ref_ok and sci_ok:
                     good_coords.append((ra, dec))
                 else:
-                    missing_coords.append((ra, dec))
+                    if not ref_ok:
+                        missing_ref_coords.append((ra, dec))
+                    if not sci_ok:
+                        missing_sci_coords.append((ra, dec))
 
         # ── Work-dir mode: directories given ─────────────────────────────────
         for d in directories:
@@ -332,7 +353,7 @@ def main() -> None:
             if found:
                 good_coords.append((ra, dec))
             else:
-                missing_coords.append((ra, dec))
+                missing_ref_coords.append((ra, dec))
 
     else:
         # ── Single-target mode ────────────────────────────────────────────────
@@ -349,25 +370,35 @@ def main() -> None:
         if found:
             good_coords.append((ra, dec))
         else:
-            missing_coords.append((ra, dec))
+            missing_ref_coords.append((ra, dec))
 
     print()
 
-    if len(good_coords) + len(missing_coords) > 1:
-        print(f"Summary: {len(good_coords)} good, {len(missing_coords)} missing "
-              f"(out of {len(good_coords) + len(missing_coords)})")
+    n_total = len(good_coords) + len(set(
+        [c for c in missing_ref_coords] + [c for c in missing_sci_coords]))
+    if n_total > 1:
+        print(f"Summary: {len(good_coords)} good, "
+              f"{len(missing_ref_coords)} missing-ref, "
+              f"{len(missing_sci_coords)} missing-sci "
+              f"(out of {n_total})")
 
     if args.good is not None:
         with open(args.good, "w") as f:
             for ra, dec in good_coords:
                 f.write(f"{ra},{dec}\n")
-        print(f"good    → {args.good}  ({len(good_coords)} targets)")
+        print(f"good        → {args.good}  ({len(good_coords)} targets)")
 
     if args.missing is not None:
-        with open(args.missing, "w") as f:
-            for ra, dec in missing_coords:
+        ref_path = _missing_path(args.missing, "_ref")
+        sci_path = _missing_path(args.missing, "_sci")
+        with open(ref_path, "w") as f:
+            for ra, dec in missing_ref_coords:
                 f.write(f"{ra},{dec}\n")
-        print(f"missing → {args.missing}  ({len(missing_coords)} targets)")
+        print(f"missing-ref → {ref_path}  ({len(missing_ref_coords)} targets)")
+        with open(sci_path, "w") as f:
+            for ra, dec in missing_sci_coords:
+                f.write(f"{ra},{dec}\n")
+        print(f"missing-sci → {sci_path}  ({len(missing_sci_coords)} targets)")
 
 
 if __name__ == "__main__":
