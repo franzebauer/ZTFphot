@@ -3,7 +3,7 @@ import os
 import numpy as np
 from astropy.io import ascii
 from astropy.io import fits
-from astropy.table import Table, vstack
+from astropy.table import Table
 
 
 def list_files(dir):
@@ -31,7 +31,7 @@ def list_folders(dir):
 
 # In []
 
-def make_catalog(save_path, refcats, target_ra=None, target_dec=None):
+def make_catalog(save_path, refcats):
     catalogs = [file for file in list_files(refcats) if "refsexcat.fits" in file]
 
     for catalog in catalogs:
@@ -48,31 +48,14 @@ def make_catalog(save_path, refcats, target_ra=None, target_dec=None):
 
             hdul.close()
         else:
-            infobits_ref = np.uint32 = np.uint32.max
+            infobits_ref = int(np.iinfo(np.uint32).max)
             magzp_ref = np.NAN
             magzprms_ref = np.NAN
 
         catname = catalog[catalog.rfind("ztf_")+4:catalog.rfind("_refsexcat")]
         hdul = fits.open(catalog)
-        all_sources = Table(hdul[1].data)
-        hdul.close()
-        tmp = all_sources[all_sources['FLAGS'] == 0]
-
-        # ── Force-inject target if it was removed by the FLAGS cut ────────────
-        if target_ra is not None and target_dec is not None:
-            cos_dec = np.cos(np.radians(target_dec))
-            sep_arcsec = np.sqrt(
-                ((all_sources['ALPHAWIN_J2000'] - target_ra) * cos_dec * 3600) ** 2 +
-                ((all_sources['DELTAWIN_J2000'] - target_dec) * 3600) ** 2
-            )
-            nearest = int(np.argmin(sep_arcsec))
-            if sep_arcsec[nearest] < 3.0:
-                tgt_flags = int(all_sources['FLAGS'][nearest])
-                if tgt_flags != 0:
-                    tmp = vstack([tmp, all_sources[nearest:nearest + 1]])
-                    print(f"  [catalog] Target injected: "
-                          f"sep={sep_arcsec[nearest]:.2f}\"  FLAGS={tgt_flags}")
-        tmp = tmp[tmp['MAG_BEST'] <-5.6]
+        tmp = Table(hdul[1].data)
+        tmp = tmp[tmp['FLAGS'] < 4]
         table = Table()
         table = tmp['CLASS_STAR', 'ALPHAWIN_J2000',
                     'DELTAWIN_J2000', 'MAG_AUTO', 'MAGERR_AUTO']
@@ -85,8 +68,8 @@ def make_catalog(save_path, refcats, target_ra=None, target_dec=None):
         table['MAGERR_APER_4px'] = tmp['MAGERR_APER'][:, 2]
         table['MAGERR_APER_6px'] = tmp['MAGERR_APER'][:, 3]
         table['MAGERR_APER_10px'] = tmp['MAGERR_APER'][:, 4]
-        table['MAGZP_REF'] = magzp_ref,
-        table['MAGZPRMS_REF'] = magzprms_ref,
+        table['MAGZP_REF'] = magzp_ref
+        table['MAGZPRMS_REF'] = magzprms_ref
         table['INFOBITS_REF'] = infobits_ref
         table['ID'] = tmp['CLASS_STAR'].astype(str)
 

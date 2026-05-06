@@ -5,13 +5,26 @@ Diagnostic: check whether the target RA/Dec appears in the reference sexcat,
 the reference CSV catalog, the per-epoch SExtractor output catalogs, and the
 assembled light-curve parquet.
 
-Usage (ztf environment):
-    python check_target_detection.py --ra 330.34158 --dec 0.72143
-    python check_target_detection.py --ra 330.34158 --dec 0.72143 \
-        --field 443 --band zg --ccdid 16 --qid 2
+Single target (pipeline work-dir):
+    python check_target_detection.py --ra 330.34158 --dec 0.72143 --base-dir data
+
+Multiple work-dirs (RA/Dec parsed from directory name):
+    python check_target_detection.py data_*/
+    python check_target_detection.py data_*/ --good good.txt --missing redo.txt
+
+Results-dir mode (parquet files from batch_pipeline output):
+    python check_target_detection.py BAT_results/*.parquet --good good.txt --missing redo.txt
+
+In results-dir mode RA/Dec are parsed from the parquet filename.  A target is
+classified as GOOD only if the target appears in EVERY ref-pos parquet for
+that coordinate (sci-pos variants are skipped).  Any parquet that lacks the
+target causes the coordinate to be written to the missing file.
+
+Output files match the batch_pipeline.py input format: RA,Dec per line.
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -23,6 +36,27 @@ import astropy.units as u
 
 MATCH_RADIUS_ARCSEC = 3.0
 
+# Matches {ra}_{dec} as a full name (directory mode) or as a prefix (parquet mode)
+_PREFIX_RE = re.compile(r'^(\d+(?:\.\d+)?)_([+-]\d+(?:\.\d+)?)')
+
+
+def _parse_ra_dec(name: str):
+    """Parse RA, Dec from a directory name or parquet filename."""
+    stem = Path(name).name
+    if stem.endswith('.parquet'):
+        stem = stem[:-8]
+    m = _PREFIX_RE.match(stem)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    return None
+
+
+def _is_sci(path: Path) -> bool:
+    """True for sci-pos parquet variants (_sci.parquet or _sci_merged.parquet)."""
+    return path.name.endswith('_sci.parquet') or path.name.endswith('_sci_merged.parquet')
+
+
+# ── Pipeline-stage checks (work-dir mode) ────────────────────────────────────
 
 def check_refsexcat(ref_dir: Path, field: int, fc: str, ccd: int, qid: int,
                     tgt: SkyCoord) -> None:
@@ -63,8 +97,7 @@ def check_ref_csv(cat_dir: Path, field: int, fc: str, ccd: int, qid: int,
         print(f"NO MATCH  (nearest={d:.2f}\")")
 
 
-def check_sexout_catalogs(sex_dir: Path, tgt: SkyCoord,
-                          max_show: int = 5) -> None:
+def check_sexout_catalogs(sex_dir: Path, tgt: SkyCoord, max_show: int = 5) -> None:
     cats = sorted(sex_dir.glob("*_sexout.fits"))
     print(f"  sexout    : {len(cats)} catalogs in {sex_dir.relative_to(sex_dir.parents[4])}")
     if not cats:
@@ -75,8 +108,8 @@ def check_sexout_catalogs(sex_dir: Path, tgt: SkyCoord,
     for path in cats:
         try:
             with fits.open(path) as h:
-                tbl = Table(h[2].data)   # LDAC: HDU[1]=header, HDU[2]=objects
-        except Exception as e:
+                tbl = Table(h[2].data)
+        except Exception:
             continue
         if len(tbl) == 0:
             no_match_examples.append((path.name, "empty"))
@@ -113,17 +146,18 @@ def check_sexout_catalogs(sex_dir: Path, tgt: SkyCoord,
                 print(f"      {item[0]}  nearest={item[1]:.2f}\"")
 
 
-def check_lightcurve(lc_path: Path, tgt: SkyCoord) -> None:
+def check_lightcurve(lc_path: Path, tgt: SkyCoord) -> bool:
+    """Returns True if the target is found within MATCH_RADIUS_ARCSEC."""
     import pandas as pd
     print(f"  parquet   : {lc_path.name}", end="  ")
     if not lc_path.exists():
         print("[NOT FOUND]")
-        return
+        return False
     df = pd.read_parquet(lc_path, columns=["object_index", "ALPHAWIN_REF", "DELTAWIN_REF"])
     srcs = df.groupby("object_index")[["ALPHAWIN_REF", "DELTAWIN_REF"]].first().dropna()
     if srcs.empty:
         print("NO SOURCES")
-        return
+        return False
     cat = SkyCoord(ra=srcs["ALPHAWIN_REF"].values, dec=srcs["DELTAWIN_REF"].values, unit="deg")
     idx, sep, _ = tgt.match_to_catalog_sky(cat)
     d = sep[0].arcsec
@@ -131,77 +165,296 @@ def check_lightcurve(lc_path: Path, tgt: SkyCoord) -> None:
         obj_idx = srcs.index[int(idx)]
         n_epochs = (df["object_index"] == obj_idx).sum()
         print(f"MATCH  sep={d:.2f}\"  object_index={obj_idx}  N_epochs={n_epochs}")
-    else:
-        print(f"NO MATCH  (nearest={d:.2f}\")")
+        return True
+    print(f"NO MATCH  (nearest={d:.2f}\")")
+    return False
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description="Check target detection across pipeline stages.")
-    p.add_argument("--ra",       type=float, required=True)
-    p.add_argument("--dec",      type=float, required=True)
-    p.add_argument("--base-dir", type=Path,  default=Path("data"))
+def check_target_workdir(ra, dec, base_dir, field, band, ccdid, qid):
+    """Check all pipeline stages for one target in a work-dir. Returns True if LC found."""
+    tgt = SkyCoord(ra=ra, dec=dec, unit="deg")
+
+    ref_root = base_dir / "Reference"
+    if not ref_root.exists():
+        print(f"  [Reference directory not found: {ref_root}]")
+        return False
+
+    quadrants = []
+    for field_dir in sorted(ref_root.iterdir()):
+        try:
+            f = int(field_dir.name)
+        except ValueError:
+            continue
+        if field is not None and f != field:
+            continue
+        for fc_dir in sorted(field_dir.iterdir()):
+            fc = fc_dir.name
+            if band is not None and fc != band:
+                continue
+            for ccd_dir in sorted(fc_dir.iterdir()):
+                try:
+                    ccd = int(ccd_dir.name.replace("ccd", ""))
+                except ValueError:
+                    continue
+                if ccdid is not None and ccd != ccdid:
+                    continue
+                for qid_dir in sorted(ccd_dir.iterdir()):
+                    try:
+                        q = int(qid_dir.name.replace("q", ""))
+                    except ValueError:
+                        continue
+                    if qid is not None and q != qid:
+                        continue
+                    quadrants.append(dict(field=f, fc=fc, ccd=ccd, qid=q,
+                                         ref_dir=qid_dir))
+
+    if not quadrants:
+        print("  [No quadrants found]")
+        return False
+
+    found = False
+    for quad in quadrants:
+        f, fc, ccd, q = quad["field"], quad["fc"], quad["ccd"], quad["qid"]
+        print(f"\n{'='*60}")
+        print(f"  {f:06d} {fc} ccd{ccd:02d} q{q}")
+        print(f"{'='*60}")
+        check_refsexcat(quad["ref_dir"], f, fc, ccd, q, tgt)
+        check_ref_csv(base_dir / "Catalogs", f, fc, ccd, q, tgt)
+        sex_dir = base_dir / "SExCatalogs" / f"{f:06d}" / fc / f"{ccd:02d}" / str(q)
+        check_sexout_catalogs(sex_dir, tgt)
+        lc_path = (base_dir / "LightCurves" / f"{f:06d}" / fc
+                   / f"ccd{ccd:02d}" / f"q{q}" / "lightcurves.parquet")
+        if check_lightcurve(lc_path, tgt):
+            found = True
+
+    return found
+
+
+# ── Results-dir mode ──────────────────────────────────────────────────────────
+
+def check_parquet_list(ra, dec, parquets, label):
+    """
+    Check every parquet in the list for the target.
+    Prints per-file results.  Returns True only if ALL files contain the target.
+    Skips the check (returns None) if parquets is empty.
+    """
+    if not parquets:
+        return None
+    tgt = SkyCoord(ra=ra, dec=dec, unit="deg")
+    if label:
+        print(f"  --- {label} ---")
+    all_found = True
+    for p in sorted(parquets):
+        if not check_lightcurve(p, tgt):
+            all_found = False
+    return all_found
+
+
+_FC_RE = re.compile(r'_(z[gri])_')
+
+
+def _extract_filtercode(name):
+    """Extract zg/zr/zi from a parquet filename, or None if not found."""
+    m = _FC_RE.search(name)
+    return m.group(1) if m else None
+
+
+def _variant_path(arg, filtercode, suffix):
+    """Build output path: stem + _{filtercode} + suffix + ext.
+    E.g. redo.txt, zg, _ref → redo_zg_ref.txt"""
+    p = Path(arg)
+    return p.parent / (p.stem + '_' + filtercode + suffix + p.suffix)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Check target detection across pipeline stages.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("paths", nargs="*", type=Path,
+                   help="Work-dirs or parquet files (shell glob supported). "
+                        "RA/Dec are parsed from the name.")
+    p.add_argument("--ra",       type=float, default=None)
+    p.add_argument("--dec",      type=float, default=None)
+    p.add_argument("--base-dir", type=Path,  default=Path("data"),
+                   help="Base directory for single-target mode (default: data)")
     p.add_argument("--field",    type=int,   default=None)
     p.add_argument("--band",     type=str,   default=None, help="e.g. zg, zr, zi")
     p.add_argument("--ccdid",    type=int,   default=None)
     p.add_argument("--qid",      type=int,   default=None)
+    p.add_argument("--good",     type=Path,  default=None, metavar="FILE",
+                   help="Write RA,Dec of targets found in ALL parquets (ref + sci)")
+    p.add_argument("--missing",  type=Path,  default=None, metavar="FILE",
+                   help="Stem for missing output files: FILE becomes "
+                        "FILE_ref.ext and FILE_sci.ext")
     args = p.parse_args()
 
-    base_dir = args.base_dir.resolve()
-    tgt = SkyCoord(ra=args.ra, dec=args.dec, unit="deg")
+    # Each entry is (ra, dec, filtercode_or_None)
+    good_coords        = []
+    missing_ref_coords = []
+    missing_sci_coords = []
 
-    # Discover quadrants from Reference directory
-    ref_root = base_dir / "Reference"
-    quadrants = []
-    for field_dir in sorted(ref_root.iterdir()):
-        try:
-            field = int(field_dir.name)
-        except ValueError:
-            continue
-        if args.field is not None and field != args.field:
-            continue
-        for fc_dir in sorted(field_dir.iterdir()):
-            fc = fc_dir.name
-            if args.band is not None and fc != args.band:
+    if args.paths:
+        paths = [p_.resolve() for p_ in args.paths]
+
+        parquet_files = [p_ for p_ in paths if p_.suffix == '.parquet']
+        directories   = [p_ for p_ in paths if p_.is_dir()]
+
+        # ── Results-dir mode: parquet files given ────────────────────────────
+        if parquet_files:
+            # Group by (coord_key, filtercode) → {ref: [], sci: []}
+            groups    = {}
+            coord_map = {}
+
+            for pq in sorted(parquet_files):
+                parsed = _parse_ra_dec(pq.name)
+                if parsed is None:
+                    print(f"WARNING: cannot parse RA/Dec from '{pq.name}' — skipping",
+                          file=sys.stderr)
+                    continue
+                fc = _extract_filtercode(pq.name)
+                if fc is None:
+                    print(f"WARNING: cannot parse filtercode from '{pq.name}' — skipping",
+                          file=sys.stderr)
+                    continue
+                ra, dec = parsed
+                coord_key = f"{ra:.5f}_{dec:+.5f}"
+                coord_map[coord_key] = (ra, dec)
+                group_key = (coord_key, fc)
+                groups.setdefault(group_key, {'ref': [], 'sci': []})
+                if _is_sci(pq):
+                    groups[group_key]['sci'].append(pq)
+                else:
+                    groups[group_key]['ref'].append(pq)
+
+            if not groups:
+                sys.exit("No parseable parquet files found.")
+
+            for (coord_key, fc) in sorted(groups):
+                ra, dec = coord_map[coord_key]
+                print(f"\n{'#'*60}")
+                print(f"  TARGET  RA={ra}  Dec={dec}  [{fc}]")
+                print(f"{'#'*60}")
+
+                found_ref = check_parquet_list(ra, dec, groups[(coord_key, fc)]['ref'], "ref-pos")
+                found_sci = check_parquet_list(ra, dec, groups[(coord_key, fc)]['sci'], "sci-pos")
+
+                ref_ok = found_ref is None or found_ref
+                sci_ok = found_sci is None or found_sci
+
+                if ref_ok and sci_ok:
+                    good_coords.append((ra, dec, fc))
+                else:
+                    if not ref_ok:
+                        missing_ref_coords.append((ra, dec, fc))
+                    if not sci_ok:
+                        missing_sci_coords.append((ra, dec, fc))
+
+        # ── Work-dir mode: directories given ─────────────────────────────────
+        for d in directories:
+            parsed = _parse_ra_dec(d.name)
+            if parsed is None:
+                print(f"WARNING: cannot parse RA/Dec from '{d.name}' — skipping",
+                      file=sys.stderr)
                 continue
-            for ccd_dir in sorted(fc_dir.iterdir()):
-                ccd_str = ccd_dir.name.replace("ccd", "")
-                try:
-                    ccd = int(ccd_str)
-                except ValueError:
-                    continue
-                if args.ccdid is not None and ccd != args.ccdid:
-                    continue
-                for qid_dir in sorted(ccd_dir.iterdir()):
-                    try:
-                        qid = int(qid_dir.name.replace("q", ""))
-                    except ValueError:
-                        continue
-                    if args.qid is not None and qid != args.qid:
-                        continue
-                    quadrants.append(dict(field=field, fc=fc, ccd=ccd, qid=qid,
-                                         ref_dir=qid_dir))
+            ra, dec = parsed
+            print(f"\n{'#'*60}")
+            print(f"  TARGET  RA={ra}  Dec={dec}  ({d.name})")
+            print(f"{'#'*60}")
+            found = check_target_workdir(ra, dec, d,
+                                         field=args.field, band=args.band,
+                                         ccdid=args.ccdid, qid=args.qid)
+            if found:
+                good_coords.append((ra, dec, None))
+            else:
+                missing_ref_coords.append((ra, dec, None))
 
-    if not quadrants:
-        sys.exit("No quadrants found. Check --base-dir and filter arguments.")
-
-    for q in quadrants:
-        field, fc, ccd, qid = q["field"], q["fc"], q["ccd"], q["qid"]
-        tag = f"{field:06d} {fc} ccd{ccd:02d} q{qid}"
-        print(f"\n{'='*60}")
-        print(f"  {tag}")
-        print(f"{'='*60}")
-
-        check_refsexcat(q["ref_dir"], field, fc, ccd, qid, tgt)
-        check_ref_csv(base_dir / "Catalogs", field, fc, ccd, qid, tgt)
-
-        sex_dir = base_dir / "SExCatalogs" / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid)
-        check_sexout_catalogs(sex_dir, tgt)
-
-        lc_path = (base_dir / "LightCurves" / f"{field:06d}" / fc
-                   / f"ccd{ccd:02d}" / f"q{qid}" / "lightcurves.parquet")
-        check_lightcurve(lc_path, tgt)
+    else:
+        # ── Single-target mode ────────────────────────────────────────────────
+        if args.ra is None or args.dec is None:
+            p.error("--ra and --dec are required when no paths are given")
+        ra, dec = args.ra, args.dec
+        base_dir = args.base_dir.resolve()
+        print(f"\n{'#'*60}")
+        print(f"  TARGET  RA={ra}  Dec={dec}")
+        print(f"{'#'*60}")
+        found = check_target_workdir(ra, dec, base_dir,
+                                     field=args.field, band=args.band,
+                                     ccdid=args.ccdid, qid=args.qid)
+        if found:
+            good_coords.append((ra, dec, None))
+        else:
+            missing_ref_coords.append((ra, dec, None))
 
     print()
+
+    n_total = len(good_coords) + len(set(
+        [(r, d, f) for r, d, f in missing_ref_coords] +
+        [(r, d, f) for r, d, f in missing_sci_coords]))
+    if n_total > 1:
+        print(f"Summary: {len(good_coords)} good, "
+              f"{len(missing_ref_coords)} missing-ref, "
+              f"{len(missing_sci_coords)} missing-sci "
+              f"(out of {n_total})")
+
+    def _write_by_filter(path_arg, entries, label):
+        """Write one file per filtercode found in entries."""
+        # Collect unique filtercodes (None → write all to the base path)
+        fcs = sorted(set(fc for _, _, fc in entries if fc is not None))
+        if not fcs:
+            # work-dir mode: no filtercode, write single file
+            with open(path_arg, "w") as fh:
+                for ra, dec, _ in entries:
+                    fh.write(f"{ra},{dec}\n")
+            print(f"{label} → {path_arg}  ({len(entries)} entries)")
+            return
+        for fc in fcs:
+            subset = [(ra, dec) for ra, dec, f in entries if f == fc]
+            out = _variant_path(path_arg, fc, "")
+            with open(out, "w") as fh:
+                for ra, dec in subset:
+                    fh.write(f"{ra},{dec}\n")
+            print(f"{label} [{fc}] → {out}  ({len(subset)} targets)")
+
+    def _write_ref_sci_by_filter(path_arg, ref_entries, sci_entries):
+        fcs = sorted(set(
+            [fc for _, _, fc in ref_entries if fc is not None] +
+            [fc for _, _, fc in sci_entries if fc is not None]
+        ))
+        if not fcs:
+            # work-dir mode
+            with open(_variant_path(path_arg, "ref", ""), "w") as fh:
+                for ra, dec, _ in ref_entries:
+                    fh.write(f"{ra},{dec}\n")
+            print(f"missing-ref → {_variant_path(path_arg, 'ref', '')}  ({len(ref_entries)} targets)")
+            with open(_variant_path(path_arg, "sci", ""), "w") as fh:
+                for ra, dec, _ in sci_entries:
+                    fh.write(f"{ra},{dec}\n")
+            print(f"missing-sci → {_variant_path(path_arg, 'sci', '')}  ({len(sci_entries)} targets)")
+            return
+        for fc in fcs:
+            ref_sub = [(ra, dec) for ra, dec, f in ref_entries if f == fc]
+            sci_sub = [(ra, dec) for ra, dec, f in sci_entries if f == fc]
+            if ref_sub:
+                out = _variant_path(path_arg, fc, "_ref")
+                with open(out, "w") as fh:
+                    for ra, dec in ref_sub:
+                        fh.write(f"{ra},{dec}\n")
+                print(f"missing-ref [{fc}] → {out}  ({len(ref_sub)} targets)")
+            if sci_sub:
+                out = _variant_path(path_arg, fc, "_sci")
+                with open(out, "w") as fh:
+                    for ra, dec in sci_sub:
+                        fh.write(f"{ra},{dec}\n")
+                print(f"missing-sci [{fc}] → {out}  ({len(sci_sub)} targets)")
+
+    if args.good is not None:
+        _write_by_filter(args.good, good_coords, "good")
+
+    if args.missing is not None:
+        _write_ref_sci_by_filter(args.missing, missing_ref_coords, missing_sci_coords)
 
 
 if __name__ == "__main__":

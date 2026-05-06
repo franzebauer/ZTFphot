@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 import pandas as pd
+from astropy.table import Table as AstropyTable
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,18 @@ def step_lightcurves(
             if src in ref.columns:
                 ref_cols[dst] = pd.to_numeric(ref[src], errors='coerce').values
 
+        # Append one sentinel row for the target ASSOC entry (index = len(ref), 0-based).
+        # Needed when the target is appended to the ASSOC catalog beyond the ref catalog.
+        if target_ra is not None and target_dec is not None:
+            _tgt_extra = {
+                'ALPHAWIN_REF': np.float64(target_ra),
+                'DELTAWIN_REF': np.float64(target_dec),
+                'FLAG_SE_REF':  np.int32(0),
+                'INFOBITS_REF': np.int32(0),
+            }
+            for dst in list(ref_cols):
+                ref_cols[dst] = np.append(ref_cols[dst], _tgt_extra.get(dst, 0))
+
         # Extract MAGZP_REF / MAGZPRMS_REF as scalars for parquet metadata
         magzp_ref_val    = float(pd.to_numeric(ref['MAGZP_REF'],    errors='coerce').iloc[0]) if 'MAGZP_REF'    in ref.columns else float('nan')
         magzprms_ref_val = float(pd.to_numeric(ref['MAGZPRMS_REF'], errors='coerce').iloc[0]) if 'MAGZPRMS_REF' in ref.columns else float('nan')
@@ -182,8 +195,7 @@ def step_lightcurves(
                 logger.warning(f"  Could not read {cal_path.name}: {e}")
                 continue
 
-            from astropy.table import Table
-            tbl = Table(data).to_pandas()
+            tbl = AstropyTable(data).to_pandas()
             if tbl.empty:
                 continue
 

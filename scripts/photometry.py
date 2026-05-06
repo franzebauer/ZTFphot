@@ -134,8 +134,11 @@ def _write_assoc_catalog(ref_csv_path: Path, assoc_path: Path,
             valid = np.isfinite(ra) & np.isfinite(dec)
             if valid.sum() == 0 or tgt.separation(
                     SkyCoord(ra=ra[valid], dec=dec[valid], unit='deg')
-            ).min().arcsec >= 3.0:
+            ).min().arcsec >= 1.0:
                 f.write(f"{len(ref) + 1} {target_ra:.8f} {target_dec:.8f}\n")
+                # SExtractor silently drops the last ASSOC entry; this sentinel
+                # entry (at the unreachable north pole) keeps the target entry loaded.
+                f.write(f"{len(ref) + 2} 0.00000000 90.00000000\n")
 
 
 def _simulate_one(args: tuple) -> tuple[str, bool, str]:
