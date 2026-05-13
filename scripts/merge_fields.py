@@ -221,6 +221,14 @@ def merge_band(
             logger.warning(f"merge [{band}]: cannot normalize {qid_str}: {exc}. "
                            "Merging without offset correction.")
 
+    # ── 5. Re-key object_index to be globally unique across quadrants ─────────
+    running_max = int(frames[dom_idx]['object_index'].max())
+    for i, df in enumerate(frames):
+        if i == dom_idx:
+            continue
+        df['object_index'] = df['object_index'] + running_max + 1
+        running_max = int(df['object_index'].max())
+
     # ── 6. Concatenate and write ──────────────────────────────────────────────
     merged = pd.concat(frames, ignore_index=True)
     merged.sort_values('OBSMJD', inplace=True, ignore_index=True)
