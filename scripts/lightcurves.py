@@ -267,13 +267,14 @@ def step_lightcurves(
 
 def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
                target_ra: float | None = None, target_dec: float | None = None,
-               suffix: str = "") -> None:
+               suffix: str = "", poly_degree: int = 1) -> None:
     """
     Cross-calibrate and merge per-quadrant light curves for each band.
 
     The quadrant with the most clean detection-epochs is adopted as the
-    photometric reference. All others are shifted by a median offset from
-    stable common sources, then merged into LightCurves/merged/{band}/.
+    photometric reference. All others are corrected with a 2-D polynomial
+    spatial fit (degree=poly_degree) against stable common sources, then
+    merged into LightCurves/merged/{band}/.
     """
     import sys
     _scripts = Path(__file__).parent
@@ -294,4 +295,4 @@ def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
             continue
         out_dir = lc_root / "merged" / f"{target_ra:.5f}_{target_dec:+.5f}" / f"{band}{suffix}"
         merge_band(lc_root=lc_root, band=band, quadrants=band_qs, force=force,
-                   out_dir=out_dir, lc_suffix=suffix)
+                   out_dir=out_dir, lc_suffix=suffix, poly_degree=poly_degree)

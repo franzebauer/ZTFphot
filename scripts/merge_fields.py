@@ -11,16 +11,21 @@ Algorithm
 3.  For every non-dominant quadrant, find sources common to both quadrants
     (matched within MAX_SEP arcsec).  Keep only stable non-variable sources
     (std_mag < STD_CUT, N_clean >= MIN_EPOCHS in both quadrants).
-4.  Compute the median magnitude offset:
-        offset = median( median_mag_dominant[source] - median_mag_minority[source] )
-    over all common stable sources.  Apply offset directly to all MAG_* columns
-    in the minority parquet.
-5.  Concatenate all quadrants (with origin columns), sort by OBSMJD, and
+4.  Fit a 2-D polynomial (default degree=1, i.e. a linear tilt) to
+        delta_mag(RA, Dec) = median_mag_dominant - median_mag_minority
+    over all common stable sources with iterative 3σ MAD clipping.
+    Apply the position-dependent correction to all MAG_* columns.
+    Falls back to a scalar median offset if the polynomial fit fails.
+5.  Re-key object_index to be globally unique across quadrants, then
+    link overlap sources to the dominant quadrant's object_index via
+    coordinate matching.
+6.  Concatenate all quadrants (with origin columns), sort by OBSMJD, and
     write to LightCurves/merged/{band}/lightcurves_merged.parquet.
 
 Output parquet extra columns (beyond per-quadrant schema)
 ----------------------------------------------------------
-    norm_offset   float32   offset applied to all MAG_* columns (0.0 for dominant quadrant)
+    norm_offset   float32   per-row spatial correction applied to MAG_* columns
+                            (0.0 for dominant quadrant rows)
     field         int64     origin field number
     filtercode    str       origin filter code
     ccdid         int64     origin CCD ID
@@ -71,16 +76,33 @@ def _per_source_stats(df: pd.DataFrame, min_epochs: int = MIN_EPOCHS) -> pd.Data
     return stats[stats['n_clean'] >= min_epochs]
 
 
-def _compute_offset(stats_dom: pd.DataFrame,
-                    stats_min: pd.DataFrame,
-                    max_sep_arcsec: float = MAX_SEP_ARCSEC,
-                    std_cut: float = STD_CUT,
-                    min_common: int = MIN_COMMON) -> tuple[float, int]:
-    """
-    Match sources in dominant vs minority quadrant; compute median magnitude
-    offset = median(mag_dominant - mag_minority) over stable common sources.
+def _poly2d_basis(ra: np.ndarray, dec: np.ndarray,
+                  ra0: float, dec0: float, degree: int) -> np.ndarray:
+    """Design matrix for a 2-D polynomial in (RA-ra0, Dec-dec0)."""
+    u = ra  - ra0
+    v = dec - dec0
+    cols = [np.ones(len(ra)), u, v]
+    if degree >= 2:
+        cols += [u**2, u * v, v**2]
+    return np.column_stack(cols)
 
-    Returns (offset, n_common_used).  Raises ValueError if too few common sources.
+
+def _compute_spatial_correction(
+        stats_dom: pd.DataFrame,
+        stats_min: pd.DataFrame,
+        poly_degree: int = 1,
+        max_sep_arcsec: float = MAX_SEP_ARCSEC,
+        std_cut: float = STD_CUT,
+        min_common: int = MIN_COMMON,
+) -> tuple:
+    """
+    Match sources, sigma-clip, fit a 2-D polynomial to
+        delta_mag(RA, Dec) = median_mag_dominant - median_mag_minority
+    Returns (coeffs, ra0, dec0, n_used).
+
+    Falls back to a scalar (degree=0) when fewer sources are available than
+    needed for the requested degree.  Raises ValueError if even a scalar
+    cannot be computed.
     """
     cat_dom = SkyCoord(ra=stats_dom['ra'].values * u.deg,
                        dec=stats_dom['dec'].values * u.deg)
@@ -93,32 +115,48 @@ def _compute_offset(stats_dom: pd.DataFrame,
     stats_min_m = stats_min[matched].copy()
     stats_dom_m = stats_dom.iloc[idx[matched]].copy()
 
-    # Keep only stable sources in both
     stable = (
         (stats_dom_m['std_mag'].values < std_cut) &
         (stats_min_m['std_mag'].values < std_cut)
     )
-    n_common = stable.sum()
-
+    n_common = int(stable.sum())
     if n_common < min_common:
         raise ValueError(
-            f"Only {n_common} stable common sources (need {min_common}). "
-            "Cannot compute reliable normalization offset."
+            f"Only {n_common} stable common sources (need {min_common})."
         )
 
-    diff = stats_dom_m['median_mag'].values[stable] - stats_min_m['median_mag'].values[stable]
+    ra_s  = stats_min_m['ra'].values[stable]
+    dec_s = stats_min_m['dec'].values[stable]
+    diff  = stats_dom_m['median_mag'].values[stable] - stats_min_m['median_mag'].values[stable]
 
-    # Robust: iterative 3σ MAD clipping
+    # Iterative 3σ MAD clipping on residuals
+    clip_mask = np.ones(len(diff), dtype=bool)
     for _ in range(3):
-        med   = np.median(diff)
-        mad   = np.median(np.abs(diff - med))
+        med   = np.median(diff[clip_mask])
+        mad   = np.median(np.abs(diff[clip_mask] - med))
         sigma = 1.4826 * mad
-        mask  = np.abs(diff - med) < 3.0 * sigma
-        if mask.sum() < min_common // 2:
+        new_mask = np.abs(diff - med) < 3.0 * sigma
+        if new_mask.sum() < max(min_common // 2, 3):
             break
-        diff = diff[mask]
+        clip_mask = new_mask
 
-    return float(np.median(diff)), int(n_common)
+    ra_fit  = ra_s[clip_mask]
+    dec_fit = dec_s[clip_mask]
+    diff_fit = diff[clip_mask]
+    n_used   = int(clip_mask.sum())
+
+    ra0, dec0 = float(ra_fit.mean()), float(dec_fit.mean())
+
+    # Degrade to scalar if not enough sources for the requested degree
+    n_params = {0: 1, 1: 3, 2: 6}
+    deg = poly_degree
+    while deg > 0 and n_used < n_params[deg] * 5:
+        deg -= 1
+
+    A = _poly2d_basis(ra_fit, dec_fit, ra0, dec0, deg)
+    coeffs, _, _, _ = np.linalg.lstsq(A, diff_fit, rcond=None)
+
+    return coeffs, ra0, dec0, deg, n_used
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -130,6 +168,7 @@ def merge_band(
     force: bool = False,
     out_dir: Optional[Path] = None,
     lc_suffix: str = "",
+    poly_degree: int = 1,
 ) -> Optional[Path]:
     """
     Cross-calibrate and merge all quadrant light curves for one band.
@@ -201,7 +240,7 @@ def merge_band(
     for i, (df, n) in enumerate(zip(frames, n_clean)):
         logger.info(f"  {'[DOM]' if i == dom_idx else '     '} {_quad_tag(df)}: {n} clean det-epochs")
 
-    # ── 3 & 4. Compute and apply normalization offsets to all MAG_* columns ──
+    # ── 3 & 4. Compute and apply spatial normalization correction ────────────
     stats_dom = _per_source_stats(frames[dom_idx])
 
     for i, df in enumerate(frames):
@@ -210,24 +249,68 @@ def merge_band(
         qid_str = _quad_tag(df)
         try:
             stats_min = _per_source_stats(df)
-            offset, n_used = _compute_offset(stats_dom, stats_min)
-            logger.info(f"merge [{band}]: offset {qid_str} → dominant = "
-                        f"{offset:+.4f} mag  (N_common={n_used})")
+            coeffs, ra0, dec0, deg_used, n_used = _compute_spatial_correction(
+                stats_dom, stats_min, poly_degree=poly_degree)
+            scalar_summary = float(coeffs[0])
+            logger.info(
+                f"merge [{band}]: spatial correction {qid_str} → dominant  "
+                f"degree={deg_used}  N_common={n_used}  "
+                f"ZP={scalar_summary:+.4f} mag"
+            )
+            ra_arr  = pd.to_numeric(df['ALPHAWIN_REF'], errors='coerce').values
+            dec_arr = pd.to_numeric(df['DELTAWIN_REF'], errors='coerce').values
+            correction = (_poly2d_basis(ra_arr, dec_arr, ra0, dec0, deg_used)
+                          @ coeffs).astype(np.float32)
             for col in _MAG_COLS:
                 if col in df.columns:
-                    df[col] = (pd.to_numeric(df[col], errors='coerce') + offset).astype('float32')
-            df['norm_offset'] = np.float32(offset)
+                    df[col] = (pd.to_numeric(df[col], errors='coerce')
+                               + correction).astype('float32')
+            df['norm_offset'] = correction
         except ValueError as exc:
             logger.warning(f"merge [{band}]: cannot normalize {qid_str}: {exc}. "
                            "Merging without offset correction.")
 
-    # ── 5. Re-key object_index to be globally unique across quadrants ─────────
+    # ── 5. Re-key object_index to be globally unique, then link overlap sources ─
+    # Step 5a: offset each secondary quadrant's indices above all previous blocks
     running_max = int(frames[dom_idx]['object_index'].max())
     for i, df in enumerate(frames):
         if i == dom_idx:
             continue
         df['object_index'] = df['object_index'] + running_max + 1
         running_max = int(df['object_index'].max())
+
+    # Step 5b: replace matched secondary indices with the dominant's object_index
+    # so that the same physical star shares one index across quadrants
+    from astropy.coordinates import SkyCoord as _SkyCoord
+    import astropy.units as _u
+
+    dom_pos = (frames[dom_idx]
+               .groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']]
+               .first().reset_index())
+    cat_dom = _SkyCoord(ra=dom_pos['ALPHAWIN_REF'].values * _u.deg,
+                        dec=dom_pos['DELTAWIN_REF'].values * _u.deg)
+
+    for i, df in enumerate(frames):
+        if i == dom_idx:
+            continue
+        min_pos = (df.groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']]
+                   .first().reset_index())
+        cat_min = _SkyCoord(ra=min_pos['ALPHAWIN_REF'].values * _u.deg,
+                            dec=min_pos['DELTAWIN_REF'].values * _u.deg)
+        idx_arr, sep, _ = cat_min.match_to_catalog_sky(cat_dom)
+        matched = sep.arcsec < MAX_SEP_ARCSEC
+
+        remap = {
+            int(min_pos['object_index'].iloc[j]): int(dom_pos['object_index'].iloc[idx_arr[j]])
+            for j in range(len(min_pos)) if matched[j]
+        }
+        if remap:
+            df['object_index'] = (df['object_index']
+                                  .map(remap)
+                                  .fillna(df['object_index'])
+                                  .astype('Int32'))
+            logger.info(f"merge [{band}]: linked {len(remap)} overlap sources from "
+                        f"{_quad_tag(df)} → dominant object_index")
 
     # ── 6. Concatenate and write ──────────────────────────────────────────────
     merged = pd.concat(frames, ignore_index=True)

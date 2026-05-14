@@ -348,8 +348,9 @@ def main() -> None:
     p.add_argument("--dry-run",   action="store_true")
     # Calibration
     p.add_argument("--vet-catalog",  type=Path, default=None)
-    p.add_argument("--poly-degree",  type=int,  default=2)
-    p.add_argument("--ff-bins",      type=int,  default=20)
+    p.add_argument("--poly-degree",       type=int,  default=2)
+    p.add_argument("--merge-poly-degree", type=int,  default=1)
+    p.add_argument("--ff-bins",           type=int,  default=20)
     p.add_argument("--ff-min-count", type=int,  default=50)
     # Download filters (used when "download" is in steps)
     p.add_argument("--max-seeing",          type=float, default=None, metavar="ARCSEC")
@@ -591,7 +592,8 @@ def main() -> None:
 
         if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
                                               target_ra=args.ra, target_dec=args.dec,
-                                              suffix=suffix)
+                                              suffix=suffix,
+                                              poly_degree=args.merge_poly_degree)
 
         if "plots"      in steps:
             logger.info("─── plots ───")

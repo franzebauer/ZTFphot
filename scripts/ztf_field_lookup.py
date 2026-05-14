@@ -106,13 +106,38 @@ def lookup_target(
         logger.warning("ztfquery returned no metadata. Check credentials and coordinates.")
         return pd.DataFrame()
 
+    logger.debug(f"metatable columns: {list(meta.columns)}")
+
+    # Normalise filter column — IRSA has used different names across API versions
+    if "filtercode" not in meta.columns:
+        if "filter" in meta.columns:
+            # values may be "g","r","i" or "zg","zr","zi"
+            meta = meta.copy()
+            meta["filtercode"] = meta["filter"].apply(
+                lambda x: x if str(x).startswith("z") else f"z{x}"
+            )
+        elif "fid" in meta.columns:
+            _FID_MAP = {1: "zg", 2: "zr", 3: "zi"}
+            meta = meta.copy()
+            meta["filtercode"] = meta["fid"].map(_FID_MAP)
+        else:
+            raise KeyError(
+                f"Cannot find filter column in metatable. "
+                f"Available columns: {list(meta.columns)}"
+            )
+
     meta = meta[meta["filtercode"].isin(filtercodes)].copy()
-    meta = meta[[
-        "field", "ccdid", "qid", "filtercode",
-        "filefracday", "obsjd", "exptime",
-        "seeing", "airmass", "maglimit", "moonesb", "infobits",
-        "pid", "expid",
-    ]].copy()
+
+    # Normalise column names — some IRSA versions use "maglim" not "maglimit"
+    if "maglimit" not in meta.columns and "maglim" in meta.columns:
+        meta = meta.rename(columns={"maglim": "maglimit"})
+
+    keep = ["field", "ccdid", "qid", "filtercode",
+            "filefracday", "obsjd", "exptime",
+            "seeing", "airmass", "maglimit", "moonesb", "infobits",
+            "pid", "expid"]
+    keep = [c for c in keep if c in meta.columns]
+    meta = meta[keep].copy()
     meta["obsmjd"] = meta["obsjd"] - 2400000.5
     meta["band"]   = meta["filtercode"].map(FILTERCODE_TO_BAND)
 
