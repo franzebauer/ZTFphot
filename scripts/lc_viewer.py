@@ -31,16 +31,28 @@ import matplotlib.cm as cm
 if len(sys.argv) < 2:
     sys.exit("Usage: python lc_viewer.py <merged_parquet.parquet>")
 
-df = pd.read_parquet(sys.argv[1])
+import pyarrow.parquet as _pq
+_pf = _pq.read_table(sys.argv[1])
+_meta = {k.decode(): v.decode() for k, v in (_pf.schema.metadata or {}).items()}
+df = _pf.to_pandas()
 df = df.dropna(subset=['MAG_4_TOT_AB', 'OBSMJD']).copy()
 
+# For single-quadrant parquets the origin columns live in file metadata, not data.
+for _col, _key in [('field', 'field'), ('filtercode', 'filtercode'),
+                   ('ccdid', 'ccdid'), ('qid', 'qid')]:
+    if _col not in df.columns and _key in _meta:
+        df[_col] = _meta[_key]
+
 # Quadrant label for each row
-df['_qlabel'] = (
-    df['field'].astype(int).map(lambda x: f'{x:06d}') + '/' +
-    df['filtercode'] + '/c' +
-    df['ccdid'].astype(int).map(lambda x: f'{x:02d}') + '/q' +
-    df['qid'].astype(int).astype(str)
-)
+if 'field' in df.columns:
+    df['_qlabel'] = (
+        df['field'].astype(int).map(lambda x: f'{x:06d}') + '/' +
+        df['filtercode'] + '/c' +
+        df['ccdid'].astype(int).map(lambda x: f'{x:02d}') + '/q' +
+        df['qid'].astype(int).astype(str)
+    )
+else:
+    df['_qlabel'] = Path(sys.argv[1]).stem
 all_quads = sorted(df['_qlabel'].unique())
 
 # Per-object stats for overview
@@ -64,11 +76,11 @@ ranked = stats.index.tolist()   # ordered by RMS descending
 
 # ── Figure ────────────────────────────────────────────────────────────────────
 
-BG    = '#12121f'
-AX_BG = '#0a0a17'
-FG    = '#ccd6f6'
-ACC   = '#ff6e40'
-GRID  = '#1e1e3a'
+BG    = '#f8f8f8'
+AX_BG = '#ffffff'
+FG    = '#222222'
+ACC   = '#d62728'
+GRID  = '#dddddd'
 
 fig = plt.figure(figsize=(17, 8.5), facecolor=BG)
 fig.suptitle(Path(sys.argv[1]).name, color=FG, fontsize=10, x=0.5, y=0.99)
@@ -85,6 +97,8 @@ ax_prv = fig.add_axes([0.04, 0.10, 0.055, 0.055]) # prev button
 ax_nxt = fig.add_axes([0.105, 0.10, 0.055, 0.055])# next button
 ax_chk = fig.add_axes([0.20, 0.02, 0.15, chk_h])  # quad checkboxes
 ax_inf = fig.add_axes([0.37, 0.24, 0.57, 0.08])   # info text
+ax_sml = fig.add_axes([0.44, 0.15, 0.43, 0.025])  # MAGLIM min slider
+ax_ssee= fig.add_axes([0.44, 0.07, 0.43, 0.025])  # SEEING max slider
 
 for ax in [ax_ov, ax_lc, ax_inf]:
     ax.set_facecolor(AX_BG)
@@ -95,7 +109,7 @@ for ax in [ax_ov, ax_lc, ax_inf]:
     ax.yaxis.label.set_color(FG)
     ax.title.set_color(FG)
 
-ax_chk.set_facecolor('#101025')
+ax_chk.set_facecolor('#f0f0f0')
 ax_inf.axis('off')
 
 # ── Overview scatter ──────────────────────────────────────────────────────────
@@ -117,19 +131,23 @@ ml_hi = float(df['MAGLIM'].quantile(0.98))
 ml_norm = Normalize(vmin=ml_lo, vmax=ml_hi)
 ml_cmap = cm.plasma
 
+_see = df['SEEING'].dropna() if 'SEEING' in df.columns else pd.Series([0.0, 5.0])
+see_lo = float(_see.quantile(0.02)) if len(_see) > 0 else 0.0
+see_hi = float(_see.quantile(0.98)) if len(_see) > 0 else 5.0
+
 cb = ColorbarBase(ax_cbar, cmap=ml_cmap, norm=ml_norm, orientation='vertical')
 cb.set_label('MAGLIM', color=FG, fontsize=8)
 ax_cbar.tick_params(colors=FG, labelsize=7)
 
 # ── Widgets ───────────────────────────────────────────────────────────────────
 
-txt = mw.TextBox(ax_txt, 'index: ', initial='', color='#181830',
-                 hovercolor='#1e1e40')
+txt = mw.TextBox(ax_txt, 'index: ', initial='', color='#e8e8e8',
+                 hovercolor='#d0d0d0')
 txt.label.set_color(FG)
 txt.text_disp.set_color(FG)
 
-btn_prv = mw.Button(ax_prv, '◀ Prev', color='#1a1a35', hovercolor='#2a2a55')
-btn_nxt = mw.Button(ax_nxt, 'Next ▶', color='#1a1a35', hovercolor='#2a2a55')
+btn_prv = mw.Button(ax_prv, '◀ Prev', color='#e0e0e0', hovercolor='#c8c8c8')
+btn_nxt = mw.Button(ax_nxt, 'Next ▶', color='#e0e0e0', hovercolor='#c8c8c8')
 for b in [btn_prv, btn_nxt]:
     b.label.set_color(FG)
     b.label.set_fontsize(8)
@@ -137,14 +155,24 @@ for b in [btn_prv, btn_nxt]:
 chk = mw.CheckButtons(ax_chk, all_quads, [True] * n_q)
 _rects = getattr(chk, 'rectangles', None) or getattr(chk, 'patches', [])
 for rect in _rects:
-    rect.set_facecolor('#1a1a35')
-    rect.set_edgecolor('#4455aa')
+    rect.set_facecolor('#e8e8e8')
+    rect.set_edgecolor('#888888')
 for lbl in chk.labels:
     lbl.set_color(FG)
     lbl.set_fontsize(7)
 
+sml_slider = mw.Slider(ax_sml, 'MAGLIM ≥', ml_lo, ml_hi, valinit=ml_lo,
+                       color='#aaaacc', valstep=(ml_hi - ml_lo) / 200)
+ssee_slider = mw.Slider(ax_ssee, 'SEEING ≤', see_lo, see_hi, valinit=see_hi,
+                        color='#aaccaa', valstep=(see_hi - see_lo) / 200)
+for sl in [sml_slider, ssee_slider]:
+    sl.label.set_fontsize(8)
+    sl.label.set_color(FG)
+    sl.valtext.set_fontsize(8)
+    sl.valtext.set_color(FG)
+
 info = ax_inf.text(0.01, 0.5, '', transform=ax_inf.transAxes,
-                   color='#88aadd', fontsize=8, va='center',
+                   color='#335599', fontsize=8, va='center',
                    fontfamily='monospace')
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -172,6 +200,10 @@ def update(obj_idx):
 
     sub = df[(df['object_index'] == obj_idx) &
              (df['_qlabel'].isin(state['active_quads']))].sort_values('OBSMJD')
+    if 'MAGLIM' in sub.columns:
+        sub = sub[sub['MAGLIM'].fillna(ml_lo) >= sml_slider.val]
+    if 'SEEING' in sub.columns:
+        sub = sub[sub['SEEING'].fillna(see_hi) <= ssee_slider.val]
 
     if sub.empty:
         ax_lc.text(0.5, 0.5, 'No data for selected quadrants',
@@ -181,7 +213,7 @@ def update(obj_idx):
         ax_lc.errorbar(
             sub['OBSMJD'], sub['MAG_4_TOT_AB'],
             yerr=sub['MERR_4_TOT_AB'],
-            fmt='none', ecolor='#334455', alpha=0.5, zorder=2,
+            fmt='none', ecolor='#aaaaaa', alpha=0.5, zorder=2,
         )
         ax_lc.scatter(
             sub['OBSMJD'], sub['MAG_4_TOT_AB'],
@@ -253,11 +285,17 @@ def on_quad(label):
     if state['idx'] is not None:
         update(state['idx'])
 
+def on_slider(_):
+    if state['idx'] is not None:
+        update(state['idx'])
+
 txt.on_submit(on_submit)
 btn_prv.on_clicked(on_prev)
 btn_nxt.on_clicked(on_next)
 fig.canvas.mpl_connect('pick_event', on_pick)
 chk.on_clicked(on_quad)
+sml_slider.on_changed(on_slider)
+ssee_slider.on_changed(on_slider)
 
 # Start on highest-RMS object
 update(ranked[0])

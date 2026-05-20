@@ -160,7 +160,8 @@ ZTFphot/                    ← this repository
     transient_catalog.py
     compare_scipos.py
     migrate_parquets.py
-    find_corrupt_simulated.py
+    rekey_merged_parquet.py
+    lc_viewer.py
     plot_calibration.py
     plot_diagnostics.py
     plot_lightcurve.py
@@ -261,6 +262,7 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--ff-bins N` | Number of spatial bins per axis for the flatfield grid (default: 16) |
 | `--ff-min-count N` | Minimum detections per flatfield bin to use (default: 5) |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
+| `--merge-poly-degree N` | Degree of the 2-D spatial polynomial used during quadrant cross-calibration in the merge step (default: 1; use 0 for a scalar offset, 2 for quadratic) |
 
 ### Photometry variant
 
@@ -375,7 +377,7 @@ Identical schema to the ref-pos file above, with one addition:
 
 ### Merged (`LightCurves/merged/{ra}_{dec}/{fc}/lightcurves_merged.parquet`)
 
-Contains all per-quadrant columns above, with `norm_offset` added directly to all `MAG_*` columns so that magnitudes from different field/ccdid/qids are normalized to a common photometric scale throughout. Plus:
+Contains all per-quadrant columns above, with `norm_offset` already applied to all `MAG_*` columns so that magnitudes from different field/ccdid/qids are on a common photometric scale. Plus:
 
 | Column        | Type    | Description |
 |---------------|---------|-------------|
@@ -383,7 +385,11 @@ Contains all per-quadrant columns above, with `norm_offset` added directly to al
 | `filtercode`  | str     | Filter code (`zg`, `zr`, `zi`) |
 | `ccdid`       | int64   | CCD number |
 | `qid`         | int64   | Quadrant number |
-| `norm_offset` | float32 | Offset (mag) added to all `MAG_*` columns to bring this quadrant onto the dominant scale; 0.0 for the dominant quadrant |
+| `norm_offset` | float32 | Per-row spatial correction (mag) applied to all `MAG_*` columns to bring this quadrant onto the dominant photometric scale; 0.0 for dominant-quadrant rows |
+
+**`object_index` in the merged file is globally unique across quadrants.** Each secondary quadrant's indices are offset above the dominant quadrant's block so no two different physical stars share the same index. Sources detected in multiple quadrants (spatial overlap) are additionally coordinate-matched at 1.5 arcsec and remapped to the dominant quadrant's `object_index`, so the same physical star has a single index throughout the merged file.
+
+The cross-calibration fits a 2-D polynomial in (RA, Dec) to the per-source median-magnitude difference between each secondary quadrant and the dominant quadrant, using stable common sources (std < 0.15 mag, ≥5 clean epochs in both quadrants, ≥10 common sources required). The polynomial degree is controlled by `--merge-poly-degree` (default: 1 = linear tilt). The fit falls back to a lower degree or a scalar median offset when too few common sources are available.
 
 File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each contributing quadrant, plus `dominant_quadrant` (e.g. `000521_zg_c15_q3`) identifying the photometric reference quadrant.
 
@@ -473,3 +479,5 @@ These scripts are not wired into `run_pipeline.py` but can be run directly from 
 | `batch_pipeline.py` | Process a list of RA/Dec targets in sequence, keeping only the final LC parquets and plots for each. Run: `python ZTFphot/scripts/batch_pipeline.py coords.txt [--both] [--bands g r] [--workers 20]` |
 | `migrate_parquets.py` | Converts old-format merged parquets (containing `mag_calib`, `quadrant_id`, `is_dominant` columns) to the current schema. Accepts files and/or directories as arguments. Use `--dry-run` to preview. |
 | `replot_merged.py` | Regenerate precision and light curve plots from a merged parquet when the original working directory has been deleted (e.g. after `batch_pipeline.py` cleanup). Run: `python ZTFphot/scripts/replot_merged.py lightcurves_merged.parquet --ra RA --dec DEC --out-dir plots/` |
+| `rekey_merged_parquet.py` | Fix `object_index` collisions in existing merged parquets produced before the current merge step. Offsets each secondary quadrant's indices to be globally unique, then coordinate-matches overlap sources to share the dominant quadrant's index. Accepts one or more parquet paths (or glob patterns). Run: `python ZTFphot/scripts/rekey_merged_parquet.py path/to/lightcurves_merged.parquet` |
+| `lc_viewer.py` | Interactive GUI for browsing merged (or single-quadrant) light curve parquets. Left panel: overview scatter (median mag vs. RMS); click any point to load that object. Right panel: light curve coloured by MAGLIM. Controls: text box for direct object index entry, Prev/Next buttons (ranked by RMS), checkboxes to toggle individual quadrants, MAGLIM ≥ slider to discard shallow epochs, SEEING ≤ slider to discard poor-seeing epochs. Run: `python ZTFphot/scripts/lc_viewer.py path/to/lightcurves_merged.parquet` |

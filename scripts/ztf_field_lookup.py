@@ -106,6 +106,14 @@ def lookup_target(
         logger.warning("ztfquery returned no metadata. Check credentials and coordinates.")
         return pd.DataFrame()
 
+    # Detect HTML error page returned instead of real data
+    if any(str(c).strip().startswith("<!") for c in meta.columns):
+        raise RuntimeError(
+            "IRSA returned an HTML error page — authentication failure. "
+            "Check ~/.netrc credentials for irsa.ipac.caltech.edu or run: "
+            "python -c \"from ztfquery import io; io.set_account('irsa')\""
+        )
+
     logger.debug(f"metatable columns: {list(meta.columns)}")
 
     # Normalise filter column — IRSA has used different names across API versions
