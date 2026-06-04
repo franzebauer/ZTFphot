@@ -106,11 +106,12 @@ def lookup_target(
         logger.warning("ztfquery returned no metadata. Check credentials and coordinates.")
         return pd.DataFrame()
 
-    # Detect HTML error page returned instead of real data
+    # Detect HTML error page returned instead of real data (auth failure or transient 502/503)
     if any(str(c).strip().startswith("<!") for c in meta.columns):
         raise RuntimeError(
-            "IRSA returned an HTML error page — authentication failure. "
-            "Check ~/.netrc credentials for irsa.ipac.caltech.edu or run: "
+            "IRSA returned an HTML error page instead of data. "
+            "This is usually a transient server error (502/503) — retry in a few minutes. "
+            "If it persists, check ~/.netrc credentials for irsa.ipac.caltech.edu or run: "
             "python -c \"from ztfquery import io; io.set_account('irsa')\""
         )
 
