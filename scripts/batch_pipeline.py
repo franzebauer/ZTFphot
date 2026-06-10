@@ -72,19 +72,20 @@ def find_final_parquets(work_dir: Path, ra: float, dec: float, bands: list,
 
 
 def run_pipeline(pipeline: Path, ra: float, dec: float, work_dir: Path,
-                 bands: list, workers: int, purge_batch: int,
+                 bands: list, workers: int, download_workers: int, purge_batch: int,
                  min_maglim: float, max_seeing: float,
                  both: bool, extra_args: list) -> int:
     cmd = [
         sys.executable, str(pipeline),
-        "--ra",          str(ra),
-        "--dec",         str(dec),
-        "--base-dir",    str(work_dir),
-        "--purge-batch", str(purge_batch),
-        "--workers",     str(workers),
-        "--min-maglim",  str(min_maglim),
-        "--max-seeing",  str(max_seeing),
-        "--bands",       *bands,
+        "--ra",               str(ra),
+        "--dec",              str(dec),
+        "--base-dir",         str(work_dir),
+        "--purge-batch",      str(purge_batch),
+        "--workers",          str(workers),
+        "--download-workers", str(download_workers),
+        "--min-maglim",       str(min_maglim),
+        "--max-seeing",       str(max_seeing),
+        "--bands",            *bands,
     ]
     if both:
         cmd.append("--both")
@@ -184,23 +185,24 @@ _QUAD_STEPS = [
 
 def run_pipeline_quad(pipeline: Path, field: int, ccdid: int, qid: int,
                       band: str, ra: float, dec: float, work_dir: Path,
-                      workers: int, purge_batch: int,
+                      workers: int, download_workers: int, purge_batch: int,
                       min_maglim: float, max_seeing: float,
                       both: bool, extra_args: list) -> int:
     cmd = [
         sys.executable, str(pipeline),
-        "--ra",          str(ra),
-        "--dec",         str(dec),
-        "--base-dir",    str(work_dir),
-        "--field",       str(field),
-        "--ccdid",       str(ccdid),
-        "--qid",         str(qid),
-        "--bands",       band,
-        "--steps",       *_QUAD_STEPS,
-        "--purge-batch", str(purge_batch),
-        "--workers",     str(workers),
-        "--min-maglim",  str(min_maglim),
-        "--max-seeing",  str(max_seeing),
+        "--ra",               str(ra),
+        "--dec",              str(dec),
+        "--base-dir",         str(work_dir),
+        "--field",            str(field),
+        "--ccdid",            str(ccdid),
+        "--qid",              str(qid),
+        "--bands",            band,
+        "--steps",            *_QUAD_STEPS,
+        "--purge-batch",      str(purge_batch),
+        "--workers",          str(workers),
+        "--download-workers", str(download_workers),
+        "--min-maglim",       str(min_maglim),
+        "--max-seeing",       str(max_seeing),
     ]
     if both:
         cmd.append("--both")
@@ -266,7 +268,10 @@ def main():
                              "(default: IMBH_results)")
     parser.add_argument("--bands", nargs="+", default=["zg"],
                         metavar="BAND", help="Bands to process (default: zg)")
-    parser.add_argument("--workers",     type=int,   default=20)
+    parser.add_argument("--workers",          type=int, default=4,
+                        help="Parallel workers for simulate/sex/calibrate (default: 4)")
+    parser.add_argument("--download-workers", type=int, default=50,
+                        help="Parallel threads for image downloads (default: 50)")
     parser.add_argument("--purge-batch", type=int,   default=20)
     parser.add_argument("--min-maglim",  type=float, default=19.5)
     parser.add_argument("--max-seeing",  type=float, default=4.0)
@@ -365,6 +370,7 @@ def main():
                 ra=ra, dec=dec,
                 work_dir=work_dir,
                 workers=args.workers,
+                download_workers=args.download_workers,
                 purge_batch=args.purge_batch,
                 min_maglim=args.min_maglim,
                 max_seeing=args.max_seeing,
@@ -382,6 +388,7 @@ def main():
                 work_dir=work_dir,
                 bands=args.bands,
                 workers=args.workers,
+                download_workers=args.download_workers,
                 purge_batch=args.purge_batch,
                 min_maglim=args.min_maglim,
                 max_seeing=args.max_seeing,

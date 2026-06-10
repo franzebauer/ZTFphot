@@ -291,7 +291,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             if "download" in steps or args.purge_batch:
                 band = fc[1:]   # zg→g, zr→r, zi→i
                 download_all(batch, base_dir=base_dir, bands=[band],
-                             max_workers=args.workers)
+                             max_workers=args.download_workers)
 
             if "catalog" in steps and not catalog_done:
                 step_make_catalog(base_dir, [q], force=args.force)
@@ -341,7 +341,10 @@ def main() -> None:
     p.add_argument("--qid",       type=int,   default=None)
     p.add_argument("--steps",     nargs="+",  default=ALL_STEPS, choices=ALL_STEPS,
                    metavar="STEP")
-    p.add_argument("--workers",   type=int,   default=4)
+    p.add_argument("--workers",          type=int, default=4,
+                   help="Parallel workers for simulate/sex/calibrate (default: 4)")
+    p.add_argument("--download-workers", type=int, default=50,
+                   help="Parallel threads for image downloads (default: 50)")
     p.add_argument("--force",     action="store_true")
     p.add_argument("--verbose",   action="store_true")
     p.add_argument("--status",    action="store_true", help="Print file-existence summary and exit")

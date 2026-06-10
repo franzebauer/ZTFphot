@@ -234,7 +234,8 @@ data/                       ← created in your working directory on first run
 | `--ccdid N` | Restrict to a specific CCD |
 | `--qid N` | Restrict to a specific quadrant |
 | `--steps STEP ...` | Run only named steps (default: all) |
-| `--workers N` | Parallel workers (default: 4) |
+| `--workers N` | Parallel workers for simulate/sex/calibrate (default: 4) |
+| `--download-workers N` | Parallel threads for image downloads (default: 50) |
 | `--force` | Re-run even if output files already exist |
 | `--verbose` | Increase log verbosity |
 | `--status` | Print file-existence summary and exit |
