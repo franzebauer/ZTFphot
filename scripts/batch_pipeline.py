@@ -179,7 +179,7 @@ def _quadrant_center(field: int, ccdid: int, qid: int) -> tuple:
 
 _QUAD_STEPS = [
     "lookup", "download", "catalog", "simulate", "sex",
-    "vet", "calibrate", "flatfield", "lightcurves", "plots",
+    "vet", "calibrate", "flatfield", "recalibrate", "lightcurves", "plots",
 ]
 
 

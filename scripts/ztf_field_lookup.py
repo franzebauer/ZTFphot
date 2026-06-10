@@ -61,6 +61,8 @@ def lookup_target(
     cache_dir: Optional[Path] = None,
     force_refresh: bool = False,
     plot_out: Optional[Path] = None,
+    min_maglim: Optional[float] = None,
+    max_seeing: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Find all ZTF quadrants covering (ra, dec) and retrieve epoch metadata.
@@ -87,7 +89,8 @@ def lookup_target(
         if epochs is not None:
             logger.info(f"Loaded {len(epochs)} epochs from cache")
             if plot_out:
-                plot_coverage(epochs, out_path=plot_out)
+                plot_coverage(epochs, out_path=plot_out,
+                              min_maglim=min_maglim, max_seeing=max_seeing)
             return epochs
 
     try:
@@ -167,7 +170,8 @@ def lookup_target(
     _save_to_cache(meta, cache_path)
 
     if plot_out:
-        plot_coverage(meta, out_path=plot_out)
+        plot_coverage(meta, out_path=plot_out,
+                      min_maglim=min_maglim, max_seeing=max_seeing)
 
     return meta
 
@@ -177,6 +181,8 @@ def lookup_target(
 def plot_coverage(
     epochs: pd.DataFrame,
     out_path: Optional[Path] = None,
+    min_maglim: Optional[float] = None,
+    max_seeing: Optional[float] = None,
 ) -> None:
     """
     One figure per band. All quadrants overlaid in different colors.
@@ -316,6 +322,10 @@ def plot_coverage(
         ax_see.set_xlabel("Seeing (arcsec)")
         ax_see.set_ylabel("N epochs")
         ax_see.legend(fontsize=7)
+        if max_seeing is not None:
+            ax_see.axvline(max_seeing, color="black", lw=1.5, ls=":", zorder=5,
+                           label=f"cut ≤{max_seeing}\"")
+            ax_see.legend(fontsize=7)
 
         # ── MAGLIM histogram ──────────────────────────────────────────────────
         all_mag  = band_ep["maglimit"].dropna()
@@ -339,6 +349,10 @@ def plot_coverage(
         ax_mag.set_xlabel("MAGLIM")
         ax_mag.set_ylabel("N epochs")
         ax_mag.legend(fontsize=7)
+        if min_maglim is not None:
+            ax_mag.axvline(min_maglim, color="black", lw=1.5, ls=":", zorder=5,
+                           label=f"cut ≥{min_maglim}")
+            ax_mag.legend(fontsize=7)
 
         # ── MJD vs seeing ─────────────────────────────────────────────────────
         for _, row in quads.iterrows():
@@ -358,10 +372,18 @@ def plot_coverage(
         ax_mjdsee.set_xlabel("MJD")
         ax_mjdsee.set_ylabel("Seeing (arcsec)")
         ax_mjdsee.legend(fontsize=7, markerscale=2)
+        if max_seeing is not None:
+            ax_mjdsee.axhline(max_seeing, color="black", lw=1.5, ls=":",
+                              label=f"cut ≤{max_seeing}\"", zorder=5)
+            ax_mjdsee.legend(fontsize=7, markerscale=2)
 
         ax_mjdmag.set_xlabel("MJD")
         ax_mjdmag.set_ylabel("MAGLIM")
         ax_mjdmag.legend(fontsize=7, markerscale=2)
+        if min_maglim is not None:
+            ax_mjdmag.axhline(min_maglim, color="black", lw=1.5, ls=":",
+                              label=f"cut ≥{min_maglim}", zorder=5)
+            ax_mjdmag.legend(fontsize=7, markerscale=2)
 
         fig.suptitle(f"ZTF coverage — {band}-band", fontsize=12, y=1.01)
 
@@ -422,6 +444,10 @@ if __name__ == "__main__":
                              "Default: data/Plots/{ra}_{dec}/coverage.png")
     parser.add_argument("--no-plot",       action="store_true",
                         help="Skip coverage plot entirely")
+    parser.add_argument("--min-maglim",    type=float, default=None, metavar="MAG",
+                        help="Draw threshold line at this MAGLIM value on the plot")
+    parser.add_argument("--max-seeing",    type=float, default=None, metavar="ARCSEC",
+                        help="Draw threshold line at this seeing value on the plot")
     parser.add_argument("--out-epochs",    type=Path,  default=None,
                         help="Save full epoch list to this CSV path")
     args = parser.parse_args()
@@ -442,6 +468,8 @@ if __name__ == "__main__":
         search_radius_deg=args.search_radius,
         cache_dir=args.cache_dir, force_refresh=args.refresh,
         plot_out=plot_out,
+        min_maglim=args.min_maglim,
+        max_seeing=args.max_seeing,
     )
 
     if epochs.empty:

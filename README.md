@@ -63,7 +63,7 @@ By default, all pipeline data is written to `data/` in your current working dire
 python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849
 ```
 
-This runs all steps in order: field lookup → image download → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → re-calibrate → light curves → merge → plots.
+This runs all steps in order: field lookup → image download → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → recalibrate → light curves → merge → plots. The `recalibrate` step is identical to `calibrate` but runs after `flatfield` so the spatial correction is applied.
 
 ### Common quality cuts for download (all optional)
 
@@ -85,7 +85,7 @@ Steps are idempotent — existing outputs are skipped unless `--force` is passed
 # Re-calibrate and rebuild light curves for one quadrant
 python ZTFphot/scripts/run_pipeline.py --steps calibrate lightcurves \
     --ra 182.635755 --dec 39.405849 \
-    --field 443 --bands zg --ccdid 16 --qid 2 --workers 8 --force
+    --field 443 --bands zg --ccdid 16 --qid 2 --force
 
 # Check what's on disk
 python ZTFphot/scripts/run_pipeline.py --status
@@ -96,15 +96,15 @@ python ZTFphot/scripts/run_pipeline.py --status
 ```bash
 # 1. Lookup + download (no SExtractor needed)
 python ZTFphot/scripts/run_pipeline.py --steps lookup download \
-    --ra 182.635755 --dec 39.405849 --workers 8
+    --ra 182.635755 --dec 39.405849 --download-workers 50
 
 # 2. Prepare images and run SExtractor (requires ztf env)
 python ZTFphot/scripts/run_pipeline.py --steps catalog simulate sex \
-    --ra 182.635755 --dec 39.405849 --workers 8
+    --ra 182.635755 --dec 39.405849
 
-# 3. Calibrate → flatfield → re-calibrate → light curves
-python ZTFphot/scripts/run_pipeline.py --steps calibrate flatfield calibrate lightcurves \
-    --ra 182.635755 --dec 39.405849 --workers 8 --force
+# 3. Calibrate → flatfield → recalibrate → light curves
+python ZTFphot/scripts/run_pipeline.py --steps calibrate flatfield recalibrate lightcurves \
+    --ra 182.635755 --dec 39.405849 --force
 ```
 
 ### Low-disk mode
@@ -113,7 +113,7 @@ On systems with limited disk space, use `--purge-batch N` to process images in b
 
 ```bash
 # Full pipeline, 5 epochs at a time (~4 GB peak disk usage per quadrant):
-python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --workers 8
+python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --download-workers 50
 
 # Preview what would be deleted without touching disk:
 python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849 --purge-batch 10 --dry-run
@@ -215,6 +215,7 @@ data/                       ← created in your working directory on first run
 | Vet | `vet` | Flag variable/bad calibration stars by multi-epoch RMS |
 | Calibrate | `calibrate` | Linear ZP → 3σ clip → faint correction → 2D polynomial → flatfield |
 | Flatfield | `flatfield` | Rebuild spatial flatfield from post-polynomial residuals |
+| Recalibrate | `recalibrate` | Second calibration pass; identical to `calibrate` but runs after `flatfield` to apply the spatial correction |
 | Light curves | `lightcurves` | Assemble per-object parquet light curves from calibrated FITS |
 | Merge | `merge` | Cross-calibrate and merge multiple quadrants per band |
 | Plots | `plots` | Diagnostic plots (spatial residuals, RMS, precision, light curves); generates a placeholder if the target is not found (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
@@ -305,8 +306,8 @@ Bad reference stars inflate calibration scatter. After an initial calibration ru
 python ZTFphot/scripts/vet_calibration_stars.py \
     --field 443 --band zg --ccd 16 --qid 2
 
-python ZTFphot/scripts/run_pipeline.py --steps calibrate flatfield lightcurves plots \
-    --field 443 --bands zg --ccdid 16 --qid 2 --workers 8 --force
+python ZTFphot/scripts/run_pipeline.py --steps calibrate flatfield recalibrate lightcurves plots \
+    --field 443 --bands zg --ccdid 16 --qid 2 --force
 ```
 
 The vet catalog is discovered automatically from its standard location in `data/Calibrated/`.

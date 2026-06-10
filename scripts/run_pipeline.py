@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 ALL_STEPS = ["lookup", "download", "catalog", "simulate", "sex",
              "simulate_sci", "sex_sci",
-             "vet", "calibrate", "flatfield", "lightcurves", "merge", "plots"]
+             "vet", "calibrate", "flatfield", "recalibrate", "lightcurves", "merge", "plots"]
 
 
 def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
@@ -418,6 +418,8 @@ def main() -> None:
                 ra=args.ra, dec=args.dec, bands=bands,
                 cache_dir=base_dir / "Epochs",
                 plot_out=plot_dir / "coverage.png",
+                min_maglim=args.min_maglim,
+                max_seeing=args.max_seeing,
             )
 
     # ── Step: download ────────────────────────────────────────────────────────
@@ -582,7 +584,7 @@ def main() -> None:
                                            nbins=args.ff_bins, min_count=args.ff_min_count,
                                            suffix=suffix)
 
-        if "calibrate"  in steps:
+        if "calibrate" in steps or "recalibrate" in steps:
             for q in quadrants:
                 key = (q['field'], q['filtercode'], q['ccdid'], q['qid'])
                 step_calibrate(base_dir, [q], workers=args.workers, force=args.force,
@@ -593,8 +595,8 @@ def main() -> None:
 
         if "lightcurves" in steps:
             step_lightcurves(base_dir, quadrants, force=args.force,
-                             use_calibrated="calibrate" in steps, suffix=suffix,
-                             target_ra=args.ra, target_dec=args.dec)
+                             use_calibrated=("calibrate" in steps or "recalibrate" in steps),
+                             suffix=suffix, target_ra=args.ra, target_dec=args.dec)
 
         if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
                                               target_ra=args.ra, target_dec=args.dec,
