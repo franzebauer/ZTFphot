@@ -106,6 +106,7 @@ def step_calibrate(
     flatfield: Optional[dict] = None,
     target_ra: Optional[float] = None,
     target_dec: Optional[float] = None,
+    target_match_radius: float = 3.0,
     save_residuals: bool = False,
     suffix: str = "",
 ) -> int:
@@ -164,6 +165,7 @@ def step_calibrate(
             extra_kw = dict(
                 poly_degree=poly_degree, flatfield=flatfield,
                 target_ra=target_ra, target_dec=target_dec,
+                target_match_radius=target_match_radius,
                 residuals_out=str(resid_out) if resid_out else None,
             )
             tasks.append((ref_csv, ldac, out_cal, "SIM", vet_cat, extra_kw))

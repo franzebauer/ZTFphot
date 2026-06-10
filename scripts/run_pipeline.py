@@ -352,9 +352,12 @@ def main() -> None:
     # Calibration
     p.add_argument("--vet-catalog",  type=Path, default=None)
     p.add_argument("--poly-degree",       type=int,  default=2)
-    p.add_argument("--merge-poly-degree", type=int,  default=1)
-    p.add_argument("--ff-bins",           type=int,  default=20)
-    p.add_argument("--ff-min-count", type=int,  default=50)
+    p.add_argument("--merge-poly-degree",    type=int,   default=1)
+    p.add_argument("--ff-bins",              type=int,   default=20)
+    p.add_argument("--ff-min-count",         type=int,   default=50)
+    p.add_argument("--target-match-radius",  type=float, default=3.0, metavar="ARCSEC",
+                   help="Max separation (arcsec) to match input position to a detected "
+                        "source in the calibrated catalog (default: 3.0)")
     # Download filters (used when "download" is in steps)
     p.add_argument("--max-seeing",          type=float, default=None, metavar="ARCSEC")
     p.add_argument("--min-maglim",          type=float, default=None, metavar="MAG")
@@ -591,6 +594,7 @@ def main() -> None:
                                vet_catalog=args.vet_catalog, poly_degree=args.poly_degree,
                                flatfield=_ff_map.get(key),
                                target_ra=args.ra, target_dec=args.dec,
+                               target_match_radius=args.target_match_radius,
                                save_residuals=True, suffix=suffix)
 
         if "lightcurves" in steps:

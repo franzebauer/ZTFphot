@@ -80,6 +80,7 @@ def _read_ldac(catalog_path):
 def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_catalog=None,
                   poly_degree=2, flatfield=None,
                   target_ra=None, target_dec=None,
+                  target_match_radius=3.0,
                   residuals_out=None):
 
     table_ref = pd.read_csv(ref_catalog)
@@ -182,7 +183,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         _dec_m  = np.array(delta[pos])
         _sep_sq = (_ra_m - target_ra)**2 + (_dec_m - target_dec)**2
         _j = int(np.argmin(_sep_sq))
-        if np.sqrt(_sep_sq[_j]) < 3.0 / 3600.0:
+        if np.sqrt(_sep_sq[_j]) < target_match_radius / 3600.0:
             tgt_in_matched = _j
 
     # Per-step RMS accumulators (recorded for k=1, primary aperture)

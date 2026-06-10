@@ -263,6 +263,7 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--ff-bins N` | Number of spatial bins per axis for the flatfield grid (default: 16) |
 | `--ff-min-count N` | Minimum detections per flatfield bin to use (default: 5) |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
+| `--target-match-radius ARCSEC` | Max separation to match the input RA/Dec to a detected source in the calibrated catalog (default: 3.0 arcsec) |
 | `--merge-poly-degree N` | Degree of the 2-D spatial polynomial used during quadrant cross-calibration in the merge step (default: 1; use 0 for a scalar offset, 2 for quadratic) |
 
 ### Photometry variant
