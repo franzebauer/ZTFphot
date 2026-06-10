@@ -37,8 +37,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-BAND_TO_FILTERCODE = {"g": "zg", "r": "zr", "i": "zi"}
-FILTERCODE_TO_BAND = {v: k for k, v in BAND_TO_FILTERCODE.items()}
+BAND_TO_FILTERCODE = {"g": "zg", "r": "zr", "i": "zi",
+                      "zg": "zg", "zr": "zr", "zi": "zi"}
+FILTERCODE_TO_BAND = {"zg": "g", "zr": "r", "zi": "i"}
 
 DEFAULT_CACHE_DIR   = Path("data") / "Epochs"
 DEFAULT_SEARCH_DEG  = 0.0005
@@ -70,7 +71,7 @@ def lookup_target(
         One row per observation. Pass directly to download_coordinator.
     """
     if bands is None:
-        bands = ["g", "r", "i"]
+        bands = ["zg", "zr", "zi"]
 
     invalid = [b for b in bands if b not in BAND_TO_FILTERCODE]
     if invalid:
@@ -212,25 +213,25 @@ def plot_coverage(
     # ── Compact summary table text (all bands, used in every figure) ─────────
     # Header + one row per quadrant, monospaced alignment
     tbl_data = quads.copy()
-    for b in ["g", "r", "i"]:
-        fc     = BAND_TO_FILTERCODE[b]
+    for fc in ["zg", "zr", "zi"]:
         counts = (
             epochs[epochs["filtercode"] == fc]
-            .groupby(["field", "ccdid", "qid"]).size().rename(f"n_{b}")
+            .groupby(["field", "ccdid", "qid"]).size().rename(f"n_{fc}")
         )
         tbl_data = tbl_data.join(counts, on=["field", "ccdid", "qid"])
     tbl_data = tbl_data.fillna(0).reset_index(drop=True)
 
-    hdr  = "field/ccd/qid    ng   nr   ni"
+    hdr  = "field/ccd/qid    nzg  nzr  nzi"
     rows = []
     for _, r in tbl_data.iterrows():
         tag  = f"{int(r.field)}/{int(r.ccdid)}/{int(r.qid)}"
-        rows.append(f"{tag:<16} {int(r.get('n_g',0)):>4} {int(r.get('n_r',0)):>4} {int(r.get('n_i',0)):>4}")
+        rows.append(f"{tag:<16} {int(r.get('n_zg',0)):>4} {int(r.get('n_zr',0)):>4} {int(r.get('n_zi',0)):>4}")
     table_text = "\n".join([hdr] + rows)
 
     # ── One figure per band ───────────────────────────────────────────────────
+    _FC_ORDER = ["zg", "zr", "zi"]
     bands_present = sorted(epochs["band"].dropna().unique(),
-                           key=lambda b: ["g", "r", "i"].index(b) if b in ["g","r","i"] else 99)
+                           key=lambda b: _FC_ORDER.index(b) if b in _FC_ORDER else 99)
 
     for band in bands_present:
         band_ep = epochs[epochs["band"] == band]
@@ -409,7 +410,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--ra",            type=float, required=True)
     parser.add_argument("--dec",           type=float, required=True)
-    parser.add_argument("--bands",         nargs="+",  default=["g", "r", "i"])
+    parser.add_argument("--bands",         nargs="+",  default=["zg", "zr", "zi"])
     parser.add_argument("--search-radius", type=float, default=DEFAULT_SEARCH_DEG,
                         metavar="DEG",
                         help=f"Search radius passed to ztfquery (default: {DEFAULT_SEARCH_DEG})")

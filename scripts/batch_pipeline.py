@@ -26,7 +26,8 @@ import sys
 import shutil
 from pathlib import Path
 
-BAND_TO_FC = {"g": "zg", "r": "zr", "i": "zi"}
+BAND_TO_FC = {"g": "zg", "r": "zr", "i": "zi",
+              "zg": "zg", "zr": "zr", "zi": "zi"}
 
 
 def find_final_parquets(work_dir: Path, ra: float, dec: float, bands: list,
@@ -246,29 +247,6 @@ def save_results_quad(work_dir: Path, field: int, fc: str, ccdid: int, qid: int,
             n = sum(1 for _ in plots_dest.rglob("*.png"))
             print(f"  Saved {n} plot(s) → {plots_dest}")
 
-    # Record brightest source coordinate for later use (e.g. targeted re-plots)
-    for pq_path, label in parquets:
-        if "_sci" in label:
-            continue
-        try:
-            import pandas as pd
-            df = pd.read_parquet(pq_path)
-            med = df.groupby("object_index")["MAG_4_TOT_AB"].median()
-            idx = med.idxmin()
-            row = df[df["object_index"] == idx].iloc[0]
-            bra, bdec = float(row["ALPHAWIN_REF"]), float(row["DELTAWIN_REF"])
-            bright_file = results_dir / f"{tag}_brightest.txt"
-            bright_file.write_text(
-                f"# Brightest source in {tag}\n"
-                f"# object_index={idx}  med_MAG_4={med[idx]:.3f}\n"
-                f"{bra:.6f},{bdec:+.6f}\n"
-            )
-            print(f"  Brightest source: RA={bra:.5f} Dec={bdec:+.5f} "
-                  f"(mag={med[idx]:.3f}) → {bright_file.name}")
-        except Exception as e:
-            print(f"  WARNING: could not find brightest source: {e}")
-        break
-
     return success
 
 
@@ -286,8 +264,8 @@ def main():
     parser.add_argument("--results-dir", type=Path, default=Path("IMBH_results"),
                         help="Directory where final parquets and plots are collected "
                              "(default: IMBH_results)")
-    parser.add_argument("--bands", nargs="+", default=["g"],
-                        metavar="BAND", help="Bands to process (default: g)")
+    parser.add_argument("--bands", nargs="+", default=["zg"],
+                        metavar="BAND", help="Bands to process (default: zg)")
     parser.add_argument("--workers",     type=int,   default=20)
     parser.add_argument("--purge-batch", type=int,   default=20)
     parser.add_argument("--min-maglim",  type=float, default=19.5)
@@ -350,7 +328,7 @@ def main():
 
         if quad_mode:
             field, ccdid, qid, fc = target
-            band = next((k for k, v in BAND_TO_FC.items() if v == fc), fc.lstrip("z"))
+            band = fc  # filtercode is already in zg/zr/zi form
             try:
                 ra, dec = _quadrant_center(field, ccdid, qid)
             except ValueError as e:

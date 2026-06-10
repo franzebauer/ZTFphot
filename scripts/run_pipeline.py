@@ -171,7 +171,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
     # Load epochs from cache if not already in memory (e.g. lookup not in steps)
     if epochs is None and args.ra is not None and args.dec is not None:
         import pandas as pd
-        bands = args.bands or ["g", "r", "i"]
+        bands = args.bands or ["zg", "zr", "zi"]
         band_str   = "-".join(sorted(bands))
         cache_path = (base_dir / "Epochs"
                       / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{band_str}.epochs.parquet")
