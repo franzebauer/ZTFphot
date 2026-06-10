@@ -377,6 +377,9 @@ def main() -> None:
     p.add_argument("--clean-up",     action="store_true",
                    help="Delete all imaging products (Science/, Reference/) for discovered "
                         "quadrants and exit. Safe once the sex step is complete.")
+    p.add_argument("--no-target",   action="store_true",
+                   help="Suppress target-source plots (lightcurves, precision target marker). "
+                        "Use when processing a whole quadrant without a specific target.")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -641,11 +644,13 @@ def main() -> None:
                 if has_lc:
                     vet_cat = (base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid_)) / "vet_calib_stars.fits"
                     vet_cat_arg = vet_cat if vet_cat.exists() else None
+                    _tgt_ra  = None if args.no_target else args.ra
+                    _tgt_dec = None if args.no_target else args.dec
                     make_precision(lc_path,
                                    plot_root / f"precision_{tag}.png",
-                                   tag, args.ra, args.dec,
+                                   tag, _tgt_ra, _tgt_dec,
                                    vet_catalog=vet_cat_arg)
-                    if args.ra is not None and args.dec is not None:
+                    if not args.no_target and args.ra is not None and args.dec is not None:
                         make_lightcurves(lc_path,
                                          plot_root / f"lightcurves_{tag}.png",
                                          args.ra, args.dec,

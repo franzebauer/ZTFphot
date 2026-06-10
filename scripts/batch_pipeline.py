@@ -11,11 +11,13 @@ Two input modes, auto-detected by column count:
       152.808792,50.387500
       161.423500,8.563278
 
-  Quadrant mode (6 columns) — skips merge; field/ccd/qid/band are passed
-  directly to run_pipeline; ra/dec are used for lookup and plots:
-      field,ccdid,qid,filtercode,ra,dec
-      000443,16,2,zg,182.63576,39.40585
-      001389,12,3,zg,182.63576,39.40585
+  Quadrant mode (4 columns) — skips merge; field/ccd/qid/filtercode are
+  passed directly to run_pipeline; the quadrant center is derived from
+  the ztfquery field grid and used for lookup. Target plots are suppressed.
+  After the run the brightest source RA/Dec is saved alongside the parquet.
+      field,ccdid,qid,filtercode
+      000443,16,2,zg
+      001389,12,3,zg
 """
 
 import argparse
@@ -142,6 +144,37 @@ def cleanup(work_dir: Path) -> None:
         print(f"  Deleted {work_dir}  (freed {size/1e6:.0f} MB)")
 
 
+def _quadrant_center(field: int, ccdid: int, qid: int) -> tuple:
+    """
+    Return approximate (RA, Dec) of a ZTF CCD quadrant center.
+    Uses ztfquery's bundled field grid and CCD/quad corner offset tables.
+    """
+    import numpy as np
+    import pandas as pd
+    import ztfquery
+    data_dir = Path(ztfquery.__file__).parent / "data"
+
+    fields_tbl = pd.read_csv(data_dir / "ztf_fields.txt")
+    row = fields_tbl[fields_tbl["ID"].astype(int) == int(field)]
+    if row.empty:
+        raise ValueError(f"Field {field} not found in ZTF field table")
+    ra0  = float(row["RA"].iloc[0])
+    dec0 = float(row["Dec"].iloc[0])
+
+    # RCID = (ccdid-1)*4 + (qid-1); layout table uses 0-based quad = RCID
+    rcid   = (ccdid - 1) * 4 + (qid - 1)
+    layout = pd.read_csv(data_dir / "ztf_ccd_quad_layout.tbl")
+    corners = layout[layout["Quad"] == rcid]
+    if corners.empty:
+        raise ValueError(f"RCID {rcid} (ccdid={ccdid}, qid={qid}) not found in layout table")
+    dew = float(corners["EW"].mean())
+    dns = float(corners["NS"].mean())
+
+    ra  = (ra0 + dew / np.cos(np.radians(dec0))) % 360.0
+    dec = dec0 + dns
+    return ra, dec
+
+
 _QUAD_STEPS = [
     "lookup", "download", "catalog", "simulate", "sex",
     "vet", "calibrate", "flatfield", "lightcurves", "plots",
@@ -170,6 +203,7 @@ def run_pipeline_quad(pipeline: Path, field: int, ccdid: int, qid: int,
     ]
     if both:
         cmd.append("--both")
+    cmd.append("--no-target")
     cmd += extra_args
     print(f"  CMD: {' '.join(cmd)}")
     ret = subprocess.run(cmd)
@@ -212,6 +246,29 @@ def save_results_quad(work_dir: Path, field: int, fc: str, ccdid: int, qid: int,
             n = sum(1 for _ in plots_dest.rglob("*.png"))
             print(f"  Saved {n} plot(s) → {plots_dest}")
 
+    # Record brightest source coordinate for later use (e.g. targeted re-plots)
+    for pq_path, label in parquets:
+        if "_sci" in label:
+            continue
+        try:
+            import pandas as pd
+            df = pd.read_parquet(pq_path)
+            med = df.groupby("object_index")["MAG_4_TOT_AB"].median()
+            idx = med.idxmin()
+            row = df[df["object_index"] == idx].iloc[0]
+            bra, bdec = float(row["ALPHAWIN_REF"]), float(row["DELTAWIN_REF"])
+            bright_file = results_dir / f"{tag}_brightest.txt"
+            bright_file.write_text(
+                f"# Brightest source in {tag}\n"
+                f"# object_index={idx}  med_MAG_4={med[idx]:.3f}\n"
+                f"{bra:.6f},{bdec:+.6f}\n"
+            )
+            print(f"  Brightest source: RA={bra:.5f} Dec={bdec:+.5f} "
+                  f"(mag={med[idx]:.3f}) → {bright_file.name}")
+        except Exception as e:
+            print(f"  WARNING: could not find brightest source: {e}")
+        break
+
     return success
 
 
@@ -243,29 +300,41 @@ def main():
                         help="Skip targets that already have a parquet in results-dir")
     args, extra = parser.parse_known_args()
 
-    # Read coordinates
-    coords = []
+    # Read targets — auto-detect mode from first valid line's column count
+    # RA/Dec mode:   2 columns  →  ra, dec
+    # Quadrant mode: 4 columns  →  field, ccdid, qid, filtercode
+    targets = []
+    quad_mode = None
     with open(args.coords_file) as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            parts = line.split(",")
-            if len(parts) < 2:
-                print(f"WARNING: line {lineno} malformed, skipping: {line!r}",
-                      file=sys.stderr)
-                continue
-            try:
-                ra, dec = float(parts[0].strip()), float(parts[1].strip())
-                coords.append((ra, dec))
-            except ValueError:
-                print(f"WARNING: line {lineno} not numeric, skipping: {line!r}",
-                      file=sys.stderr)
+            parts = [p.strip() for p in line.split(",")]
+            if quad_mode is None:
+                quad_mode = len(parts) >= 4
+            if not quad_mode:
+                if len(parts) < 2:
+                    print(f"WARNING: line {lineno} malformed, skipping: {line!r}", file=sys.stderr)
+                    continue
+                try:
+                    targets.append((float(parts[0]), float(parts[1])))
+                except ValueError:
+                    print(f"WARNING: line {lineno} not numeric, skipping: {line!r}", file=sys.stderr)
+            else:
+                if len(parts) < 4:
+                    print(f"WARNING: line {lineno} malformed, skipping: {line!r}", file=sys.stderr)
+                    continue
+                try:
+                    targets.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3]))
+                except ValueError:
+                    print(f"WARNING: line {lineno} not parseable, skipping: {line!r}", file=sys.stderr)
 
-    if not coords:
-        sys.exit("No valid coordinates found.")
+    if not targets:
+        sys.exit("No valid targets found.")
 
-    print(f"Loaded {len(coords)} target(s) from {args.coords_file}")
+    mode_str = "quadrant" if quad_mode else "RA/Dec"
+    print(f"Loaded {len(targets)} target(s) from {args.coords_file} [{mode_str} mode]")
 
     results_dir = args.results_dir
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -276,12 +345,30 @@ def main():
     base_dir = Path(args.base_dir)
     n_ok = n_fail = n_skip = 0
 
-    for i, (ra, dec) in enumerate(coords, 1):
-        tag = f"{ra:.5f}_{dec:+.5f}"
+    for i, target in enumerate(targets, 1):
         sep = "=" * 70
-        print(f"\n{sep}")
-        print(f"  Target {i}/{len(coords)}:  RA={ra}  Dec={dec}  ({tag})")
-        print(sep)
+
+        if quad_mode:
+            field, ccdid, qid, fc = target
+            band = next((k for k, v in BAND_TO_FC.items() if v == fc), fc.lstrip("z"))
+            try:
+                ra, dec = _quadrant_center(field, ccdid, qid)
+            except ValueError as e:
+                print(f"  ERROR: {e} — skipping", file=sys.stderr)
+                n_fail += 1
+                continue
+            tag = f"{field:06d}_{fc}_c{ccdid:02d}_q{qid}"
+            print(f"\n{sep}")
+            print(f"  Target {i}/{len(targets)}:  field={field:06d}  ccdid={ccdid}  "
+                  f"qid={qid}  fc={fc}  ({tag})")
+            print(f"  Quadrant center: RA={ra:.5f}  Dec={dec:+.5f}")
+            print(sep)
+        else:
+            ra, dec = target
+            tag = f"{ra:.5f}_{dec:+.5f}"
+            print(f"\n{sep}")
+            print(f"  Target {i}/{len(targets)}:  RA={ra}  Dec={dec}  ({tag})")
+            print(sep)
 
         # Optional: skip if results already present
         if args.skip_existing:
@@ -293,31 +380,45 @@ def main():
 
         work_dir = base_dir / tag
 
-        # Run pipeline
-        rc = run_pipeline(
-            pipeline=args.pipeline,
-            ra=ra, dec=dec,
-            work_dir=work_dir,
-            bands=args.bands,
-            workers=args.workers,
-            purge_batch=args.purge_batch,
-            min_maglim=args.min_maglim,
-            max_seeing=args.max_seeing,
-            both=args.both,
-            extra_args=extra,
-        )
+        if quad_mode:
+            rc = run_pipeline_quad(
+                pipeline=args.pipeline,
+                field=field, ccdid=ccdid, qid=qid, band=band,
+                ra=ra, dec=dec,
+                work_dir=work_dir,
+                workers=args.workers,
+                purge_batch=args.purge_batch,
+                min_maglim=args.min_maglim,
+                max_seeing=args.max_seeing,
+                both=args.both,
+                extra_args=extra,
+            )
+            if rc != 0:
+                print(f"  WARNING: pipeline exit code {rc} — saving whatever exists")
+            ok = save_results_quad(work_dir, field, fc, ccdid, qid, ra, dec,
+                                   results_dir, both=args.both)
+        else:
+            rc = run_pipeline(
+                pipeline=args.pipeline,
+                ra=ra, dec=dec,
+                work_dir=work_dir,
+                bands=args.bands,
+                workers=args.workers,
+                purge_batch=args.purge_batch,
+                min_maglim=args.min_maglim,
+                max_seeing=args.max_seeing,
+                both=args.both,
+                extra_args=extra,
+            )
+            if rc != 0:
+                print(f"  WARNING: pipeline exit code {rc} — saving whatever exists")
+            ok = save_results(work_dir, ra, dec, args.bands, results_dir, both=args.both)
 
-        if rc != 0:
-            print(f"  WARNING: pipeline exit code {rc} — saving whatever exists")
-
-        # Save results
-        ok = save_results(work_dir, ra, dec, args.bands, results_dir, both=args.both)
         if ok:
             n_ok += 1
         else:
             n_fail += 1
 
-        # Clean up working directory
         if not args.no_cleanup:
             cleanup(work_dir)
 
