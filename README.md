@@ -35,21 +35,19 @@ This installs Python, numpy, astropy, scipy, matplotlib, pandas, ztfquery, and S
 
 ### 3. Configure IRSA credentials
 
-IRSA credentials are required to download image products. Add them to `~/.netrc`:
-
-```
-machine irsa.ipac.caltech.edu
-login your_username
-password your_password
-```
-
-Then restrict permissions:
+IRSA credentials are required to download image products. An IRSA account is free at [irsa.ipac.caltech.edu](https://irsa.ipac.caltech.edu).
 
 ```bash
-chmod 600 ~/.netrc
+read -p "IRSA username: " IRSA_USER && read -sp "IRSA password: " IRSA_PASS && echo && \
+printf 'machine irsa.ipac.caltech.edu\nlogin %s\npassword %s\n' "$IRSA_USER" "$IRSA_PASS" >> ~/.netrc && \
+chmod 600 ~/.netrc && echo "Credentials written to ~/.netrc"
 ```
 
-An IRSA account is free at [irsa.ipac.caltech.edu](https://irsa.ipac.caltech.edu).
+Then register them with ztfquery:
+
+```bash
+python -c "from ztfquery import io; io.set_account('irsa')"
+```
 
 ### 4. Data directory
 

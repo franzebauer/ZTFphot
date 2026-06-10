@@ -98,22 +98,32 @@ def lookup_target(
 
     logger.info(f"Querying IRSA for RA={ra:.5f}, Dec={dec:.5f}, "
                 f"radius={search_radius_deg:.4f} deg ...")
-    zquery = ztfquery.ZTFQuery()
-    zquery.load_metadata(radec=[ra, dec], size=search_radius_deg)
 
-    meta = zquery.metatable
+    import time
+    _max_attempts = 5
+    for _attempt in range(1, _max_attempts + 1):
+        zquery = ztfquery.ZTFQuery()
+        zquery.load_metadata(radec=[ra, dec], size=search_radius_deg)
+        meta = zquery.metatable
+        if meta is not None and not meta.empty and not any(
+                str(c).strip().startswith("<!") for c in meta.columns):
+            break
+        if _attempt < _max_attempts:
+            _wait = 30 * _attempt
+            logger.warning(f"IRSA returned HTML/empty response (attempt {_attempt}/{_max_attempts}) "
+                           f"— retrying in {_wait}s ...")
+            time.sleep(_wait)
+    else:
+        raise RuntimeError(
+            "IRSA returned an HTML error page after 5 attempts. "
+            "This is usually a transient server error (502/503) or rate-limiting. "
+            "If it persists, check credentials: "
+            "python -c \"from ztfquery import io; io.set_account('irsa')\""
+        )
+
     if meta is None or meta.empty:
         logger.warning("ztfquery returned no metadata. Check credentials and coordinates.")
         return pd.DataFrame()
-
-    # Detect HTML error page returned instead of real data (auth failure or transient 502/503)
-    if any(str(c).strip().startswith("<!") for c in meta.columns):
-        raise RuntimeError(
-            "IRSA returned an HTML error page instead of data. "
-            "This is usually a transient server error (502/503) — retry in a few minutes. "
-            "If it persists, check ~/.netrc credentials for irsa.ipac.caltech.edu or run: "
-            "python -c \"from ztfquery import io; io.set_account('irsa')\""
-        )
 
     logger.debug(f"metatable columns: {list(meta.columns)}")
 
