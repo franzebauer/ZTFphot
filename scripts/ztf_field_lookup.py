@@ -106,16 +106,16 @@ def lookup_target(
         zquery.load_metadata(radec=[ra, dec], size=search_radius_deg)
         meta = zquery.metatable
         if meta is not None and not meta.empty and not any(
-                str(c).strip().startswith("<!") for c in meta.columns):
+                str(c).strip().startswith(("<!","<?")) for c in meta.columns):
             break
         if _attempt < _max_attempts:
             _wait = 30 * _attempt
-            logger.warning(f"IRSA returned HTML/empty response (attempt {_attempt}/{_max_attempts}) "
+            logger.warning(f"IRSA returned error page (attempt {_attempt}/{_max_attempts}) "
                            f"— retrying in {_wait}s ...")
             time.sleep(_wait)
     else:
         raise RuntimeError(
-            "IRSA returned an HTML error page after 5 attempts. "
+            "IRSA returned an error page (HTML/XML) after 5 attempts. "
             "This is usually a transient server error (502/503) or rate-limiting. "
             "If it persists, check credentials: "
             "python -c \"from ztfquery import io; io.set_account('irsa')\""

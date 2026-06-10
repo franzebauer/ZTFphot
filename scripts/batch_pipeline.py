@@ -2,15 +2,20 @@
 """
 batch_pipeline.py
 -----------------
-Run ZTFphot for a list of RA/Dec targets, keeping only the final LC parquet
+Run ZTFphot for a list of targets, keeping only the final LC parquet
 and diagnostic plots for each object and deleting all other products.
 
-Usage:
-    python batch_pipeline.py empty_noncal_stars_coords5.txt
+Two input modes, auto-detected by column count:
 
-Coordinates file: one target per line, comma-separated RA,Dec (degrees):
-    152.808792,50.387500
-    161.423500,8.563278
+  RA/Dec mode (2 columns) — full pipeline including lookup and merge:
+      152.808792,50.387500
+      161.423500,8.563278
+
+  Quadrant mode (6 columns) — skips merge; field/ccd/qid/band are passed
+  directly to run_pipeline; ra/dec are used for lookup and plots:
+      field,ccdid,qid,filtercode,ra,dec
+      000443,16,2,zg,182.63576,39.40585
+      001389,12,3,zg,182.63576,39.40585
 """
 
 import argparse
@@ -135,6 +140,79 @@ def cleanup(work_dir: Path) -> None:
         size = sum(f.stat().st_size for f in work_dir.rglob("*") if f.is_file())
         shutil.rmtree(work_dir)
         print(f"  Deleted {work_dir}  (freed {size/1e6:.0f} MB)")
+
+
+_QUAD_STEPS = [
+    "lookup", "download", "catalog", "simulate", "sex",
+    "vet", "calibrate", "flatfield", "lightcurves", "plots",
+]
+
+
+def run_pipeline_quad(pipeline: Path, field: int, ccdid: int, qid: int,
+                      band: str, ra: float, dec: float, work_dir: Path,
+                      workers: int, purge_batch: int,
+                      min_maglim: float, max_seeing: float,
+                      both: bool, extra_args: list) -> int:
+    cmd = [
+        sys.executable, str(pipeline),
+        "--ra",          str(ra),
+        "--dec",         str(dec),
+        "--base-dir",    str(work_dir),
+        "--field",       str(field),
+        "--ccdid",       str(ccdid),
+        "--qid",         str(qid),
+        "--bands",       band,
+        "--steps",       *_QUAD_STEPS,
+        "--purge-batch", str(purge_batch),
+        "--workers",     str(workers),
+        "--min-maglim",  str(min_maglim),
+        "--max-seeing",  str(max_seeing),
+    ]
+    if both:
+        cmd.append("--both")
+    cmd += extra_args
+    print(f"  CMD: {' '.join(cmd)}")
+    ret = subprocess.run(cmd)
+    return ret.returncode
+
+
+def find_quad_parquets(work_dir: Path, field: int, fc: str, ccdid: int,
+                       qid: int, both: bool = False) -> list:
+    results = []
+    for suffix in (["", "_sci"] if both else [""]):
+        pq = (work_dir / "LightCurves" / f"{field:06d}" / fc
+              / f"ccd{ccdid:02d}" / f"q{qid}" / f"lightcurves{suffix}.parquet")
+        if pq.exists():
+            results.append((pq, f"{fc}{suffix}"))
+    return results
+
+
+def save_results_quad(work_dir: Path, field: int, fc: str, ccdid: int, qid: int,
+                      ra: float, dec: float, results_dir: Path,
+                      both: bool = False) -> bool:
+    tag = f"{field:06d}_{fc}_c{ccdid:02d}_q{qid}"
+    success = False
+
+    parquets = find_quad_parquets(work_dir, field, fc, ccdid, qid, both)
+    if not parquets:
+        print(f"  WARNING: no LC parquet found for {tag}")
+    for pq_path, label in parquets:
+        dest = results_dir / f"{tag}_{label}.parquet"
+        shutil.copy2(pq_path, dest)
+        print(f"  Saved parquet ({pq_path.stat().st_size/1e6:.1f} MB) → {dest}")
+        success = True
+
+    coord_tag = f"{ra:.5f}_{dec:+.5f}"
+    for plots_root, dest_suffix in ([("Plots", ""), ("Plots_sci", "_sci")] if both
+                                    else [("Plots", "")]):
+        plots_src = work_dir / plots_root / coord_tag
+        if plots_src.exists():
+            plots_dest = results_dir / f"plots{dest_suffix}" / tag
+            shutil.copytree(plots_src, plots_dest, dirs_exist_ok=True)
+            n = sum(1 for _ in plots_dest.rglob("*.png"))
+            print(f"  Saved {n} plot(s) → {plots_dest}")
+
+    return success
 
 
 def main():
