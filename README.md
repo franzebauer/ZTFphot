@@ -109,7 +109,7 @@ python ZTFphot/scripts/run_pipeline.py --steps calibrate flatfield recalibrate l
 
 ### Low-disk mode
 
-On systems with limited disk space, use `--purge-batch N` to process images in batches of N epochs. After each batch's SExtractor step, all imaging products (difference images, simulated images, reference images) are deleted. Only the SExtractor catalogs (~5 MB/epoch) are kept for the calibration stage.
+On systems with limited disk space, use `--purge-batch N` to process images in batches of N epochs. After each batch's SExtractor step, the large imaging products (difference images, simulated images, `refimg.fits`) are deleted. The SExtractor catalogs (~5 MB/epoch), the reference CSV catalogs (`Catalogs/`), and the small reference source catalog (`refsexcat.fits`) are kept.
 
 ```bash
 # Full pipeline, 5 epochs at a time (~4 GB peak disk usage per quadrant):
@@ -134,6 +134,24 @@ python ZTFphot/scripts/run_pipeline.py --clean-up --dry-run  # preview first
 | SEx catalogs (end state) | ~20 GB |
 | Calibrated FITS (end state) | ~8 GB |
 | **Total at completion** | **~28 GB** |
+
+### Re-calibrating after a purge (no re-download needed)
+
+Calibration reads no image pixels. Every input it needs survives `--purge-batch`/`--clean-up`:
+
+- **Per-epoch photometry and headers** — the SExtractor LDAC catalogs in `SExCatalogs/` embed a full copy of the diff-image header (`OBSMJD`, `MAGZP_DIF`, `SEEING`, `MAGLIM`, `INFOBITS_DIF`, …) in their `LDAC_IMHEAD` extension, alongside the source fluxes. These are never purged.
+- **Reference magnitudes** — the `Catalogs/*.csv` files (built once by the `catalog` step) hold `MAGZP_REF` and the aperture magnitudes; purge never touches `Catalogs/`.
+- **Discovery key** — `refsexcat.fits` is now retained through purge (it is small), so quadrants stay discoverable via the primary `Reference/` scan.
+
+So to test changes to the calibration procedure, re-run **only** the calibration-and-later steps — never `catalog`, `simulate`, or `sex`, which are the image-dependent steps:
+
+```bash
+python ZTFphot/scripts/run_pipeline.py --base-dir data \
+    --steps calibrate flatfield recalibrate lightcurves \
+    --field 509 --no-target --force
+```
+
+Quadrant discovery (`find_quadrants`) additionally falls back to `LightCurves/` and then to `SExCatalogs/`, so a quadrant remains discoverable even if `refsexcat.fits` and the light-curve parquets were both removed. If `--status` reports quadrants but a re-run says "No quadrants found", make sure the retained `SExCatalogs/` tree is present under `--base-dir`.
 
 ---
 
@@ -264,7 +282,7 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--ff-min-count N` | Minimum detections per flatfield bin to use (default: 5) |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
 | `--target-match-radius ARCSEC` | Max separation to match the input RA/Dec to a detected source in the calibrated catalog (default: 3.0 arcsec) |
-| `--merge-poly-degree N` | Degree of the 2-D spatial polynomial used during quadrant cross-calibration in the merge step (default: 1; use 0 for a scalar offset, 2 for quadratic) |
+| `--merge-mag-bin W` | Magnitude-bin width (mag) for the per-magnitude quadrant cross-calibration in the merge step (default: 0.1; a very large value reduces to a single scalar offset) |
 
 ### Photometry variant
 
@@ -387,11 +405,13 @@ Contains all per-quadrant columns above, with `norm_offset` already applied to a
 | `filtercode`  | str     | Filter code (`zg`, `zr`, `zi`) |
 | `ccdid`       | int64   | CCD number |
 | `qid`         | int64   | Quadrant number |
-| `norm_offset` | float32 | Per-row spatial correction (mag) applied to all `MAG_*` columns to bring this quadrant onto the dominant photometric scale; 0.0 for dominant-quadrant rows |
+| `norm_offset` | float32 | Per-row magnitude-dependent correction (mag) applied to all `MAG_*` columns to bring this quadrant onto the dominant photometric scale; 0.0 for dominant-quadrant rows |
 
 **`object_index` in the merged file is globally unique across quadrants.** Each secondary quadrant's indices are offset above the dominant quadrant's block so no two different physical stars share the same index. Sources detected in multiple quadrants (spatial overlap) are additionally coordinate-matched at 1.5 arcsec and remapped to the dominant quadrant's `object_index`, so the same physical star has a single index throughout the merged file.
 
-The cross-calibration fits a 2-D polynomial in (RA, Dec) to the per-source median-magnitude difference between each secondary quadrant and the dominant quadrant, using stable common sources (std < 0.15 mag, ≥5 clean epochs in both quadrants, ≥10 common sources required). The polynomial degree is controlled by `--merge-poly-degree` (default: 1 = linear tilt). The fit falls back to a lower degree or a scalar median offset when too few common sources are available.
+The cross-calibration measures the per-source median-magnitude difference between each secondary quadrant and the dominant quadrant (`dominant − secondary`, on `MAG_4_TOT_AB`, matched within 1.5 arcsec, ≥5 clean epochs in both quadrants, ≥10 common sources required) **as a function of magnitude**. The difference is binned by the dominant magnitude in bins of width `--merge-mag-bin` (default: 0.1 mag), with a 3σ MAD clip per bin (≥5 sources required per bin), forming a correction curve. The curve is applied to every secondary row by interpolating it at that row's `MAG_4_TOT_AB` (flat extrapolation beyond the populated range). It falls back to a single scalar median offset when fewer than two bins are populated. This magnitude-dependent correction replaces the former 2-D spatial polynomial: inter-quadrant offsets in this data set are magnitude-dependent (driven by the per-epoch science calibration of shallow, few-epoch quadrants), not spatial, and a scalar or spatial fit left a residual tilt across magnitude.
+
+Quadrant discovery (`find_quadrants`) is primarily driven by `Reference/*_refsexcat.fits` (retained through purge), then supplements from `LightCurves/.../lightcurves*.parquet`, then from `SExCatalogs/.../*_sexout.fits`, so quadrants whose reference products were purged are still picked up by the merge (and `--status`). See [Re-calibrating after a purge](#re-calibrating-after-a-purge-no-re-download-needed).
 
 File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each contributing quadrant, plus `dominant_quadrant` (e.g. `000521_zg_c15_q3`) identifying the photometric reference quadrant.
 

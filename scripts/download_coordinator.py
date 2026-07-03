@@ -816,7 +816,12 @@ def find_quadrants(
 ) -> list[dict]:
     """
     Walk base_dir/Reference/ to find all downloaded (field, filtercode, ccdid, qid)
-    combinations that have a refsexcat.fits.
+    combinations that have a refsexcat.fits, then supplement with any quadrant
+    that has a LightCurves/.../lightcurves*.parquet, then with any quadrant that
+    still has retained SExtractor catalogs (SExCatalogs/.../*_sexout.fits) — so a
+    quadrant remains discoverable after --purge-batch/--clean-up even if its
+    Reference products and light curves are both gone, letting calibration be
+    re-run without re-downloading.
 
     Returns a list of dicts:
         {field, filtercode, ccdid, qid, ref_dir, sci_dir}
@@ -872,6 +877,99 @@ def find_quadrants(
             "sci_dir":    sci_root / fld_part / fc_part / c_part / q_part,
         })
 
+    # ── Fallback: quadrants with light curves but no Reference catalog ──────────
+    # find_quadrants() is driven by Reference/*_refsexcat.fits, which may have been
+    # purged after light curves were built.  Supplement from LightCurves/ so merge
+    # (and status) still see those quadrants.  ref_dir/sci_dir point at the
+    # conventional locations even though they may not exist on disk.
+    seen = {(q["field"], q["filtercode"], q["ccdid"], q["qid"]) for q in quadrants}
+    lc_root = base_dir / "LightCurves"
+    if lc_root.exists():
+        for lcfile in sorted(lc_root.rglob("lightcurves*.parquet")):
+            parts = lcfile.parts
+            try:
+                q_part   = next(p for p in reversed(parts) if p.startswith("q") and p[1:].isdigit())
+                c_part   = parts[list(parts).index(q_part) - 1]
+                fc_part  = parts[list(parts).index(c_part) - 1]
+                fld_part = parts[list(parts).index(fc_part) - 1]
+            except (StopIteration, ValueError):
+                continue  # e.g. LightCurves/merged/... has no q-part — skip
+
+            if allowed_fcs and fc_part not in allowed_fcs:
+                continue
+            try:
+                this_field = int(fld_part)
+                this_ccd   = int(c_part.replace("ccd", ""))
+                this_qid   = int(q_part[1:])
+            except ValueError:
+                continue
+
+            if field is not None and this_field != field:
+                continue
+            if ccdid is not None and this_ccd != ccdid:
+                continue
+            if qid is not None and this_qid != qid:
+                continue
+
+            key = (this_field, fc_part, this_ccd, this_qid)
+            if key in seen:
+                continue
+            seen.add(key)
+            quadrants.append({
+                "field":      this_field,
+                "filtercode": fc_part,
+                "ccdid":      this_ccd,
+                "qid":        this_qid,
+                "ref_dir":    ref_root / fld_part / fc_part / c_part / q_part,
+                "sci_dir":    sci_root / fld_part / fc_part / c_part / q_part,
+            })
+            _log.debug(f"Discovered {key} from LightCurves (no Reference catalog)")
+
+    # ── Fallback: quadrants with retained SExtractor catalogs only ──────────────
+    # SExCatalogs/ is the calibration input and is never purged, so recalibration
+    # must stay possible even when Reference/*_refsexcat and LightCurves/ are both
+    # absent.  Layout: SExCatalogs{suffix}/{field}/{fc}/{ccd:02d}/{qid}/*_sexout.fits
+    # — note the ccd/qid dirs are plain digits here, unlike Reference/ (ccdNN/qN),
+    # so ref_dir/sci_dir are reconstructed in the conventional form (may not exist).
+    for sex_rootname in ("SExCatalogs", "SExCatalogs_sci"):
+        sex_root = base_dir / sex_rootname
+        if not sex_root.exists():
+            continue
+        for qdir in sorted(sex_root.glob("*/*/*/*")):
+            if not qdir.is_dir() or not any(qdir.glob("*_sexout.fits")):
+                continue
+            fld_part, fc_part, c_part, q_part = qdir.parts[-4:]
+
+            if allowed_fcs and fc_part not in allowed_fcs:
+                continue
+            try:
+                this_field = int(fld_part)
+                this_ccd   = int(c_part)
+                this_qid   = int(q_part)
+            except ValueError:
+                continue
+
+            if field is not None and this_field != field:
+                continue
+            if ccdid is not None and this_ccd != ccdid:
+                continue
+            if qid is not None and this_qid != qid:
+                continue
+
+            key = (this_field, fc_part, this_ccd, this_qid)
+            if key in seen:
+                continue
+            seen.add(key)
+            quadrants.append({
+                "field":      this_field,
+                "filtercode": fc_part,
+                "ccdid":      this_ccd,
+                "qid":        this_qid,
+                "ref_dir":    ref_root / fld_part / fc_part / f"ccd{this_ccd:02d}" / f"q{this_qid}",
+                "sci_dir":    sci_root / fld_part / fc_part / f"ccd{this_ccd:02d}" / f"q{this_qid}",
+            })
+            _log.debug(f"Discovered {key} from SExCatalogs (no Reference catalog / light curves)")
+
     return quadrants
 
 
@@ -888,7 +986,10 @@ def purge_images(
     Delete large imaging products after SExtractor catalogs are built.
 
     sci=True  — deletes diff.fits.fz, diff.fits, *_simulated.fits
-    ref=True  — deletes refimg.fits, refsexcat.fits, refpsfcat.fits, refcov.fits
+    ref=True  — deletes refimg.fits, refpsfcat.fits, refcov.fits
+                (refsexcat.fits is deliberately retained: it is small and is the
+                 primary quadrant-discovery key + source for the Catalogs/ CSV, so
+                 keeping it lets calibration be re-run without re-downloading)
     filefracdays — if given, restrict science deletion to these epoch IDs only;
                    ref products are always deleted in full (one per quadrant)
     dry_run   — log what would be deleted without touching the disk
@@ -902,10 +1003,9 @@ def purge_images(
     ]
     ref_patterns = [
         "*_refimg.fits",
-        "*_refsexcat.fits",
         "*_refpsfcat.fits",
         "*_refcov.fits",
-    ]
+    ]  # *_refsexcat.fits intentionally kept — see docstring
 
     to_delete: list[Path] = []
 

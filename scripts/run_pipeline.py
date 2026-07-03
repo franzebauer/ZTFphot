@@ -352,7 +352,7 @@ def main() -> None:
     # Calibration
     p.add_argument("--vet-catalog",  type=Path, default=None)
     p.add_argument("--poly-degree",       type=int,  default=2)
-    p.add_argument("--merge-poly-degree",    type=int,   default=1)
+    p.add_argument("--merge-mag-bin",        type=float, default=0.1)
     p.add_argument("--ff-bins",              type=int,   default=20)
     p.add_argument("--ff-min-count",         type=int,   default=50)
     p.add_argument("--target-match-radius",  type=float, default=3.0, metavar="ARCSEC",
@@ -605,7 +605,7 @@ def main() -> None:
         if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
                                               target_ra=args.ra, target_dec=args.dec,
                                               suffix=suffix,
-                                              poly_degree=args.merge_poly_degree)
+                                              mag_bin=args.merge_mag_bin)
 
         if "plots"      in steps:
             logger.info("─── plots ───")
