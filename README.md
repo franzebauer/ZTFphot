@@ -63,7 +63,7 @@ By default, all pipeline data is written to `data/` in your current working dire
 python ZTFphot/scripts/run_pipeline.py --ra 182.635755 --dec 39.405849
 ```
 
-This runs all steps in order: field lookup → image download → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → recalibrate → light curves → merge → plots. The `recalibrate` step is identical to `calibrate` but runs after `flatfield` so the spatial correction is applied.
+This runs all steps in order: field lookup → image download → reference catalog → simulate → SExtractor → vet → calibrate → flatfield → recalibrate → light curves → merge → plots. The `recalibrate` step is identical to `calibrate` but runs after `flatfield` so the spatial correction is applied; it force-overwrites the first pass automatically (see the step table).
 
 ### Common quality cuts for download (all optional)
 
@@ -233,7 +233,7 @@ data/                       ← created in your working directory on first run
 | Vet | `vet` | Flag variable/bad calibration stars by multi-epoch RMS |
 | Calibrate | `calibrate` | Linear ZP → 3σ clip → faint correction → 2D polynomial → flatfield |
 | Flatfield | `flatfield` | Rebuild spatial flatfield from post-polynomial residuals |
-| Recalibrate | `recalibrate` | Second calibration pass; identical to `calibrate` but runs after `flatfield` to apply the spatial correction |
+| Recalibrate | `recalibrate` | Second calibration pass; identical to `calibrate` but runs after `flatfield` to apply the spatial correction. Because it shares output paths with `calibrate`, it **always force-overwrites** them (no `--force` needed) — otherwise the existing `_cal.fits` would be skipped and the flatfield never applied. |
 | Light curves | `lightcurves` | Assemble per-object parquet light curves from calibrated FITS |
 | Merge | `merge` | Cross-calibrate and merge multiple quadrants per band |
 | Plots | `plots` | Diagnostic plots (spatial residuals, RMS, precision, light curves); generates a placeholder if the target is not found (see [Target coverage diagnostics](#target-coverage-diagnostics)) |

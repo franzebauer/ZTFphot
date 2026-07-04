@@ -587,10 +587,15 @@ def main() -> None:
                                            nbins=args.ff_bins, min_count=args.ff_min_count,
                                            suffix=suffix)
 
+        # recalibrate is the second, flatfield-applied pass; it shares output paths
+        # with calibrate, so it must overwrite that first pass regardless of --force.
+        # Otherwise step_calibrate skips the existing *_cal.fits and the flatfield is
+        # built but never applied (dm_5 == dm_4, "flatfield does nothing").
+        _cal_force = args.force or ("recalibrate" in steps)
         if "calibrate" in steps or "recalibrate" in steps:
             for q in quadrants:
                 key = (q['field'], q['filtercode'], q['ccdid'], q['qid'])
-                step_calibrate(base_dir, [q], workers=args.workers, force=args.force,
+                step_calibrate(base_dir, [q], workers=args.workers, force=_cal_force,
                                vet_catalog=args.vet_catalog, poly_degree=args.poly_degree,
                                flatfield=_ff_map.get(key),
                                target_ra=args.ra, target_dec=args.dec,
