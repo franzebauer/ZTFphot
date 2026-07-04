@@ -41,13 +41,22 @@ def _apply_flatfield(ra, dec, ff):
     ff : dict with keys 'stat' (2-D array, shape [n_ra, n_dec]),
          'ra_edges', 'dec_edges'  (1-D bin-edge arrays)
     Returns correction in magnitude units (subtract from mag to apply).
+
+    Query positions are clamped to the grid-centre range, so sources in the outer
+    half-cell (between the grid edge and the first/last cell centre) and beyond the
+    grid receive the nearest cell's correction instead of zero. Without this the
+    whole field perimeter — where vignetting makes the correction most needed —
+    was left uncorrected (linear interpolation over cell centres extrapolates to
+    the fill value outside [centre_0, centre_-1]).
     """
     ra_cen  = 0.5 * (ff['ra_edges'][:-1]  + ff['ra_edges'][1:])
     dec_cen = 0.5 * (ff['dec_edges'][:-1] + ff['dec_edges'][1:])
     interp  = RegularGridInterpolator(
         (ra_cen, dec_cen), ff['stat'],
-        method='linear', bounds_error=False, fill_value=0.0)
-    return interp(np.column_stack([ra, dec]))
+        method='linear', bounds_error=False, fill_value=None)
+    ra_q  = np.clip(ra,  ra_cen[0],  ra_cen[-1])
+    dec_q = np.clip(dec, dec_cen[0], dec_cen[-1])
+    return interp(np.column_stack([ra_q, dec_q]))
 
 
 # ── LDAC reader ───────────────────────────────────────────────────────────────
@@ -379,16 +388,55 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
 
             Q_cal[k] = magQi[k] - final_fit
 
-            # ── Step 3: faint-source per-bin smoothed correction ───────────
-            # Residuals for all matched sources after the linear ZP fit.
-            # Bin in 0.5-mag steps (18.5–22), take the median per bin (3σ-clipped),
-            # interpolate across empty bins, Gaussian-smooth σ=0.2 mag (σ_bins=0.4).
-            # Apply per-source by interpolating the smoothed curve at each source mag.
-            # Correction is forced to 0 at the bright end (mag < 18.5).
+            # ── Step 3: 2-D polynomial spatial correction ───────────────────
+            # Fit on the linear-ZP calibrator residuals directly. The faint-source
+            # correction now runs after the flatfield (see Step 5), so it no longer
+            # feeds the poly/flatfield fits — those are built from 14–19 mag
+            # calibrators the faint ramp (≥18.5 mag) barely touches anyway.
+            _dm_for_poly = (diff - fit)
+            if k == 1:
+                _nc_rmsfc_k = float(np.std(_dm_for_poly))
+
+            _poly_corr   = np.zeros(len(alphafin))
+            _nc_rms3_k   = _nc_rms2_k
+            _poly_fitted = np.zeros(len(ra_c))
+            try:
+                _poly_coeffs, _poly_fitted = _fit_poly2d(
+                    ra_c, dec_c, _dm_for_poly, ra0, dec0, poly_degree)
+                _poly_corr = _poly2d_basis(
+                    alphafin, deltafin, ra0, dec0, poly_degree) @ _poly_coeffs
+                _nc_rms3_k = float(np.std(_dm_for_poly - _poly_fitted))
+            except Exception as _pe:
+                print(f"  Warning: poly2d fit failed k={k}: {_pe}")
+            Q_cal[k] = Q_cal[k] - _poly_corr
+            # ── end polynomial correction ───────────────────────────────────
+
+            # ── Step 4: stacked flatfield correction ────────────────────────
+            _ff_corr   = np.zeros(len(alphafin))
+            _ff_at_c   = np.zeros(len(ra_c))
+            _nc_rms4_k = np.nan
+            if flatfield is not None:
+                try:
+                    _ff_corr   = _apply_flatfield(alphafin, deltafin, flatfield)
+                    _ff_at_c   = _apply_flatfield(ra_c, dec_c, flatfield)
+                    _nc_rms4_k = float(np.std(_dm_for_poly - _poly_fitted - _ff_at_c))
+                except Exception as _fe:
+                    print(f"  Warning: flatfield apply failed k={k}: {_fe}")
+                Q_cal[k] = Q_cal[k] - _ff_corr
+            # ── end flatfield correction ────────────────────────────────────
+
+            # ── Step 5: faint-source per-bin smoothed correction ────────────
+            # Applied LAST, on the residuals that survive all spatial corrections
+            # (linear ZP + 2D poly + flatfield), so it removes the magnitude-
+            # dependent offset left in faint sources. Bin the all-source residual
+            # in 0.5-mag steps (18.5–22), take the 3σ-clipped median per bin,
+            # interpolate empty bins, Gaussian-smooth (σ_bins=0.4), then interpolate
+            # the curve at each source mag. Forced to 0 below 18.5 mag, so the
+            # calibrators (14–19 mag) are untouched.
             _FC_EDGES   = np.arange(18.5, 22.1, 0.5)
             _FC_CENTERS = 0.5 * (_FC_EDGES[:-1] + _FC_EDGES[1:])
 
-            residual_all = maginst_all - q_mag_all - fit_fun(maginst_all, *coefficients)
+            residual_all = Q_cal[k] - q_mag_all
             faint_nc_mask = (
                 (maginst_all > 19.0) & (maginst_all < 21.0) &
                 (errinst_all < 0.5) & np.isfinite(residual_all)
@@ -425,48 +473,13 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                 if _hdr_bins.sum() > 0:
                     faint_offset = float(np.nanmean(_bin_med[_hdr_bins]))
 
+            # residual_all here is the all-source residual AFTER the flatfield but
+            # BEFORE this faint step — saved as dm_3 for the diagnostic plot.
             if faint_corr_curve is not None:
                 _corr_all = np.interp(magQi[k], faint_corr_curve[0], faint_corr_curve[1],
                                       left=0.0, right=faint_corr_curve[1][-1])
                 Q_cal[k] = Q_cal[k] - _corr_all
             # ── end faint-source correction ─────────────────────────────────
-
-            # ── Step 4: 2-D polynomial spatial correction ───────────────────
-            _faint_corr_c = (
-                np.interp(maginst, faint_corr_curve[0], faint_corr_curve[1],
-                          left=0.0, right=faint_corr_curve[1][-1])
-                if faint_corr_curve is not None else np.zeros(len(maginst))
-            )
-            _dm_for_poly = (diff - fit) - _faint_corr_c
-            if k == 1:
-                _nc_rmsfc_k = float(np.std(_dm_for_poly))
-
-            _poly_corr   = np.zeros(len(alphafin))
-            _nc_rms3_k   = _nc_rms2_k
-            _poly_fitted = np.zeros(len(ra_c))
-            try:
-                _poly_coeffs, _poly_fitted = _fit_poly2d(
-                    ra_c, dec_c, _dm_for_poly, ra0, dec0, poly_degree)
-                _poly_corr = _poly2d_basis(
-                    alphafin, deltafin, ra0, dec0, poly_degree) @ _poly_coeffs
-                _nc_rms3_k = float(np.std(_dm_for_poly - _poly_fitted))
-            except Exception as _pe:
-                print(f"  Warning: poly2d fit failed k={k}: {_pe}")
-            Q_cal[k] = Q_cal[k] - _poly_corr
-            # ── end polynomial correction ───────────────────────────────────
-
-            # ── Step 5: stacked flatfield correction ────────────────────────
-            _ff_corr   = np.zeros(len(alphafin))
-            _nc_rms4_k = np.nan
-            if flatfield is not None:
-                try:
-                    _ff_corr   = _apply_flatfield(alphafin, deltafin, flatfield)
-                    _ff_at_c   = _apply_flatfield(ra_c, dec_c, flatfield)
-                    _nc_rms4_k = float(np.std(_dm_for_poly - _poly_fitted - _ff_at_c))
-                except Exception as _fe:
-                    print(f"  Warning: flatfield apply failed k={k}: {_fe}")
-                Q_cal[k] = Q_cal[k] - _ff_corr
-            # ── end flatfield correction ────────────────────────────────────
 
             # ── Accumulate diagnostics for k=1 (primary aperture) ──────────
             if k == 1:
@@ -490,11 +503,15 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                     _tgt_dcff   = (float(_ff_corr[tgt_in_matched]) * 1000
                                    if flatfield is not None else np.nan)
                 if residuals_out is not None:
-                    _dm_st3  = _dm_for_poly.astype(float)
                     _dm_st4  = (_dm_for_poly - _poly_fitted).astype(float)
                     _ff_save = (_ff_at_c if flatfield is not None
                                 else np.zeros(len(ra_c), dtype=float))
                     _dm_st5  = (_dm_st4 - _ff_save).astype(float)
+                    # dm_3 now holds the all-source residual after the flatfield but
+                    # before the faint correction (was the redundant poly-input
+                    # panel), so the plot can show the faint step's effect on all
+                    # sources vs dm_all_post. dm_4/dm_5 stay calibrator post-poly /
+                    # post-flatfield — the flatfield build still reads dm_4.
                     np.savez(str(residuals_out),
                              ra_0=_ra_c_pre,  dec_0=_dec_c_pre,
                              dm_0=_dm_st0.astype(float),
@@ -502,8 +519,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                              dm_1=_dm_st1.astype(float),
                              ra_2=ra_c,        dec_2=dec_c,
                              dm_2=_dm_st2.astype(float),
-                             ra_3=ra_c,        dec_3=dec_c,
-                             dm_3=_dm_st3,
+                             ra_3=alphafin.astype(float), dec_3=deltafin.astype(float),
+                             dm_3=residual_all.astype(float),
                              ra_4=ra_c,        dec_4=dec_c,
                              dm_4=_dm_st4,
                              ra_5=ra_c,        dec_5=dec_c,

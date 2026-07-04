@@ -311,9 +311,11 @@ Within `calibrate`, each epoch is corrected in five stages:
 
 1. **Linear ZP fit** — per-epoch magnitude offset + slope fit against calibrators (14–19 mag, CLASS_STAR ≥ 0.7, FLAGS=0, err < 0.3 mag)
 2. **3σ iterative clip** — outlier calibrators removed, fit repeated
-3. **Faint correction** — smoothed empirical offset for faint sources (residuals binned in 0.5 mag steps, Gaussian-smoothed, tapering to zero at mag < 18.5)
-4. **2D polynomial** — low-order spatial polynomial fitted to calibrator residuals and applied to all sources
-5. **Spatial flatfield** — stacked median residual map applied if a saved flatfield exists on disk
+3. **2D polynomial** — low-order spatial polynomial fitted to calibrator residuals and applied to all sources
+4. **Spatial flatfield** — stacked median residual map applied if a saved flatfield exists on disk. Query positions are clamped to the grid-centre range, so the outer half-cell around the field perimeter receives the nearest cell's correction instead of zero.
+5. **Faint correction** — smoothed empirical offset for faint sources, applied **last** (on the residuals surviving all spatial corrections). Residuals binned in 0.5 mag steps, 3σ-clipped median per bin, Gaussian-smoothed, tapering to zero at mag < 18.5, so calibrators (14–19 mag) — and hence the poly/flatfield fits built from them — are untouched.
+
+> The faint correction moved from stage 3 to stage 5 (after the flatfield) so it removes the magnitude-dependent offset that remains in faint sources *after* the spatial corrections, rather than feeding it into the poly/flatfield fits. The spatial fits are built from bright calibrators the faint ramp barely touches, so the reordering leaves them unchanged.
 
 ---
 
@@ -428,9 +430,9 @@ File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each
 | `NC_RMS0` | Calibrator RMS before any correction (mmag) |
 | `NC_RMS1` | Calibrator RMS after linear ZP fit (mmag) |
 | `NC_RMS2` | Calibrator RMS after 3σ clip (mmag) |
-| `NC_RMS3` | Calibrator RMS after faint correction (mmag) |
-| `NC_RMS4` | Calibrator RMS after 2D polynomial (mmag) |
-| `NC_RMSFC` | Calibrator RMS after spatial flatfield (mmag) |
+| `NC_RMS3` | Calibrator RMS after 2D polynomial (mmag) |
+| `NC_RMS4` | Calibrator RMS after spatial flatfield (mmag) |
+| `NC_RMSFC` | Calibrator RMS entering the 2D polynomial (≈ after 3σ clip) (mmag) |
 | `CALIB_N` | Linear fit intercept (mag) |
 | `CALIB_M` | Linear fit slope |
 | `CALIB_ZP` | ZP correction evaluated at mag 17 (mag) |

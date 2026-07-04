@@ -11,22 +11,27 @@ Panel order (2 rows × 4 cols):
   2. Before (calibrators)
   3. After linear ZP (calibrators)
   4. After 3σ clip (calibrators)
-  5. After faint corr (calibrators)
-  6. After 2D poly (calibrators)
-  7. After flatfield (calibrators)
+  5. After 2D poly (calibrators)
+  6. After flatfield (calibrators)
+  7. After flatfield, before faint (all sources)
   8. After calibration (all sources)
 
 Each panel has an independent colorbar.
 Per-panel title includes: σ_sample (std of stacked residuals),
 σ_map (std of binned grid), N (total point-epoch pairs used).
 
+Panels 7 and 8 bracket the faint-source correction (which runs last, after the
+flatfield): panel 7 is the all-source residual entering it, panel 8 the result.
+The correction is ~0 for the 14–19 mag calibrators, so it has no dedicated
+calibrator panel.
+
 Reads *_resid.npz from FlatfieldResiduals/.  NPZ arrays (all in magnitudes):
   ra_0/dec_0/dm_0       calibrators, before any correction
   ra_1/dec_1/dm_1       calibrators, after linear ZP fit
   ra_2/dec_2/dm_2       calibrators, after 3σ iterative clip
-  ra_3/dec_3/dm_3       calibrators, after faint-source correction
   ra_4/dec_4/dm_4       calibrators, after 2D polynomial
   ra_5/dec_5/dm_5       calibrators, after spatial flatfield
+  ra_3/dec_3/dm_3       all matched sources, after flatfield, before faint corr
   ra_all/dec_all/dm_all_pre   all matched sources, before calibration
   ra_all/dec_all/dm_all_post  all matched sources, after full calibration
 """
@@ -49,9 +54,9 @@ _STAGES = [
     ("ra_0",   "dec_0",   "dm_0",        "Before (calibrators)"),
     ("ra_1",   "dec_1",   "dm_1",        "After linear ZP (calibrators)"),
     ("ra_2",   "dec_2",   "dm_2",        "After 3σ clip (calibrators)"),
-    ("ra_3",   "dec_3",   "dm_3",        "After faint corr (calibrators)"),
     ("ra_4",   "dec_4",   "dm_4",        "After 2D poly (calibrators)"),
     ("ra_5",   "dec_5",   "dm_5",        "After flatfield (calibrators)"),
+    ("ra_3",   "dec_3",   "dm_3",        "After flatfield, before faint (all sources)"),
     ("ra_all", "dec_all", "dm_all_post", "After calibration (all sources)"),
 ]
 
@@ -149,7 +154,10 @@ def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric):
 def _make_spatial_fig(epochs, out_path, tag, nbins, stat_fn, cmap, symmetric, fig_title):
     fig, axes = plt.subplots(2, 4, figsize=(22, 10),
                              gridspec_kw=dict(wspace=0.15, hspace=0.25))
-    fig.suptitle(f"{fig_title} — {tag}", fontsize=14, y=0.995)
+    fig.suptitle(f"{fig_title} — {tag}", fontsize=14, y=0.998)
+    fig.text(0.5, 0.965,
+             r"residual $=$ measured magnitude $-$ ZTF reference-catalog magnitude",
+             ha="center", va="top", fontsize=10, style="italic")
 
     for ax, (rk, dk, mk, label) in zip(axes.flatten(), _STAGES):
         ra, dec, dm = _stack_stage(epochs, rk, dk, mk)
