@@ -280,6 +280,7 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--poly-degree N` | Degree of the spatial calibration polynomial (default: 2) |
 | `--ff-bins N` | Number of spatial bins per axis for the flatfield grid (default: 16) |
 | `--ff-min-count N` | Minimum detections per flatfield bin to use (default: 5) |
+| `--ff-edge-split N` | Subdivide the outer flatfield bin on each axis into N thinner bins — elongated edge cells (full width along the edge, 1/N deep perpendicular) to resolve the steep vignetting gradient at the field boundary. Default 3; 1 = uniform grid |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
 | `--target-match-radius ARCSEC` | Max separation to match the input RA/Dec to a detected source in the calibrated catalog (default: 3.0 arcsec) |
 | `--merge-mag-bin W` | Magnitude-bin width (mag) for the per-magnitude quadrant cross-calibration in the merge step (default: 0.1; a very large value reduces to a single scalar offset) |
@@ -312,7 +313,7 @@ Within `calibrate`, each epoch is corrected in five stages:
 1. **Linear ZP fit** — per-epoch magnitude offset + slope fit against calibrators (14–19 mag, CLASS_STAR ≥ 0.7, FLAGS=0, err < 0.3 mag)
 2. **3σ iterative clip** — outlier calibrators removed, fit repeated
 3. **2D polynomial** — low-order spatial polynomial fitted to calibrator residuals and applied to all sources
-4. **Spatial flatfield** — stacked median residual map applied if a saved flatfield exists on disk. Query positions are clamped to the grid-centre range, so the outer half-cell around the field perimeter receives the nearest cell's correction instead of zero.
+4. **Spatial flatfield** — stacked median residual map applied if a saved flatfield exists on disk. The grid spans the full source range (ref-pos positions are exact, so no percentile clipping) with **elongated edge cells** (`--ff-edge-split`, outer bins subdivided perpendicular to the edge) to resolve the steep vignetting gradient at the boundary. Query positions are clamped to the grid-centre range, so the outer half-cell receives the nearest cell's correction instead of zero.
 5. **Faint correction** — smoothed empirical offset for faint sources, applied **last** (on the residuals surviving all spatial corrections). Residuals binned in 0.5 mag steps, 3σ-clipped median per bin, Gaussian-smoothed, tapering to zero at mag < 18.5, so calibrators (14–19 mag) — and hence the poly/flatfield fits built from them — are untouched.
 
 > The faint correction moved from stage 3 to stage 5 (after the flatfield) so it removes the magnitude-dependent offset that remains in faint sources *after* the spatial corrections, rather than feeding it into the poly/flatfield fits. The spatial fits are built from bright calibrators the faint ramp barely touches, so the reordering leaves them unchanged.

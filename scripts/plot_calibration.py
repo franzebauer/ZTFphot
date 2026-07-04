@@ -1,13 +1,17 @@
 """
 plot_calibration.py
 -------------------
-Fig 2 — Calibration RMS improvement & corrections (4 panels):
+Fig 2 — Calibration RMS improvement & corrections (4 panels).
+Left column = calibrators, right column = full sample:
   top-left  — boxplot of calibrator RMS at each pipeline stage (mmag)
-  top-right — median ± IQR per stage, line plot
   bot-left  — linear ZP correction at mag 17 vs seeing, coloured by MAGLIM
+  top-right — full-sample residual vs calibrated magnitude, with per-bin
+              median / mean / mode overplotted (exposes skew the median
+              faint correction does not remove)
   bot-right — per-epoch faint correction curve vs source mag, coloured by MAGLIM
 
-Reads *_cal.fits primary headers from Calibrated/.
+Reads *_cal.fits primary headers from Calibrated/, and (for the top-right panel)
+mag_all + dm_all_post from *_resid.npz in FlatfieldResiduals/.
 Header keywords used:
     NC_RMS0 … NC_RMS4, NC_RMSFC  — calibrator RMS at each stage (mmag)
     CALIB_N, CALIB_M              — linear fit intercept and slope
@@ -57,7 +61,82 @@ def _load_epoch_headers(cal_dir: Path) -> "pd.DataFrame":
     return df.sort_values("OBSMJD").reset_index(drop=True)
 
 
-def make_rms(cal_dir: Path, out_path: Path, tag: str = "") -> None:
+def _binned_center_curves(mag, resid, edges):
+    """Per magnitude-bin median, mean and (histogram) mode of the residual."""
+    cen  = 0.5 * (edges[:-1] + edges[1:])
+    med  = np.full(len(cen), np.nan)
+    mean = np.full(len(cen), np.nan)
+    mode = np.full(len(cen), np.nan)
+    for i, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+        v = resid[(mag >= lo) & (mag < hi)]
+        v = v[np.isfinite(v)]
+        if len(v) < 20:
+            continue
+        med[i]  = float(np.median(v))
+        mean[i] = float(np.mean(v))
+        c_lo, c_hi = np.percentile(v, [2, 98])
+        if c_hi > c_lo:
+            h, e = np.histogram(v, bins=41, range=(c_lo, c_hi))
+            h = np.convolve(h.astype(float), np.ones(3) / 3, mode="same")
+            bc = 0.5 * (e[:-1] + e[1:])
+            mode[i] = float(bc[int(np.argmax(h))])
+    return cen, med, mean, mode
+
+
+def _faint_residual_panel(ax, resid_dir) -> None:
+    """Full-sample residual (mmag) vs calibrated magnitude, with per-bin
+    median / mean / mode overplotted.  If median≈0 after calibration but the
+    mode is offset at the faint end, the median faint correction is centring a
+    skewed distribution on the wrong point (over/under-correcting the bulk).
+    Reads mag_all + dm_all_post from *_resid.npz."""
+    ax.set_title("Full-sample residual vs magnitude\n(after calib; median / mean / mode)")
+    ax.set_xlabel("Calibrated magnitude (AB)")
+    ax.set_ylabel("Residual: measured − ZTF ref (mmag)")
+
+    mags, res = [], []
+    if resid_dir is not None:
+        for p in sorted(Path(resid_dir).glob("*_resid.npz")):
+            try:
+                d = np.load(str(p))
+            except Exception:
+                continue
+            if "mag_all" not in d or "dm_all_post" not in d:
+                continue
+            mags.append(np.asarray(d["mag_all"], float))
+            res.append(np.asarray(d["dm_all_post"], float) * 1000.0)  # mag → mmag
+    if not mags:
+        ax.text(0.5, 0.5, "no mag_all in resid.npz\n(re-run recalibrate)",
+                ha="center", va="center", transform=ax.transAxes, fontsize=9)
+        return
+
+    mag   = np.concatenate(mags)
+    resid = np.concatenate(res)
+    ok    = np.isfinite(mag) & np.isfinite(resid)
+    mag, resid = mag[ok], resid[ok]
+    if len(mag) < 100:
+        ax.text(0.5, 0.5, "too few sources", ha="center", va="center",
+                transform=ax.transAxes, fontsize=9)
+        return
+
+    m_lo, m_hi = np.percentile(mag, [1, 99.5])
+    sel = (mag >= m_lo) & (mag <= m_hi)
+    ax.hexbin(mag[sel], resid[sel], gridsize=(60, 40), bins="log",
+              cmap="Greys", mincnt=1)
+
+    edges = np.arange(np.floor(m_lo), np.ceil(m_hi) + 0.25, 0.25)
+    cen, med, mean, mode = _binned_center_curves(mag, resid, edges)
+    ax.plot(cen, med,  "-",  color="C3", lw=2.0, label="median (correction)")
+    ax.plot(cen, mean, "--", color="C0", lw=1.5, label="mean")
+    ax.plot(cen, mode, ":",  color="C2", lw=2.2, label="mode (bulk)")
+    ax.axhline(0, color="k", lw=0.8, ls="--")
+
+    ylim = float(np.nanpercentile(np.abs(resid[sel]), 97))
+    ax.set_ylim(-min(max(ylim, 40.0), 300.0), min(max(ylim, 40.0), 300.0))
+    ax.legend(fontsize=8, loc="upper left")
+
+
+def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
+             resid_dir: Path | None = None) -> None:
     df = _load_epoch_headers(cal_dir)
     if df.empty:
         logger.warning(f"No calibrated epochs in {cal_dir}")
@@ -80,24 +159,11 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "") -> None:
     ax.set_xticks(range(1, len(labels) + 1))
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylabel("Calibrator RMS (mmag)")
-    ax.set_title("Distribution per calibration step")
+    ax.set_title("Calibrators: distribution per calibration step")
     ax.set_ylim(bottom=0)
 
-    # ── Panel 2: median ± IQR line ──
-    ax = axes[0, 1]
-    meds = [float(df[s].median()) for s in stages]
-    p25  = [float(df[s].quantile(0.25)) for s in stages]
-    p75  = [float(df[s].quantile(0.75)) for s in stages]
-    xs   = list(range(len(stages)))
-    total_delta = meds[0] - meds[-1]
-    ax.plot(xs, meds, "ko-", lw=2, ms=6, label=f"Total Δ = {total_delta:.1f} mmag")
-    ax.fill_between(xs, p25, p75, alpha=0.25, color="steelblue", label="IQR")
-    ax.set_xticks(xs)
-    ax.set_xticklabels(labels, fontsize=8)
-    ax.set_ylabel("Median ± IQR per step (mmag)")
-    ax.set_title("Median ± IQR per step")
-    ax.legend(fontsize=9)
-    ax.set_ylim(bottom=0)
+    # ── Panel 2 (top-right): full-sample residual vs magnitude ──
+    _faint_residual_panel(axes[0, 1], resid_dir)
 
     # ── Panel 3: ZP correction vs seeing ──
     ax = axes[1, 0]

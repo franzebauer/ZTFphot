@@ -527,6 +527,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                              dm_5=_dm_st5,
                              ra_all=alphafin.astype(float),
                              dec_all=deltafin.astype(float),
+                             mag_all=Q_cal[k].astype(float),
                              dm_all_pre=(maginst_all - q_mag_all).astype(float),
                              dm_all_post=(Q_cal[k] - q_mag_all).astype(float),
                              apcorr_4_6=np.float64(_apcorr_4_6))

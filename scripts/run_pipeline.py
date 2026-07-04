@@ -355,6 +355,9 @@ def main() -> None:
     p.add_argument("--merge-mag-bin",        type=float, default=0.1)
     p.add_argument("--ff-bins",              type=int,   default=20)
     p.add_argument("--ff-min-count",         type=int,   default=50)
+    p.add_argument("--ff-edge-split",        type=int,   default=3,
+                   help="Subdivide the outer flatfield bin on each axis into this "
+                        "many thinner bins (elongated edge cells; 1 = uniform grid)")
     p.add_argument("--target-match-radius",  type=float, default=3.0, metavar="ARCSEC",
                    help="Max separation (arcsec) to match input position to a detected "
                         "source in the calibrated catalog (default: 3.0)")
@@ -585,6 +588,7 @@ def main() -> None:
         if "flatfield"  in steps:
             _ff_map = step_build_flatfield(base_dir, quadrants,
                                            nbins=args.ff_bins, min_count=args.ff_min_count,
+                                           edge_split=args.ff_edge_split,
                                            suffix=suffix)
 
         # recalibrate is the second, flatfield-applied pass; it shares output paths
@@ -651,7 +655,8 @@ def main() -> None:
 
                 if has_cal:
                     make_rms(cal_dir,
-                             plot_root / f"rms_{tag}.png", tag)
+                             plot_root / f"rms_{tag}.png", tag,
+                             resid_dir=resid_dir if has_resid else None)
                 else:
                     logger.info(f"  [{tag}] no calibrated FITS — skipping rms")
 

@@ -197,14 +197,32 @@ def step_calibrate(
 
 # ── Step: build spatial flatfield ─────────────────────────────────────────────
 
+def _refined_edges(lo: float, hi: float, nbins: int, edge_split: int) -> np.ndarray:
+    """Bin edges: `nbins` uniform interior bins, with the first and last bin on
+    each axis subdivided into `edge_split` thinner bins. This produces elongated
+    edge cells — full interior width *along* the edge but 1/edge_split as deep
+    *perpendicular* to it — to resolve the steep vignetting gradient at the field
+    boundary without starving the cells of sources. edge_split=1 → uniform grid.
+    """
+    w = (hi - lo) / nbins
+    first = np.linspace(lo,     lo + w, edge_split + 1)
+    last  = np.linspace(hi - w, hi,     edge_split + 1)
+    mid   = np.linspace(lo + w, hi - w, nbins - 1)
+    return np.unique(np.concatenate([first, mid, last]))
+
+
 def step_build_flatfield(
     base_dir: Path, quadrants: list[dict],
     nbins: int = 20, min_count: int = 50,
+    edge_split: int = 3,
     suffix: str = "",
 ) -> dict:
     """
     Stack per-epoch NPZ residual files from step_calibrate(save_residuals=True)
     and build a spatial flatfield per quadrant.
+
+    The grid spans the full source range with subdivided outer bins (see
+    _refined_edges) so the vignetted field edges are covered and resolved.
 
     Returns dict keyed by (field, fc, ccd, qid) → flatfield dict.
     """
@@ -248,15 +266,17 @@ def step_build_flatfield(
             continue
 
         all_ra, all_dec, all_dm = all_ra[finite], all_dec[finite], all_dm[finite]
-        ra_lo, ra_hi   = np.percentile(all_ra,  [1, 99])
-        dec_lo, dec_hi = np.percentile(all_dec, [1, 99])
+        # Full spatial range (was 1–99 pct): ref-pos positions are exact
+        # reference-catalog coordinates — no astrometric outliers to clip — and the
+        # extreme edge rows/columns are exactly where the vignetting correction is
+        # needed. Outer bins are subdivided into elongated edge cells.
+        ra_edges  = _refined_edges(all_ra.min(),  all_ra.max(),  nbins, edge_split)
+        dec_edges = _refined_edges(all_dec.min(), all_dec.max(), nbins, edge_split)
 
         stat, ra_e, dec_e, _ = binned_statistic_2d(
-            all_ra, all_dec, all_dm, statistic='median', bins=nbins,
-            range=[[ra_lo, ra_hi], [dec_lo, dec_hi]])
+            all_ra, all_dec, all_dm, statistic='median', bins=[ra_edges, dec_edges])
         nobs, _, _, _ = binned_statistic_2d(
-            all_ra, all_dec, all_dm, statistic='count', bins=nbins,
-            range=[[ra_lo, ra_hi], [dec_lo, dec_hi]])
+            all_ra, all_dec, all_dm, statistic='count', bins=[ra_edges, dec_edges])
 
         global_med  = float(np.nanmedian(stat[nobs >= min_count]))
         stat_filled = np.where(nobs >= min_count, stat - global_med, -global_med)
