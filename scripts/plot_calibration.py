@@ -100,8 +100,8 @@ def _faint_residual_panel(ax, resid_dir) -> None:
     mode is offset at the faint end, the median faint correction is centring a
     skewed distribution on the wrong point (over/under-correcting the bulk).
     Reads mag_all + dm_all_post from *_resid.npz."""
-    ax.set_title("Full-sample residual vs magnitude\n(after calib; median / mean / mode)")
-    ax.set_xlabel("Calibrated magnitude (AB)")
+    ax.set_title("Full-sample residual vs reference magnitude\n(after calib; median / mean / mode)")
+    ax.set_xlabel("ZTF reference magnitude (AB)")
     ax.set_ylabel("Residual: measured − ZTF ref (mmag)")
 
     mags, res = [], []
@@ -124,6 +124,11 @@ def _faint_residual_panel(ax, resid_dir) -> None:
     resid = np.concatenate(res)
     ok    = np.isfinite(mag) & np.isfinite(resid)
     mag, resid = mag[ok], resid[ok]
+    # Bin by REFERENCE magnitude (q_mag = calibrated − residual), which is nearly
+    # noise-free (deep coadd). Binning by the noisy *measured* magnitude couples the
+    # x-axis to the residual and puts a spurious negative dip at the faint end
+    # (Eddington selection) that no per-epoch correction can remove.
+    mag = mag - resid / 1000.0
     if len(mag) < 100:
         ax.text(0.5, 0.5, "too few sources", ha="center", va="center",
                 transform=ax.transAxes, fontsize=9)
