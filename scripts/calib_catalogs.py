@@ -90,7 +90,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                   poly_degree=2, flatfield=None,
                   target_ra=None, target_dec=None,
                   target_match_radius=3.0,
-                  residuals_out=None):
+                  residuals_out=None, faint_err_max=0.5):
 
     table_ref = pd.read_csv(ref_catalog)
 
@@ -442,10 +442,15 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                 (errinst_all < 0.5) & np.isfinite(residual_all)
             )
 
+            # The err cut selects which sources define the per-bin correction.
+            # At the faint end (near MAGLIM) a tight cut keeps only the higher-SNR
+            # sources — a different population from the one the correction is
+            # applied to — which under-corrects those bins. faint_err_max loosens
+            # it so the correction is built from the same population it corrects.
             _bin_med = np.full(len(_FC_CENTERS), np.nan)
             _all_fc_mask = (
                 (maginst_all >= 18.5) & (maginst_all < 22.0) &
-                (errinst_all < 0.5) & np.isfinite(residual_all)
+                (errinst_all < faint_err_max) & np.isfinite(residual_all)
             )
             for _ib, (_lo, _hi) in enumerate(zip(_FC_EDGES[:-1], _FC_EDGES[1:])):
                 _bm = _all_fc_mask & (maginst_all >= _lo) & (maginst_all < _hi)

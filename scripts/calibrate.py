@@ -108,6 +108,7 @@ def step_calibrate(
     target_dec: Optional[float] = None,
     target_match_radius: float = 3.0,
     save_residuals: bool = False,
+    faint_err_max: float = 0.5,
     suffix: str = "",
 ) -> int:
     """
@@ -167,6 +168,7 @@ def step_calibrate(
                 target_ra=target_ra, target_dec=target_dec,
                 target_match_radius=target_match_radius,
                 residuals_out=str(resid_out) if resid_out else None,
+                faint_err_max=faint_err_max,
             )
             tasks.append((ref_csv, ldac, out_cal, "SIM", vet_cat, extra_kw))
 

@@ -281,6 +281,7 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--ff-bins N` | Number of spatial bins per axis for the flatfield grid (default: 16) |
 | `--ff-min-count N` | Minimum detections per flatfield bin to use (default: 5) |
 | `--ff-edge-split N` | Subdivide the outer flatfield bin on each axis into N thinner bins — elongated edge cells (full width along the edge, 1/N deep perpendicular) to resolve the steep vignetting gradient at the field boundary. Default 3; 1 = uniform grid |
+| `--faint-err-max E` | Max magnitude error for sources that define the per-bin faint correction (default 0.5). Near MAGLIM a tight cut keeps only high-SNR sources — a different population from the one the correction is applied to, which under-corrects those bins. Loosen (e.g. 1.0) so the correction is built from the population it corrects |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
 | `--target-match-radius ARCSEC` | Max separation to match the input RA/Dec to a detected source in the calibrated catalog (default: 3.0 arcsec) |
 | `--merge-mag-bin W` | Magnitude-bin width (mag) for the per-magnitude quadrant cross-calibration in the merge step (default: 0.1; a very large value reduces to a single scalar offset) |

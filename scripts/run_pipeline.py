@@ -358,6 +358,11 @@ def main() -> None:
     p.add_argument("--ff-edge-split",        type=int,   default=3,
                    help="Subdivide the outer flatfield bin on each axis into this "
                         "many thinner bins (elongated edge cells; 1 = uniform grid)")
+    p.add_argument("--faint-err-max",        type=float, default=0.5,
+                   help="Max magnitude error for sources defining the faint "
+                        "correction (default 0.5). Loosen (e.g. 1.0) so the "
+                        "correction is built from the same population it corrects, "
+                        "improving faint bins near MAGLIM")
     p.add_argument("--target-match-radius",  type=float, default=3.0, metavar="ARCSEC",
                    help="Max separation (arcsec) to match input position to a detected "
                         "source in the calibrated catalog (default: 3.0)")
@@ -604,7 +609,8 @@ def main() -> None:
                                flatfield=_ff_map.get(key),
                                target_ra=args.ra, target_dec=args.dec,
                                target_match_radius=args.target_match_radius,
-                               save_residuals=True, suffix=suffix)
+                               save_residuals=True, faint_err_max=args.faint_err_max,
+                               suffix=suffix)
 
         if "lightcurves" in steps:
             step_lightcurves(base_dir, quadrants, force=args.force,
