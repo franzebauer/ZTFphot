@@ -29,6 +29,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.patheffects as pe
 from matplotlib.cm import ScalarMappable
 
 logger = logging.getLogger(__name__)
@@ -119,20 +120,34 @@ def _faint_residual_panel(ax, resid_dir) -> None:
         return
 
     m_lo, m_hi = np.percentile(mag, [1, 99.5])
-    sel = (mag >= m_lo) & (mag <= m_hi)
-    ax.hexbin(mag[sel], resid[sel], gridsize=(60, 40), bins="log",
-              cmap="Greys", mincnt=1)
+    ylim = 120.0
+
+    # Per-magnitude-column normalised density: each 0.1-mag column is scaled to its
+    # own peak, so the residual distribution *shape* is visible at every magnitude
+    # (faint bins don't drown the plot in black) and skew shows as an asymmetric
+    # column with its bright core off the median line.
+    xbins = np.arange(np.floor(m_lo * 2) / 2, m_hi + 0.1, 0.1)
+    ybins = np.linspace(-ylim, ylim, 121)
+    H, xe, ye = np.histogram2d(mag, resid, bins=[xbins, ybins])
+    colmax = H.max(axis=1, keepdims=True)
+    Hn = np.divide(H, colmax, out=np.zeros_like(H), where=colmax > 0)
+    ax.imshow(Hn.T, origin="lower", aspect="auto",
+              extent=[xe[0], xe[-1], ye[0], ye[-1]],
+              cmap="magma", vmin=0, vmax=1, interpolation="nearest")
 
     edges = np.arange(np.floor(m_lo), np.ceil(m_hi) + 0.25, 0.25)
     cen, med, mean, mode = _binned_center_curves(mag, resid, edges)
-    ax.plot(cen, med,  "-",  color="C3", lw=2.0, label="median (correction)")
-    ax.plot(cen, mean, "--", color="C0", lw=1.5, label="mean")
-    ax.plot(cen, mode, ":",  color="C2", lw=2.2, label="mode (bulk)")
-    ax.axhline(0, color="k", lw=0.8, ls="--")
+    _stroke = [pe.withStroke(linewidth=2.6, foreground="black")]
+    ax.plot(cen, med,  "-",  color="white",       lw=2.0, label="median (correction)", path_effects=_stroke)
+    ax.plot(cen, mean, "--", color="deepskyblue", lw=1.8, label="mean",                path_effects=_stroke)
+    ax.plot(cen, mode, ":",  color="lime",        lw=2.4, label="mode (bulk)",         path_effects=_stroke)
+    ax.axhline(0, color="white", lw=0.8, ls="--", alpha=0.6)
 
-    ylim = float(np.nanpercentile(np.abs(resid[sel]), 97))
-    ax.set_ylim(-min(max(ylim, 40.0), 300.0), min(max(ylim, 40.0), 300.0))
-    ax.legend(fontsize=8, loc="upper left")
+    ax.set_ylim(-ylim, ylim)
+    ax.set_xlim(xe[0], xe[-1])
+    ax.legend(fontsize=8, loc="upper left", framealpha=0.85)
+    ax.text(0.98, 0.03, "density normalised per magnitude column",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=7, color="0.8")
 
 
 def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
