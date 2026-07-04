@@ -2,13 +2,16 @@
 plot_calibration.py
 -------------------
 Fig 2 — Calibration RMS improvement & corrections (4 panels).
-Left column = calibrators, right column = full sample:
+Left column = calibrators, right column = full sample (correction → corrected,
+top to bottom):
   top-left  — boxplot of calibrator RMS at each pipeline stage (mmag)
   bot-left  — linear ZP correction at mag 17 vs seeing, coloured by MAGLIM
-  top-right — full-sample residual vs calibrated magnitude, with per-bin
-              median / mean / mode overplotted (exposes skew the median
-              faint correction does not remove)
-  bot-right — per-epoch faint correction curve vs source mag, coloured by MAGLIM
+  top-right — per-epoch faint correction curve vs source mag, coloured by MAGLIM
+  bot-right — full-sample residual vs calibrated magnitude after calibration,
+              with per-bin clipped-median (the correction target) / raw median /
+              mean / mode overplotted. The clipped-median line ≈0 shows the
+              correction hit its target; the offset between raw median and mode
+              is the irreducible faint-end skew.
 
 Reads *_cal.fits primary headers from Calibrated/, and (for the top-right panel)
 mag_all + dm_all_post from *_resid.npz in FlatfieldResiduals/.
@@ -63,11 +66,14 @@ def _load_epoch_headers(cal_dir: Path) -> "pd.DataFrame":
 
 
 def _binned_center_curves(mag, resid, edges):
-    """Per magnitude-bin median, mean and (histogram) mode of the residual."""
+    """Per magnitude-bin median, mean, (histogram) mode, and 3σ-MAD-clipped
+    median of the residual. The clipped median is the statistic the faint
+    correction actually subtracts, so it should sit ≈0 after calibration."""
     cen  = 0.5 * (edges[:-1] + edges[1:])
     med  = np.full(len(cen), np.nan)
     mean = np.full(len(cen), np.nan)
     mode = np.full(len(cen), np.nan)
+    cmed = np.full(len(cen), np.nan)
     for i, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
         v = resid[(mag >= lo) & (mag < hi)]
         v = v[np.isfinite(v)]
@@ -75,13 +81,17 @@ def _binned_center_curves(mag, resid, edges):
             continue
         med[i]  = float(np.median(v))
         mean[i] = float(np.mean(v))
+        _mad = float(np.median(np.abs(v - med[i])))
+        vg   = v[np.abs(v - med[i]) < 3.0 * 1.4826 * _mad] if _mad > 0 else v
+        if len(vg) >= 3:
+            cmed[i] = float(np.median(vg))
         c_lo, c_hi = np.percentile(v, [2, 98])
         if c_hi > c_lo:
             h, e = np.histogram(v, bins=41, range=(c_lo, c_hi))
             h = np.convolve(h.astype(float), np.ones(3) / 3, mode="same")
             bc = 0.5 * (e[:-1] + e[1:])
             mode[i] = float(bc[int(np.argmax(h))])
-    return cen, med, mean, mode
+    return cen, med, mean, mode, cmed
 
 
 def _faint_residual_panel(ax, resid_dir) -> None:
@@ -136,11 +146,12 @@ def _faint_residual_panel(ax, resid_dir) -> None:
               cmap="magma", vmin=0, vmax=1, interpolation="nearest")
 
     edges = np.arange(np.floor(m_lo), np.ceil(m_hi) + 0.25, 0.25)
-    cen, med, mean, mode = _binned_center_curves(mag, resid, edges)
+    cen, med, mean, mode, cmed = _binned_center_curves(mag, resid, edges)
     _stroke = [pe.withStroke(linewidth=2.6, foreground="black")]
-    ax.plot(cen, med,  "-",  color="white",       lw=2.0, label="median (correction)", path_effects=_stroke)
-    ax.plot(cen, mean, "--", color="deepskyblue", lw=1.8, label="mean",                path_effects=_stroke)
-    ax.plot(cen, mode, ":",  color="lime",        lw=2.4, label="mode (bulk)",         path_effects=_stroke)
+    ax.plot(cen, cmed, "-",  color="white",       lw=2.4, label="clipped median (correction target)", path_effects=_stroke)
+    ax.plot(cen, med,  "-",  color="0.7",         lw=1.2, label="median (raw)",        path_effects=_stroke)
+    ax.plot(cen, mean, "--", color="deepskyblue", lw=1.6, label="mean",               path_effects=_stroke)
+    ax.plot(cen, mode, ":",  color="lime",        lw=2.2, label="mode (bulk)",        path_effects=_stroke)
     ax.axhline(0, color="white", lw=0.8, ls="--", alpha=0.6)
 
     ax.set_ylim(-ylim, ylim)
@@ -177,8 +188,10 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     ax.set_title("Calibrators: distribution per calibration step")
     ax.set_ylim(bottom=0)
 
-    # ── Panel 2 (top-right): full-sample residual vs magnitude ──
-    _faint_residual_panel(axes[0, 1], resid_dir)
+    # ── Panel 2 (bottom-right): full-sample residual vs magnitude ──
+    # (below the correction it results from, so the right column reads
+    #  correction → corrected top-to-bottom)
+    _faint_residual_panel(axes[1, 1], resid_dir)
 
     # ── Panel 3: ZP correction vs seeing ──
     ax = axes[1, 0]
@@ -214,8 +227,8 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     ax.set_ylabel("Linear ZP correction @ mag 17 (mmag)")
     ax.set_title("ZP correction vs seeing\n(coloured by limiting magnitude)")
 
-    # ── Panel 4: faint correction curves ──
-    ax = axes[1, 1]
+    # ── Panel 4 (top-right): faint correction curves ──
+    ax = axes[0, 1]
     fc_cols = [f"NC_FC_{i:02d}" for i in range(7)]
     fc_mags = [18.75, 19.25, 19.75, 20.25, 20.75, 21.25, 21.75]
     fc_data = df[fc_cols].replace(_SENTINEL, np.nan)
