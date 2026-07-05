@@ -2,16 +2,15 @@
 plot_calibration.py
 -------------------
 Fig 2 — Calibration RMS improvement & corrections (4 panels).
-Left column = calibrators, right column = full sample (correction → corrected,
-top to bottom):
-  top-left  — boxplot of calibrator RMS at each pipeline stage (mmag)
-  bot-left  — linear ZP correction at mag 17 vs seeing, coloured by MAGLIM
-  top-right — per-epoch faint correction curve vs source mag, coloured by MAGLIM
-  bot-right — full-sample residual vs calibrated magnitude after calibration,
-              with per-bin clipped-median (the correction target) / raw median /
-              mean / mode overplotted. The clipped-median line ≈0 shows the
-              correction hit its target; the offset between raw median and mode
-              is the irreducible faint-end skew.
+Top row (summary): calibrator RMS boxplot per stage | linear ZP correction vs
+seeing | per-epoch faint correction curve vs source mag.
+Bottom row (full-sample residual vs calibrated magnitude, per-column-normalised
+density):
+  bot-left  — BEFORE calibration (dm_all_pre, per-epoch bulk offset removed)
+  bot-right — AFTER calibration (dm_all_post) with per-bin clipped/raw median,
+              mean and mode overplotted. A raw median ≈0 with the mode offset at
+              the faint end is the Eddington binning artifact (measured mag on x),
+              not a calibration error.
 
 Reads *_cal.fits primary headers from Calibrated/, and (for the top-right panel)
 mag_all + dm_all_post from *_resid.npz in FlatfieldResiduals/.
@@ -94,14 +93,23 @@ def _binned_center_curves(mag, resid, edges):
     return cen, med, mean, mode, cmed
 
 
-def _faint_residual_panel(ax, resid_dir) -> None:
-    """Full-sample residual (mmag) vs calibrated magnitude, with per-bin
-    median / mean / mode overplotted.  If median≈0 after calibration but the
-    mode is offset at the faint end, the median faint correction is centring a
-    skewed distribution on the wrong point (over/under-correcting the bulk).
-    Reads mag_all + dm_all_post from *_resid.npz."""
-    ax.set_title("Full-sample residual vs reference magnitude\n(after calib; median / mean / mode)")
-    ax.set_xlabel("ZTF reference magnitude (AB)")
+def _faint_residual_panel(ax, resid_dir, which="post", curves=True) -> None:
+    """Full-sample residual (mmag) vs calibrated magnitude, as a per-magnitude-
+    column-normalised density.
+
+    which="post" → after-calibration residual (dm_all_post), with per-bin
+        clipped/raw median, mean and mode overplotted. If the raw median ≈0 but
+        the mode is offset at the faint end, the faint dip is the Eddington
+        binning artifact (measured mag on the x-axis), not a calibration error.
+    which="pre"  → before-calibration residual (dm_all_pre), per-epoch bulk
+        offset (aperture corr + ZP shift) removed so the magnitude structure the
+        calibration then corrects is visible. No summary curves (curves=False)."""
+    is_pre = (which == "pre")
+    key    = "dm_all_pre" if is_pre else "dm_all_post"
+    ax.set_title("Full-sample residual vs magnitude\n"
+                 + ("(before calibration)" if is_pre
+                    else "(after calib; median / mean / mode)"))
+    ax.set_xlabel("Calibrated magnitude (AB)")
     ax.set_ylabel("Residual: measured − ZTF ref (mmag)")
 
     mags, res = [], []
@@ -111,10 +119,18 @@ def _faint_residual_panel(ax, resid_dir) -> None:
                 d = np.load(str(p))
             except Exception:
                 continue
-            if "mag_all" not in d or "dm_all_post" not in d:
+            if "mag_all" not in d or key not in d:
                 continue
-            mags.append(np.asarray(d["mag_all"], float))
-            res.append(np.asarray(d["dm_all_post"], float) * 1000.0)  # mag → mmag
+            m = np.asarray(d["mag_all"], float)
+            r = np.asarray(d[key], float) * 1000.0  # mag → mmag
+            if is_pre:
+                # remove the per-epoch bulk offset (aperture corr + ZP shift), as in
+                # the spatial_rms plot, so the magnitude structure isn't smeared out
+                fin = np.isfinite(r)
+                if fin.any():
+                    r = r - float(np.median(r[fin]))
+            mags.append(m)
+            res.append(r)
     if not mags:
         ax.text(0.5, 0.5, "no mag_all in resid.npz\n(re-run recalibrate)",
                 ha="center", va="center", transform=ax.transAxes, fontsize=9)
@@ -124,18 +140,13 @@ def _faint_residual_panel(ax, resid_dir) -> None:
     resid = np.concatenate(res)
     ok    = np.isfinite(mag) & np.isfinite(resid)
     mag, resid = mag[ok], resid[ok]
-    # Bin by REFERENCE magnitude (q_mag = calibrated − residual), which is nearly
-    # noise-free (deep coadd). Binning by the noisy *measured* magnitude couples the
-    # x-axis to the residual and puts a spurious negative dip at the faint end
-    # (Eddington selection) that no per-epoch correction can remove.
-    mag = mag - resid / 1000.0
     if len(mag) < 100:
         ax.text(0.5, 0.5, "too few sources", ha="center", va="center",
                 transform=ax.transAxes, fontsize=9)
         return
 
     m_lo, m_hi = np.percentile(mag, [1, 99.5])
-    ylim = 120.0
+    ylim = 200.0
 
     # Per-magnitude-column normalised density: each 0.1-mag column is scaled to its
     # own peak, so the residual distribution *shape* is visible at every magnitude
@@ -150,18 +161,19 @@ def _faint_residual_panel(ax, resid_dir) -> None:
               extent=[xe[0], xe[-1], ye[0], ye[-1]],
               cmap="magma", vmin=0, vmax=1, interpolation="nearest")
 
-    edges = np.arange(np.floor(m_lo), np.ceil(m_hi) + 0.25, 0.25)
-    cen, med, mean, mode, cmed = _binned_center_curves(mag, resid, edges)
-    _stroke = [pe.withStroke(linewidth=2.6, foreground="black")]
-    ax.plot(cen, cmed, "-",  color="white",       lw=2.4, label="clipped median", path_effects=_stroke)
-    ax.plot(cen, med,  "-",  color="0.7",         lw=1.2, label="median (raw)",        path_effects=_stroke)
-    ax.plot(cen, mean, "--", color="deepskyblue", lw=1.6, label="mean",               path_effects=_stroke)
-    ax.plot(cen, mode, ":",  color="lime",        lw=2.2, label="mode (bulk)",        path_effects=_stroke)
+    if curves:
+        edges = np.arange(np.floor(m_lo), np.ceil(m_hi) + 0.25, 0.25)
+        cen, med, mean, mode, cmed = _binned_center_curves(mag, resid, edges)
+        _stroke = [pe.withStroke(linewidth=2.6, foreground="black")]
+        ax.plot(cen, cmed, "-",  color="white",       lw=2.4, label="clipped median", path_effects=_stroke)
+        ax.plot(cen, med,  "-",  color="0.7",         lw=1.2, label="median (raw)",  path_effects=_stroke)
+        ax.plot(cen, mean, "--", color="deepskyblue", lw=1.6, label="mean",          path_effects=_stroke)
+        ax.plot(cen, mode, ":",  color="lime",        lw=2.2, label="mode (bulk)",   path_effects=_stroke)
+        ax.legend(fontsize=8, loc="upper left", framealpha=0.85)
     ax.axhline(0, color="white", lw=0.8, ls="--", alpha=0.6)
 
     ax.set_ylim(-ylim, ylim)
     ax.set_xlim(xe[0], xe[-1])
-    ax.legend(fontsize=8, loc="upper left", framealpha=0.85)
     ax.text(0.98, 0.03, "density normalised per magnitude column",
             transform=ax.transAxes, ha="right", va="bottom", fontsize=7, color="0.8")
 
@@ -178,11 +190,18 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
               "After\nfaint corr.", "After\n2D poly", "After\nflatfield"]
     colors = ["#888888", "C0", "C1", "C2", "C3", "C4"]
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
-    fig.suptitle(f"Calibration RMS improvement & corrections — {tag}", fontsize=11)
+    from matplotlib.gridspec import GridSpec
+    fig = plt.figure(figsize=(20, 10))
+    gs  = GridSpec(2, 6, figure=fig, hspace=0.32, wspace=0.6)
+    ax_box  = fig.add_subplot(gs[0, 0:2])   # top-left    (calibrators)
+    ax_zp   = fig.add_subplot(gs[0, 2:4])   # top-middle  (calibrators)
+    ax_corr = fig.add_subplot(gs[0, 4:6])   # top-right   (faint correction)
+    ax_pre  = fig.add_subplot(gs[1, 0:3])   # bottom-left  (before calibration)
+    ax_post = fig.add_subplot(gs[1, 3:6])   # bottom-right (after calibration)
+    fig.suptitle(f"Calibration RMS improvement & corrections — {tag}", fontsize=13)
 
-    # ── Panel 1: boxplot ──
-    ax = axes[0, 0]
+    # ── Top-left: calibrator RMS boxplot ──
+    ax = ax_box
     data_box = [df[s].dropna().values for s in stages]
     bp = ax.boxplot(data_box, patch_artist=True, medianprops=dict(color="black", lw=2))
     for patch, color in zip(bp["boxes"], colors):
@@ -193,13 +212,12 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     ax.set_title("Calibrators: distribution per calibration step")
     ax.set_ylim(bottom=0)
 
-    # ── Panel 2 (bottom-right): full-sample residual vs magnitude ──
-    # (below the correction it results from, so the right column reads
-    #  correction → corrected top-to-bottom)
-    _faint_residual_panel(axes[1, 1], resid_dir)
+    # ── Bottom row: before / after calibration residual density ──
+    _faint_residual_panel(ax_pre,  resid_dir, which="pre",  curves=False)
+    _faint_residual_panel(ax_post, resid_dir, which="post", curves=True)
 
-    # ── Panel 3: ZP correction vs seeing ──
-    ax = axes[1, 0]
+    # ── Top-middle: ZP correction vs seeing ──
+    ax = ax_zp
     cn  = df["CALIB_N"].dropna()
     cm  = df["CALIB_M"].dropna()
     see = df["SEEING"]
@@ -232,8 +250,8 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     ax.set_ylabel("Linear ZP correction @ mag 17 (mmag)")
     ax.set_title("ZP correction vs seeing\n(coloured by limiting magnitude)")
 
-    # ── Panel 4 (top-right): faint correction curves ──
-    ax = axes[0, 1]
+    # ── Top-right: faint correction curves ──
+    ax = ax_corr
     fc_cols = [f"NC_FC_{i:02d}" for i in range(7)]
     fc_mags = [18.75, 19.25, 19.75, 20.25, 20.75, 21.25, 21.75]
     fc_data = df[fc_cols].replace(_SENTINEL, np.nan)
@@ -262,8 +280,7 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     ax.set_ylabel("Faint correction applied (mmag)")
     ax.set_title("Per-epoch faint correction vs magnitude\n(coloured by limiting magnitude)")
 
-    fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=130)
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"  rms → {out_path}")
