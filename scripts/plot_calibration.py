@@ -103,7 +103,9 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True) -> None:
         binning artifact (measured mag on the x-axis), not a calibration error.
     which="pre"  → before-calibration residual (dm_all_pre), per-epoch bulk
         offset (aperture corr + ZP shift) removed so the magnitude structure the
-        calibration then corrects is visible. No summary curves (curves=False)."""
+        calibration then corrects is visible.
+    curves: "all" → clipped/raw median, mean, mode; "median" → running median
+        only (for the before/after comparison); False → density only."""
     is_pre = (which == "pre")
     key    = "dm_all_pre" if is_pre else "dm_all_post"
     ax.set_title("Full-sample residual vs magnitude\n"
@@ -165,10 +167,14 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True) -> None:
         edges = np.arange(np.floor(m_lo), np.ceil(m_hi) + 0.25, 0.25)
         cen, med, mean, mode, cmed = _binned_center_curves(mag, resid, edges)
         _stroke = [pe.withStroke(linewidth=2.6, foreground="black")]
-        ax.plot(cen, cmed, "-",  color="white",       lw=2.4, label="clipped median", path_effects=_stroke)
-        ax.plot(cen, med,  "-",  color="0.7",         lw=1.2, label="median (raw)",  path_effects=_stroke)
-        ax.plot(cen, mean, "--", color="deepskyblue", lw=1.6, label="mean",          path_effects=_stroke)
-        ax.plot(cen, mode, ":",  color="lime",        lw=2.2, label="mode (bulk)",   path_effects=_stroke)
+        if curves == "median":
+            ax.plot(cen, med, "-", color="white", lw=2.2,
+                    label="running median", path_effects=_stroke)
+        else:
+            ax.plot(cen, cmed, "-",  color="white",       lw=2.4, label="clipped median", path_effects=_stroke)
+            ax.plot(cen, med,  "-",  color="0.7",         lw=1.2, label="median (raw)",  path_effects=_stroke)
+            ax.plot(cen, mean, "--", color="deepskyblue", lw=1.6, label="mean",          path_effects=_stroke)
+            ax.plot(cen, mode, ":",  color="lime",        lw=2.2, label="mode (bulk)",   path_effects=_stroke)
         ax.legend(fontsize=8, loc="upper left", framealpha=0.85)
     ax.axhline(0, color="white", lw=0.8, ls="--", alpha=0.6)
 
@@ -213,8 +219,8 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     ax.set_ylim(bottom=0)
 
     # ── Bottom row: before / after calibration residual density ──
-    _faint_residual_panel(ax_pre,  resid_dir, which="pre",  curves=False)
-    _faint_residual_panel(ax_post, resid_dir, which="post", curves=True)
+    _faint_residual_panel(ax_pre,  resid_dir, which="pre",  curves="median")
+    _faint_residual_panel(ax_post, resid_dir, which="post", curves="all")
 
     # ── Top-middle: ZP correction vs seeing ──
     ax = ax_zp
