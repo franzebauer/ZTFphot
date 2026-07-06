@@ -36,7 +36,7 @@ def makeGaussian(size, fwhm = 3, center=None):
     return np.exp(-4*np.log(2) * ((x-x0)**2 + (y-y0)**2) / fwhm**2)
 
 def build_simulated_image(source_img, source_cat, save_name,
-                          target_ra=None, target_dec=None):
+                          target_ra=None, target_dec=None, match_radius=1.0):
 
     difimg = fits.open(source_img)
     catalog = fits.open(source_cat)
@@ -82,7 +82,7 @@ def build_simulated_image(source_img, source_cat, save_name,
 
     if target_ra is not None and target_dec is not None:
         tgt = SkyCoord(ra=target_ra, dec=target_dec, unit='deg')
-        if len(catalog) == 0 or tgt.separation(catalog).min().arcsec >= 1.0:
+        if len(catalog) == 0 or tgt.separation(catalog).min().arcsec >= match_radius:
             x, y = wcs.world_to_pixel(tgt)
             x_, y_ = int(np.floor(x)), int(np.floor(y))
             if 0 <= x_ < ncols and 0 <= y_ < nrows and _valid_frac(y_, x_) > 0.5:

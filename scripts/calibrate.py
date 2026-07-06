@@ -106,7 +106,7 @@ def step_calibrate(
     flatfield: Optional[dict] = None,
     target_ra: Optional[float] = None,
     target_dec: Optional[float] = None,
-    target_match_radius: float = 3.0,
+    target_match_radius: float = 1.0,
     save_residuals: bool = False,
     faint_err_max: float = 0.5,
     suffix: str = "",

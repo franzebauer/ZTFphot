@@ -162,6 +162,7 @@ def merge_band(
     out_dir: Optional[Path] = None,
     lc_suffix: str = "",
     mag_bin: float = MAG_BIN,
+    max_sep_arcsec: float = MAX_SEP_ARCSEC,
 ) -> Optional[Path]:
     """
     Cross-calibrate and merge all quadrant light curves for one band.
@@ -243,7 +244,7 @@ def merge_band(
         try:
             stats_min = _per_source_stats(df)
             centers, deltas, n_used = _compute_mag_correction(
-                stats_dom, stats_min, mag_bin=mag_bin)
+                stats_dom, stats_min, mag_bin=mag_bin, max_sep_arcsec=max_sep_arcsec)
             logger.info(
                 f"merge [{band}]: magnitude correction {qid_str} → dominant  "
                 f"bins={len(centers)}  N_common={n_used}  "
@@ -292,7 +293,7 @@ def merge_band(
         cat_min = _SkyCoord(ra=min_pos['ALPHAWIN_REF'].values * _u.deg,
                             dec=min_pos['DELTAWIN_REF'].values * _u.deg)
         idx_arr, sep, _ = cat_min.match_to_catalog_sky(cat_dom)
-        matched = sep.arcsec < MAX_SEP_ARCSEC
+        matched = sep.arcsec < max_sep_arcsec
 
         remap = {
             int(min_pos['object_index'].iloc[j]): int(dom_pos['object_index'].iloc[idx_arr[j]])

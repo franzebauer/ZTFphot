@@ -89,7 +89,7 @@ def _read_ldac(catalog_path):
 def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_catalog=None,
                   poly_degree=2, flatfield=None,
                   target_ra=None, target_dec=None,
-                  target_match_radius=3.0,
+                  target_match_radius=1.0,
                   residuals_out=None, faint_err_max=0.5):
 
     table_ref = pd.read_csv(ref_catalog)
@@ -429,11 +429,13 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             # Applied LAST, on the residuals that survive all spatial corrections
             # (linear ZP + 2D poly + flatfield), so it removes the magnitude-
             # dependent offset left in faint sources. Bin the all-source residual
-            # in 0.5-mag steps (18.5–22), take the 3σ-clipped median per bin,
-            # interpolate empty bins, Gaussian-smooth (σ_bins=0.4), then interpolate
-            # the curve at each source mag. Forced to 0 below 18.5 mag, so the
-            # calibrators (14–19 mag) are untouched.
-            _FC_EDGES   = np.arange(18.5, 22.1, 0.5)
+            # in 0.25-mag steps (18.5–22) and take the 3σ-clipped median per bin.
+            # The correction curve is: 0 at 18.5 mag, a linear taper from there up
+            # to the empirical profile starting at the 19.0–19.25 bin, the smoothed
+            # bin medians to the last bin, then held flat out to 24 mag. The whole
+            # curve is Gaussian-smoothed at σ=0.2 mag. Sources below 18.5 mag (the
+            # 14–19 mag calibrators) are left untouched.
+            _FC_EDGES   = np.arange(18.5, 22.0001, 0.25)
             _FC_CENTERS = 0.5 * (_FC_EDGES[:-1] + _FC_EDGES[1:])
 
             residual_all = Q_cal[k] - q_mag_all
@@ -466,11 +468,20 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             faint_corr_curve = None
             _valid_fc = np.isfinite(_bin_med)
             if _valid_fc.sum() >= 3:
-                _filled   = np.interp(_FC_CENTERS, _FC_CENTERS[_valid_fc], _bin_med[_valid_fc])
-                _smoothed = gaussian_filter1d(_filled, sigma=0.4, mode='nearest')
-                _interp_mags = np.concatenate([[18.5], _FC_CENTERS])
-                _interp_corr = np.concatenate([[0.0], _smoothed])
-                faint_corr_curve = (_interp_mags, _interp_corr)
+                # fill empty bins by interpolating across the populated ones
+                _filled = np.interp(_FC_CENTERS, _FC_CENTERS[_valid_fc], _bin_med[_valid_fc])
+                # control points: 0 at 18.5 → linear taper to the empirical profile
+                # from the 19.0–19.25 bin onward → flat at the last bin out to 24 mag
+                _emp = _FC_CENTERS >= 19.0
+                _ctrl_mag = np.concatenate([[18.5], _FC_CENTERS[_emp], [24.0]])
+                _ctrl_val = np.concatenate([[0.0],  _filled[_emp],     [_filled[_emp][-1]]])
+                # sample on a fine uniform grid and Gaussian-smooth at σ=0.2 mag.
+                # The grid starts below 18.5 (flat 0 lead-in) so the 0→taper corner
+                # is smoothed rather than left as a step.
+                _grid  = np.arange(17.5, 24.0001, 0.05)
+                _curve = np.interp(_grid, _ctrl_mag, _ctrl_val)   # 0 below 18.5 (interp left)
+                _curve = gaussian_filter1d(_curve, sigma=0.2 / 0.05, mode='nearest')
+                faint_corr_curve = (_grid, _curve)
 
             faint_offset = 0.0
             if faint_corr_curve is not None:
@@ -610,14 +621,16 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         head['TGT_DCPOL']    = _hv(_tgt_dcpoly)
         head['TGT_DCFF']     = _hv(_tgt_dcff)
 
-        # Per-bin faint correction curve (7 bins, mmag; -999 if bin had no data)
+        # Faint correction curve sampled at 7 fixed magnitudes (mmag; -999 if no
+        # curve). The curve is now defined continuously, so each value is just the
+        # (smoothed) curve interpolated at that magnitude.
         if faint_corr_curve is not None:
             _fc_mmag = np.interp(
                 [18.75, 19.25, 19.75, 20.25, 20.75, 21.25, 21.75],
                 faint_corr_curve[0], faint_corr_curve[1],
                 left=0.0, right=faint_corr_curve[1][-1]) * 1000
             for _bi, _bv in enumerate(_fc_mmag):
-                head[f'NC_FC_{_bi:02d}'] = float(_bv) if _valid_fc[_bi] else -999.0
+                head[f'NC_FC_{_bi:02d}'] = float(_bv)
         else:
             for _bi in range(7):
                 head[f'NC_FC_{_bi:02d}'] = -999.0

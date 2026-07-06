@@ -21,7 +21,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _SEX_DIR = Path(__file__).parent / "SExtractor"
-_ASSOC_RADIUS = "1.5"   # arcsec; wider than ref-pos approach (0.5) to allow for epoch-to-epoch position shifts
 
 
 # ── Simulate from per-epoch science sexcat ────────────────────────────────────
@@ -94,7 +93,7 @@ def step_simulate_scipos(
 # ── SExtractor with science positions + reference ASSOC ───────────────────────
 
 def _sex_scipos_one(args: tuple) -> tuple[str, bool, str]:
-    sim_path, diff_path, out_cat, sex_conf, sex_param, sex_nnw, verbose, assoc_path = args
+    sim_path, diff_path, out_cat, sex_conf, sex_param, sex_nnw, verbose, assoc_path, assoc_radius = args
 
     import sys
     _scripts = Path(__file__).parent
@@ -124,7 +123,7 @@ def _sex_scipos_one(args: tuple) -> tuple[str, bool, str]:
         "-ASSOC_DATA",      "1",
         "-ASSOC_PARAMS",    "2,3",
         "-ASSOCCOORD_TYPE", "WORLD",
-        "-ASSOC_RADIUS",    _ASSOC_RADIUS,
+        "-ASSOC_RADIUS",    str(assoc_radius),
         "-ASSOC_TYPE",      "NEAREST",
         "-ASSOCSELEC_TYPE", "MATCHED",
     ]
@@ -148,6 +147,8 @@ def step_sex_scipos(
     filefracdays: set | None = None,
     target_ra: float | None = None,
     target_dec: float | None = None,
+    match_radius: float = 1.0,
+    assoc_radius: float = 1.5,
 ) -> int:
     """Run SExtractor using science-position simulated images + reference ASSOC catalog."""
     import sys
@@ -180,7 +181,8 @@ def step_sex_scipos(
                       / f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(ASSOC).cat")
         if ref_csv.exists():
             _write_assoc_catalog(ref_csv, assoc_path,
-                                 target_ra=target_ra, target_dec=target_dec)
+                                 target_ra=target_ra, target_dec=target_dec,
+                                 match_radius=match_radius)
         else:
             logger.warning(f"Reference catalog missing for {field:06d}_{fc}_c{ccd:02d}_q{qid_} "
                            f"— skipping (run catalog step first)")
@@ -197,7 +199,7 @@ def step_sex_scipos(
             if out_cat.exists() and not force:
                 continue
             tasks.append((sim_path, diff_path, out_cat,
-                          sex_conf, sex_param, sex_nnw, verbose, assoc_path))
+                          sex_conf, sex_param, sex_nnw, verbose, assoc_path, assoc_radius))
 
     if not tasks:
         logger.info("sex_scipos: all catalogs already exist")

@@ -76,14 +76,18 @@ def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False
 
 def _write_assoc_catalog(ref_csv_path: Path, assoc_path: Path,
                          target_ra: float | None = None,
-                         target_dec: float | None = None) -> None:
+                         target_dec: float | None = None,
+                         match_radius: float = 1.0) -> None:
     """Write a SExtractor ASSOC catalog (world coords, 1-based object_index).
 
     Format per line: ``object_index RA Dec``
     Index is 1-based so that SExtractor's unmatched default of 0 is
     distinguishable from a real source.  If target_ra/target_dec is given and
-    lies ≥3″ from every reference source, the target is appended as the last
-    entry (index = N+1).
+    lies more than match_radius arcsec from every reference source, the target
+    is appended as the last entry (index = N+1). This is the same radius used
+    later to match the target in the calibrated catalog, so a target with no
+    reference source within match_radius is injected here and then recovered
+    there.
     """
     import numpy as np
     import pandas as pd
@@ -102,7 +106,7 @@ def _write_assoc_catalog(ref_csv_path: Path, assoc_path: Path,
             valid = np.isfinite(ra) & np.isfinite(dec)
             if valid.sum() == 0 or tgt.separation(
                     SkyCoord(ra=ra[valid], dec=dec[valid], unit='deg')
-            ).min().arcsec >= 1.0:
+            ).min().arcsec >= match_radius:
                 f.write(f"{len(ref) + 1} {target_ra:.8f} {target_dec:.8f}\n")
                 # SExtractor silently drops the last ASSOC entry; this sentinel
                 # entry (at the unreachable north pole) keeps the target entry loaded.
@@ -111,7 +115,7 @@ def _write_assoc_catalog(ref_csv_path: Path, assoc_path: Path,
 
 def _simulate_one(args: tuple) -> tuple[str, bool, str]:
     """Worker function for parallel simulate step."""
-    diff_path, refcat_path, sim_path, target_ra, target_dec = args
+    diff_path, refcat_path, sim_path, target_ra, target_dec, match_radius = args
     import sys
     _scripts = Path(__file__).parent
     if str(_scripts) not in sys.path:
@@ -124,6 +128,7 @@ def _simulate_one(args: tuple) -> tuple[str, bool, str]:
             save_name=str(sim_path),
             target_ra=target_ra,
             target_dec=target_dec,
+            match_radius=match_radius,
         )
         return (str(sim_path), True, "ok")
     except Exception as exc:
@@ -136,6 +141,7 @@ def step_simulate(
     filefracdays: set | None = None,
     target_ra: float | None = None,
     target_dec: float | None = None,
+    match_radius: float = 1.0,
 ) -> int:
     """Build a simulated detection image for each science epoch.
     filefracdays: if given, only process files matching those epoch IDs."""
@@ -156,7 +162,7 @@ def step_simulate(
             sim_path = diff_path.with_name(diff_path.stem + "_simulated.fits")
             if sim_path.exists() and not force:
                 continue
-            tasks.append((diff_path, refcat_path, sim_path, target_ra, target_dec))
+            tasks.append((diff_path, refcat_path, sim_path, target_ra, target_dec, match_radius))
 
     if not tasks:
         logger.info("simulate: all simulated images already exist")
@@ -203,7 +209,7 @@ def _sex_header_params(diff_path: Path) -> dict:
 
 def _sex_one(args: tuple) -> tuple[str, bool, str]:
     """Worker function for parallel SExtractor step."""
-    sim_path, diff_path, out_cat, sex_conf, sex_param, sex_nnw, verbose, assoc_path = args
+    sim_path, diff_path, out_cat, sex_conf, sex_param, sex_nnw, verbose, assoc_path, assoc_radius = args
 
     hdr = _sex_header_params(diff_path)
     cmd = [
@@ -230,7 +236,7 @@ def _sex_one(args: tuple) -> tuple[str, bool, str]:
             "-ASSOC_DATA",       "1",
             "-ASSOC_PARAMS",     "2,3",
             "-ASSOCCOORD_TYPE",  "WORLD",
-            "-ASSOC_RADIUS",     "0.5",
+            "-ASSOC_RADIUS",     str(assoc_radius),
             "-ASSOC_TYPE",       "NEAREST",
             "-ASSOCSELEC_TYPE",  "MATCHED",
         ]
@@ -254,6 +260,8 @@ def step_sextractor(
     filefracdays: set | None = None,
     target_ra: float | None = None,
     target_dec: float | None = None,
+    match_radius: float = 1.0,
+    assoc_radius: float = 0.5,
 ) -> int:
     """Run SExtractor dual-image mode for every epoch.
     filefracdays: if given, only process files matching those epoch IDs."""
@@ -283,7 +291,8 @@ def step_sextractor(
                       / f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(ASSOC).cat")
         if ref_csv.exists():
             _write_assoc_catalog(ref_csv, assoc_path,
-                                 target_ra=target_ra, target_dec=target_dec)
+                                 target_ra=target_ra, target_dec=target_dec,
+                                 match_radius=match_radius)
         else:
             logger.warning(f"Reference catalog missing for {field:06d}_{fc}_c{ccd:02d}_q{qid_} "
                            f"— skipping SExtractor (run catalog step first)")
@@ -300,7 +309,7 @@ def step_sextractor(
             if out_cat.exists() and not force:
                 continue
             tasks.append((sim_path, diff_path, out_cat,
-                          sex_conf, sex_param, sex_nnw, verbose, assoc_path))
+                          sex_conf, sex_param, sex_nnw, verbose, assoc_path, assoc_radius))
 
     if not tasks:
         logger.info("SExtractor: all catalogs already exist")

@@ -218,17 +218,22 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 step_make_catalog(base_dir, [q], force=args.force)
             if "simulate" in steps:
                 step_simulate(base_dir, [q], workers=args.workers, force=args.force,
-                              target_ra=args.ra, target_dec=args.dec)
+                              target_ra=args.ra, target_dec=args.dec,
+                              match_radius=args.target_match_radius)
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose,
-                                target_ra=args.ra, target_dec=args.dec)
+                                target_ra=args.ra, target_dec=args.dec,
+                                match_radius=args.target_match_radius,
+                                assoc_radius=args.assoc_radius)
             if "simulate_sci" in steps:
                 step_simulate_scipos(base_dir, [q], workers=args.workers, force=args.force)
             if "sex_sci" in steps:
                 step_sex_scipos(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose,
-                                target_ra=args.ra, target_dec=args.dec)
+                                target_ra=args.ra, target_dec=args.dec,
+                                match_radius=args.target_match_radius,
+                                assoc_radius=args.assoc_radius_sci)
             continue
 
         n_batches = math.ceil(len(q_epochs) / N)
@@ -300,13 +305,16 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             if "simulate" in steps:
                 step_simulate(base_dir, [q], workers=args.workers,
                               force=args.force, filefracdays=ffds_set,
-                              target_ra=args.ra, target_dec=args.dec)
+                              target_ra=args.ra, target_dec=args.dec,
+                              match_radius=args.target_match_radius)
 
             if "sex" in steps:
                 step_sextractor(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose,
                                 filefracdays=ffds_set,
-                                target_ra=args.ra, target_dec=args.dec)
+                                target_ra=args.ra, target_dec=args.dec,
+                                match_radius=args.target_match_radius,
+                                assoc_radius=args.assoc_radius)
 
             if "simulate_sci" in steps:
                 step_simulate_scipos(base_dir, [q], workers=args.workers,
@@ -315,7 +323,9 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 step_sex_scipos(base_dir, [q], workers=args.workers,
                                 force=args.force, verbose=args.verbose,
                                 filefracdays=ffds_set,
-                                target_ra=args.ra, target_dec=args.dec)
+                                target_ra=args.ra, target_dec=args.dec,
+                                match_radius=args.target_match_radius,
+                                assoc_radius=args.assoc_radius_sci)
 
             # Purge: always remove sci products; ref only after first batch
             purge_images(base_dir, [q],
@@ -363,9 +373,22 @@ def main() -> None:
                         "correction (default 0.5). Loosen (e.g. 1.0) so the "
                         "correction is built from the same population it corrects, "
                         "improving faint bins near MAGLIM")
-    p.add_argument("--target-match-radius",  type=float, default=3.0, metavar="ARCSEC",
-                   help="Max separation (arcsec) to match input position to a detected "
-                        "source in the calibrated catalog (default: 3.0)")
+    p.add_argument("--target-match-radius",  type=float, default=1.0, metavar="ARCSEC",
+                   help="Target association radius (arcsec, default 1.0): the target is "
+                        "injected as a new source if no catalog source lies within this "
+                        "radius, and the same radius is used to match the input position "
+                        "to a source in the calibrated catalog. One radius for both, so "
+                        "a target with no nearby reference source is injected and then "
+                        "recovered.")
+    p.add_argument("--assoc-radius",         type=float, default=0.5, metavar="ARCSEC",
+                   help="SExtractor ASSOC radius for ref-pos photometry (default 0.5; "
+                        "tight because PSFs sit at exact reference positions)")
+    p.add_argument("--assoc-radius-sci",     type=float, default=1.5, metavar="ARCSEC",
+                   help="SExtractor ASSOC radius for sci-pos photometry (default 1.5; "
+                        "wider to allow epoch-to-epoch science-centroid shifts)")
+    p.add_argument("--merge-match-radius",   type=float, default=1.5, metavar="ARCSEC",
+                   help="Cross-match radius (arcsec) for common sources between "
+                        "overlapping quadrants in the merge step (default 1.5)")
     # Download filters (used when "download" is in steps)
     p.add_argument("--max-seeing",          type=float, default=None, metavar="ARCSEC")
     p.add_argument("--min-maglim",          type=float, default=None, metavar="MAG")
@@ -563,15 +586,20 @@ def main() -> None:
             if args.ra is not None and args.dec is not None:
                 _warn_target_coverage(base_dir, quadrants, args.ra, args.dec)
         if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,
-                                                  target_ra=args.ra, target_dec=args.dec)
+                                                  target_ra=args.ra, target_dec=args.dec,
+                                                  match_radius=args.target_match_radius)
         if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
                                                   force=args.force, verbose=args.verbose,
-                                                  target_ra=args.ra, target_dec=args.dec)
+                                                  target_ra=args.ra, target_dec=args.dec,
+                                                  match_radius=args.target_match_radius,
+                                                  assoc_radius=args.assoc_radius)
         if "simulate_sci" in steps: step_simulate_scipos(base_dir, quadrants, workers=args.workers,
                                                          force=args.force)
         if "sex_sci"    in steps: step_sex_scipos(base_dir, quadrants, workers=args.workers,
                                                   force=args.force, verbose=args.verbose,
-                                                  target_ra=args.ra, target_dec=args.dec)
+                                                  target_ra=args.ra, target_dec=args.dec,
+                                                  match_radius=args.target_match_radius,
+                                                  assoc_radius=args.assoc_radius_sci)
     if "vet"        in steps: step_vet(base_dir, quadrants)
 
     for suffix in suffixes:
@@ -620,7 +648,8 @@ def main() -> None:
         if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
                                               target_ra=args.ra, target_dec=args.dec,
                                               suffix=suffix,
-                                              mag_bin=args.merge_mag_bin)
+                                              mag_bin=args.merge_mag_bin,
+                                              max_sep_arcsec=args.merge_match_radius)
 
         if "plots"      in steps:
             logger.info("─── plots ───")

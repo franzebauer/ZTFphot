@@ -283,7 +283,10 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--ff-edge-split N` | Subdivide the outer flatfield bin on each axis into N thinner bins — elongated edge cells (full width along the edge, 1/N deep perpendicular) to resolve the steep vignetting gradient at the field boundary. Default 3; 1 = uniform grid |
 | `--faint-err-max E` | Max magnitude error for sources that define the per-bin faint correction (default 0.5). Near MAGLIM a tight cut keeps only high-SNR sources — a different population from the one the correction is applied to, which under-corrects those bins. Loosen (e.g. 1.0) so the correction is built from the population it corrects |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
-| `--target-match-radius ARCSEC` | Max separation to match the input RA/Dec to a detected source in the calibrated catalog (default: 3.0 arcsec) |
+| `--target-match-radius ARCSEC` | Target association radius (default: 1.0 arcsec). One radius for two coupled operations: the target is **injected** as a new source if no catalog source lies within it, and the input RA/Dec is **matched** to a source in the calibrated catalog within it. Because a target with no nearby reference source is injected (at the input position) and then recovered by the match, this radius never causes a spurious "target not found". |
+| `--assoc-radius ARCSEC` | SExtractor ASSOC radius for **ref-pos** photometry (default: 0.5; tight because PSFs are painted at exact reference positions) |
+| `--assoc-radius-sci ARCSEC` | SExtractor ASSOC radius for **sci-pos** photometry (default: 1.5; wider to allow epoch-to-epoch science-centroid shifts) |
+| `--merge-match-radius ARCSEC` | Cross-match radius for common sources between overlapping quadrants in the merge step (default: 1.5) |
 | `--merge-mag-bin W` | Magnitude-bin width (mag) for the per-magnitude quadrant cross-calibration in the merge step (default: 0.1; a very large value reduces to a single scalar offset) |
 
 ### Photometry variant
@@ -315,7 +318,7 @@ Within `calibrate`, each epoch is corrected in five stages:
 2. **3σ iterative clip** — outlier calibrators removed, fit repeated
 3. **2D polynomial** — low-order spatial polynomial fitted to calibrator residuals and applied to all sources
 4. **Spatial flatfield** — stacked median residual map applied if a saved flatfield exists on disk. The grid spans the full source range (ref-pos positions are exact, so no percentile clipping) with **elongated edge cells** (`--ff-edge-split`, outer bins subdivided perpendicular to the edge) to resolve the steep vignetting gradient at the boundary. Query positions are clamped to the grid-centre range, so the outer half-cell receives the nearest cell's correction instead of zero.
-5. **Faint correction** — smoothed empirical offset for faint sources, applied **last** (on the residuals surviving all spatial corrections). Residuals binned in 0.5 mag steps, 3σ-clipped median per bin, Gaussian-smoothed, tapering to zero at mag < 18.5, so calibrators (14–19 mag) — and hence the poly/flatfield fits built from them — are untouched.
+5. **Faint correction** — smoothed empirical offset for faint sources, applied **last** (on the residuals surviving all spatial corrections). The all-source residual is binned in 0.25 mag steps over 18.5–22 with a 3σ-clipped median per bin. The correction curve is 0 at 18.5 mag, rises linearly (taper) to the empirical profile starting at the 19.0–19.25 bin, follows the bin medians to the last bin, and is held flat out to 24 mag; the whole curve is then Gaussian-smoothed at σ = 0.2 mag. Sources below 18.5 mag (the 14–19 mag calibrators, and hence the poly/flatfield fits built from them) are left untouched.
 
 > The faint correction moved from stage 3 to stage 5 (after the flatfield) so it removes the magnitude-dependent offset that remains in faint sources *after* the spatial corrections, rather than feeding it into the poly/flatfield fits. The spatial fits are built from bright calibrators the faint ramp barely touches, so the reordering leaves them unchanged.
 

@@ -267,7 +267,8 @@ def step_lightcurves(
 
 def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
                target_ra: float | None = None, target_dec: float | None = None,
-               suffix: str = "", mag_bin: float = 0.1) -> None:
+               suffix: str = "", mag_bin: float = 0.1,
+               max_sep_arcsec: float = 1.5) -> None:
     """
     Cross-calibrate and merge per-quadrant light curves for each band.
 
@@ -295,4 +296,5 @@ def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
             continue
         out_dir = lc_root / "merged" / f"{target_ra:.5f}_{target_dec:+.5f}" / f"{band}{suffix}"
         merge_band(lc_root=lc_root, band=band, quadrants=band_qs, force=force,
-                   out_dir=out_dir, lc_suffix=suffix, mag_bin=mag_bin)
+                   out_dir=out_dir, lc_suffix=suffix, mag_bin=mag_bin,
+                   max_sep_arcsec=max_sep_arcsec)
