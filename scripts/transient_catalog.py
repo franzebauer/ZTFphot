@@ -24,12 +24,11 @@ This module solves the problem by:
      alongside (or instead of) the original refsexcat.fits.
 
 Injected sources are marked with:
-  - INJECTED = True  (new boolean column added to the table)
+  - MAG_AUTO / MAG_APER = 99  (physically impossible sentinel; they have no real
+    reference-image flux). This surfaces as MAG_4_REF > 90 in the light curves,
+    so injected sources are distinguishable in the output with no extra column.
   - FLAGS    = 0     (so they pass the FLAGS==0 filter in simulate_science.py)
   - FLUX_BEST set to a configurable detection flux (default: 5× image sky noise)
-
-The INJECTED column is preserved through the pipeline so that injected sources
-can be distinguished in the final light curve output.
 
 Modes
 -----
@@ -80,8 +79,7 @@ Notes
 -----
 - The augmented catalog is a drop-in replacement for the original refsexcat.fits:
   all existing rows are preserved unchanged; injected rows are appended.
-- The INJECTED column is added to *all* rows (False for originals, True for
-  injected) so that downstream code can always rely on its presence.
+- Injected rows carry MAG_APER = 99 as their only marker (no extra column).
 - Injection flux is derived from the sky noise of the *difference* image, not
   the reference image, because that is what the photometry measures.
 - If a user CSV row already matches a reference catalog source within 1 arcsec,
@@ -572,8 +570,8 @@ def augment_sexcat(
 
     The output is a FITS binary table that is a drop-in replacement for the
     original refsexcat.fits.  It contains:
-      - All original rows with INJECTED = False
-      - One new row per injected transient with INJECTED = True
+      - All original rows, unchanged
+      - One new row per injected transient (marked only by MAG_APER = 99)
 
     Parameters
     ----------
@@ -616,11 +614,9 @@ def augment_sexcat(
 
     logger.info(f"Original catalog: {len(orig_table)} sources from {refsexcat_path.name}")
 
-    # ---- Add INJECTED column to original rows (False) ----
-    if "INJECTED" not in orig_table.colnames:
-        orig_table["INJECTED"] = False
-    if "INJECTED_NAME" not in orig_table.colnames:
-        orig_table["INJECTED_NAME"] = ""
+    # Injected sources are marked solely by their reference-magnitude sentinel
+    # (MAG_APER = 99, surfaced as MAG_4_REF > 90 in the light curves); no separate
+    # INJECTED flag column is added.
 
     # ---- Keep only those inside this quadrant's footprint (fast; do this first so
     #      the per-source catalog cross-match below only sees the few survivors) ----
@@ -636,10 +632,9 @@ def augment_sexcat(
     to_inject = _filter_already_in_catalog(to_inject, orig_table, match_radius_arcsec)
 
     if not to_inject:
-        logger.info("No sources to inject after cross-matching — "
-                    "writing catalog unchanged (with INJECTED column added).")
-        orig_table.write(str(output_path), format="fits", overwrite=True)
-        return output_path
+        logger.info("No sources to inject after footprint + cross-match — "
+                    "no augmented catalog written for this quadrant.")
+        return refsexcat_path
 
     # ---- Estimate injection flux ----
     if injection_flux_override is not None:
@@ -705,10 +700,6 @@ def augment_sexcat(
 
         # SExtractor quality flags — 0 means "clean detection"
         row["FLAGS"] = 0
-
-        # Injection bookkeeping
-        row["INJECTED"]      = True
-        row["INJECTED_NAME"] = src.name[:64]  # truncate to avoid FITS string issues
 
         injected_rows.append(row)
 
