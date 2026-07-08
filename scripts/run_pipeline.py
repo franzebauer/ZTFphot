@@ -112,6 +112,40 @@ def _filter_quadrants_by_wcs(
     return kept
 
 
+def _inject_targets_into_quadrants(base_dir: Path, quadrants: list[dict],
+                                   targets_csv: Path, match_radius: float) -> None:
+    """Augment each quadrant's reference catalog with the targets from targets_csv
+    that (a) lie inside the quadrant footprint and (b) are not already within
+    match_radius of a reference source. Writes non-destructive *_refsexcat_augmented.fits;
+    make_catalog and simulate prefer it automatically. Injected sources carry the
+    reference-mag sentinel (MAG_APER=99 → MAG_4_REF > 90 in the light curves)."""
+    import sys as _sys
+    _scripts = Path(__file__).parent
+    if str(_scripts) not in _sys.path:
+        _sys.path.insert(0, str(_scripts))
+    from transient_catalog import load_user_catalog, augment_sexcat
+
+    transients = load_user_catalog(targets_csv)
+    logger.info(f"inject-targets: {len(transients)} candidate source(s) from {targets_csv}")
+    n_quad = 0
+    for q in quadrants:
+        f, fc, ccd, qid_ = q["field"], q["filtercode"], q["ccdid"], q["qid"]
+        refcat = q["ref_dir"] / f"ztf_{f:06d}_{fc}_c{ccd:02d}_q{qid_}_refsexcat.fits"
+        if not refcat.exists():
+            continue
+        diffs = sorted(q["sci_dir"].glob("*_scimrefdiffimg.fits"))
+        augment_sexcat(
+            refsexcat_path=refcat,
+            transients=transients,
+            diff_img_path=(diffs[0] if diffs else None),
+            output_path=refcat.with_name(refcat.stem + "_augmented.fits"),
+            match_radius_arcsec=match_radius,
+            footprint_filter=True,
+        )
+        n_quad += 1
+    logger.info(f"inject-targets: augmented {n_quad} quadrant catalog(s)")
+
+
 def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
                           target_ra: float, target_dec: float,
                           threshold: float = 30.0) -> None:
@@ -389,6 +423,13 @@ def main() -> None:
     p.add_argument("--merge-match-radius",   type=float, default=1.5, metavar="ARCSEC",
                    help="Cross-match radius (arcsec) for common sources between "
                         "overlapping quadrants in the merge step (default 1.5)")
+    p.add_argument("--inject-targets",       type=Path, default=None, metavar="CSV",
+                   help="CSV of targets (ra,dec[,name]) to inject as sources absent "
+                        "from the reference catalog. During the catalog step, targets "
+                        "inside each quadrant footprint and farther than "
+                        "--target-match-radius from any reference source are added to a "
+                        "non-destructive augmented catalog that simulate/sex then use. "
+                        "Injected sources carry MAG_4_REF > 90 in the light curves.")
     # Download filters (used when "download" is in steps)
     p.add_argument("--max-seeing",          type=float, default=None, metavar="ARCSEC")
     p.add_argument("--min-maglim",          type=float, default=None, metavar="MAG")
@@ -582,7 +623,12 @@ def main() -> None:
         _run_purge_batch(base_dir, epochs, quadrants, args)
     else:
         if "catalog"    in steps:
-            step_make_catalog(base_dir, quadrants, force=args.force)
+            if args.inject_targets:
+                _inject_targets_into_quadrants(base_dir, quadrants, args.inject_targets,
+                                               args.target_match_radius)
+            # injecting changes the source list, so the reference CSV must be rebuilt
+            step_make_catalog(base_dir, quadrants,
+                              force=args.force or bool(args.inject_targets))
             if args.ra is not None and args.dec is not None:
                 _warn_target_coverage(base_dir, quadrants, args.ra, args.dec)
         if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,

@@ -32,10 +32,21 @@ def list_folders(dir):
 # In []
 
 def make_catalog(save_path, refcats):
-    catalogs = [file for file in list_files(refcats) if "refsexcat.fits" in file]
+    # Per quadrant, prefer the injection-augmented catalog when present so injected
+    # targets flow into the reference CSV; fall back to the original refsexcat.
+    ref_files = [f for f in list_files(refcats)
+                 if f.endswith("_refsexcat.fits") or f.endswith("_refsexcat_augmented.fits")]
+    chosen = {}
+    for f in ref_files:
+        stem = f.replace("_refsexcat_augmented.fits", "").replace("_refsexcat.fits", "")
+        if stem not in chosen or f.endswith("_refsexcat_augmented.fits"):
+            chosen[stem] = f
+    catalogs = list(chosen.values())
 
     for catalog in catalogs:
-        tmp = catalog.replace("refsexcat.fits", "refimg.fits")
+        tmp = (catalog.replace("_refsexcat_augmented.fits", "_refimg.fits")
+               if catalog.endswith("_refsexcat_augmented.fits")
+               else catalog.replace("_refsexcat.fits", "_refimg.fits"))
         if os.path.exists(tmp):
             hdul = fits.open(tmp)
             for i, line in enumerate(hdul[0].header):

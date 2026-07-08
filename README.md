@@ -287,6 +287,7 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--assoc-radius ARCSEC` | SExtractor ASSOC radius for **ref-pos** photometry (default: 0.5; tight because PSFs are painted at exact reference positions) |
 | `--assoc-radius-sci ARCSEC` | SExtractor ASSOC radius for **sci-pos** photometry (default: 1.5; wider to allow epoch-to-epoch science-centroid shifts) |
 | `--merge-match-radius ARCSEC` | Cross-match radius for common sources between overlapping quadrants in the merge step (default: 1.5) |
+| `--inject-targets CSV` | CSV of targets (`ra,dec[,name]`) to inject as sources absent from the reference catalog. In the `catalog` step, targets inside each quadrant footprint and farther than `--target-match-radius` from any reference source are added to a non-destructive `*_refsexcat_augmented.fits` that `make_catalog`/`simulate` then prefer automatically. Injected sources appear in the light curves with `MAG_4_REF > 90`. Forces the `catalog` step; use `--force` so `simulate`/`sex`/`calibrate`/`lightcurves` also rebuild if outputs already exist. |
 | `--merge-mag-bin W` | Magnitude-bin width (mag) for the per-magnitude quadrant cross-calibration in the merge step (default: 0.1; a very large value reduces to a single scalar offset) |
 
 ### Photometry variant
@@ -359,6 +360,7 @@ Both files share the same `object_index` and can be joined on `(object_index, OB
 | `ALPHAWIN_REF` | float64 | Reference catalog RA (deg) |
 | `DELTAWIN_REF` | float64 | Reference catalog Dec (deg) |
 | `object_index` | int32 | 0-based index into the reference catalog |
+| `MAG_4_REF` | float32 | 4 px reference AB magnitude of the source (`MAG_APER_4px + MAGZP_REF`). Enables a per-source measured-vs-reference calibration check from the parquet alone. Injected/target sources have no reference: injected list targets carry `> 90` (sentinel `MAG_APER = 99`); the `--ra/--dec` target carries `NaN`. |
 
 #### Per-detection measurement
 | Column | Type | Description |

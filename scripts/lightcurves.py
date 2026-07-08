@@ -41,6 +41,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         'MAG_6_TOT_AB', 'MERR_6_TOT_AB',
         'MAG_10_TOT_AB', 'MERR_10_TOT_AB',
         'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org',
+        'MAG_4_REF',
         'APCORR46',
     ]
     int32_cols = [
@@ -153,6 +154,14 @@ def step_lightcurves(
                          ('INFOBITS', 'INFOBITS_REF')]:
             if src in ref.columns:
                 ref_cols[dst] = pd.to_numeric(ref[src], errors='coerce').values
+        # 4px reference AB magnitude per source (aperture mag + reference ZP). Enables
+        # a per-source measured-vs-reference calibration check from the parquet alone,
+        # and marks injected sources, which carry MAG_APER_4px = 99 (so MAG_4_REF > 90).
+        if 'MAG_APER_4px' in ref.columns and 'MAGZP_REF' in ref.columns:
+            ref_cols['MAG_4_REF'] = (
+                pd.to_numeric(ref['MAG_APER_4px'], errors='coerce').values
+                + pd.to_numeric(ref['MAGZP_REF'], errors='coerce').values
+            )
 
         # Append one sentinel row for the target ASSOC entry (index = len(ref), 0-based).
         # Needed when the target is appended to the ASSOC catalog beyond the ref catalog.
@@ -162,6 +171,7 @@ def step_lightcurves(
                 'DELTAWIN_REF': np.float64(target_dec),
                 'FLAG_SE_REF':  np.int32(0),
                 'INFOBITS_REF': np.int32(0),
+                'MAG_4_REF':    np.float64('nan'),   # target has no reference magnitude
             }
             for dst in list(ref_cols):
                 ref_cols[dst] = np.append(ref_cols[dst], _tgt_extra.get(dst, 0))

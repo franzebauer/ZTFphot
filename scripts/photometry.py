@@ -151,7 +151,11 @@ def step_simulate(
         field = q["field"]; fc = q["filtercode"]
         ccd = q["ccdid"]; qid_ = q["qid"]
 
-        refcat_path = ref_dir / f"ztf_{field:06d}_{fc}_c{ccd:02d}_q{qid_}_refsexcat.fits"
+        # Prefer the injection-augmented catalog when present so injected targets
+        # are painted into the simulated detection image.
+        _aug_refcat = ref_dir / f"ztf_{field:06d}_{fc}_c{ccd:02d}_q{qid_}_refsexcat_augmented.fits"
+        refcat_path = _aug_refcat if _aug_refcat.exists() else \
+            ref_dir / f"ztf_{field:06d}_{fc}_c{ccd:02d}_q{qid_}_refsexcat.fits"
         if not refcat_path.exists():
             logger.warning(f"refsexcat not found: {refcat_path} — skipping quadrant")
             continue

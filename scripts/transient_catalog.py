@@ -441,6 +441,26 @@ def _filter_already_in_catalog(
     return to_inject
 
 
+def _filter_in_footprint(sources, image_path):
+    """Keep only sources whose sky position falls inside the image frame.
+    Avoids injecting a target into a quadrant whose footprint does not contain it
+    (which would otherwise bloat every quadrant's catalog with sources that are
+    never painted)."""
+    from astropy.wcs import WCS
+    with fits.open(image_path) as h:
+        wcs = WCS(h[0].header)
+        ny, nx = h[0].data.shape
+    kept = []
+    for s in sources:
+        try:
+            x, y = wcs.world_to_pixel_values(s.ra, s.dec)
+        except Exception:
+            continue
+        if 0 <= x < nx and 0 <= y < ny:
+            kept.append(s)
+    return kept
+
+
 def augment_sexcat(
     refsexcat_path: str | Path,
     transients: list[TransientSource],
@@ -449,6 +469,7 @@ def augment_sexcat(
     injection_sigma: float = 5.0,
     injection_flux_override: Optional[float] = None,
     match_radius_arcsec: float = 1.0,
+    footprint_filter: bool = True,
 ) -> Path:
     """
     Append injected transient sources to a ZTF reference SExtractor catalog.
@@ -507,6 +528,14 @@ def augment_sexcat(
 
     # ---- Filter transients already in the catalog ----
     to_inject = _filter_already_in_catalog(transients, orig_table, match_radius_arcsec)
+
+    # ---- Keep only those inside this quadrant's footprint ----
+    if footprint_filter and diff_img_path is not None and to_inject:
+        n_before = len(to_inject)
+        to_inject = _filter_in_footprint(to_inject, diff_img_path)
+        if len(to_inject) != n_before:
+            logger.info(f"footprint: {len(to_inject)}/{n_before} transients fall in "
+                        f"{Path(refsexcat_path).name}")
 
     if not to_inject:
         logger.info("No sources to inject after cross-matching — "
@@ -614,6 +643,8 @@ def augment_all_refsexcats(
     bands: list[str] = None,
     injection_sigma: float = 5.0,
     injection_flux_override: Optional[float] = None,
+    match_radius_arcsec: float = 1.0,
+    footprint_filter: bool = True,
 ) -> dict[str, Path]:
     """
     Find all refsexcat.fits files under base_dir/Reference and augment each one.
@@ -680,6 +711,8 @@ def augment_all_refsexcats(
                 output_path=out_path,
                 injection_sigma=injection_sigma,
                 injection_flux_override=injection_flux_override,
+                match_radius_arcsec=match_radius_arcsec,
+                footprint_filter=footprint_filter,
             )
             results[str(refcat)] = augmented
         except Exception as exc:
