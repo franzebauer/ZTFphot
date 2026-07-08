@@ -183,7 +183,78 @@ def load_user_catalog(csv_path: str | Path) -> list[TransientSource]:
 
 
 # ---------------------------------------------------------------------------
-# Mode B — TNS query
+# Mode C — TNS public bulk catalog (whole-sky daily dump; filtered per quadrant)
+# ---------------------------------------------------------------------------
+
+TNS_PUBLIC_URL = ("https://www.wis-tns.org/system/files/tns_public_objects/"
+                  "tns_public_objects.csv.zip")
+
+
+def download_tns_public_catalog(cred_file: str | Path, key_file: str | Path,
+                                cache_dir: str | Path, force: bool = False):
+    """Download and extract the TNS public objects bulk catalog, returning a
+    cleaned DataFrame with ra_deg / dec_deg columns. A cached copy in cache_dir is
+    reused unless force=True.
+
+    cred_file : JSON with keys 'tns_id', 'type', 'name' (the TNS marker identity)
+    key_file  : text file containing the TNS API key
+    """
+    import json
+    import zipfile
+    import pandas as pd
+    import requests
+
+    cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = cache_dir / "tns_public_objects.csv"
+
+    if force or not csv_path.exists():
+        cred = json.loads(Path(cred_file).read_text())
+        api_key = Path(key_file).read_text().strip()
+        marker = ('tns_marker{"tns_id": "%s", "type": "%s", "name": "%s"}'
+                  % (cred["tns_id"], cred["type"], cred["name"]))
+        logger.info("Downloading TNS public objects bulk catalog ...")
+        resp = requests.post(TNS_PUBLIC_URL, headers={"User-Agent": marker},
+                             data={"api_key": api_key})
+        resp.raise_for_status()
+        zip_path = cache_dir / "tns_public_objects.csv.zip"
+        zip_path.write_bytes(resp.content)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(cache_dir)
+        zip_path.unlink()
+        logger.info(f"TNS catalog cached at {csv_path}")
+
+    # The bulk CSV carries a one-line title above the header row.
+    df = pd.read_csv(csv_path, skiprows=1, skip_blank_lines=True)
+    df = df.rename(columns={"ra": "ra_deg", "declination": "dec_deg"})
+    return df
+
+
+def load_tns_catalog(cred_file: str | Path, key_file: str | Path,
+                     cache_dir: str | Path, force_download: bool = False,
+                     dec_min: float = -30.0) -> list[TransientSource]:
+    """Fetch the TNS public bulk catalog and return it as a list of
+    TransientSource. Per-quadrant footprint filtering is applied later at
+    injection time, so this returns the whole (dec-limited) catalog."""
+    import pandas as pd
+
+    df = download_tns_public_catalog(cred_file, key_file, cache_dir, force=force_download)
+    ra  = pd.to_numeric(df["ra_deg"],  errors="coerce")
+    dec = pd.to_numeric(df["dec_deg"], errors="coerce")
+    name_col = next((c for c in ("objname", "name") if c in df.columns), None)
+    keep = ra.notna() & dec.notna() & (dec >= dec_min)
+    sub = df[keep]
+    sources = [
+        TransientSource(ra=float(r_ra), dec=float(r_dec),
+                        name=(str(r[name_col])[:64] if name_col else "TNS"),
+                        source="tns")
+        for (_, r), r_ra, r_dec in zip(sub.iterrows(), ra[keep], dec[keep])
+    ]
+    logger.info(f"Loaded {len(sources)} TNS sources (dec >= {dec_min}) for injection")
+    return sources
+
+
+# ---------------------------------------------------------------------------
+# Mode B — TNS cone-search query (Bot API)
 # ---------------------------------------------------------------------------
 
 TNS_BASE_URL = "https://www.wis-tns.org/api/get"
@@ -443,22 +514,20 @@ def _filter_already_in_catalog(
 
 def _filter_in_footprint(sources, image_path):
     """Keep only sources whose sky position falls inside the image frame.
-    Avoids injecting a target into a quadrant whose footprint does not contain it
-    (which would otherwise bloat every quadrant's catalog with sources that are
-    never painted)."""
+    Vectorised, so it is cheap even for a full TNS dump. Avoids injecting a target
+    into a quadrant whose footprint does not contain it (which would otherwise
+    bloat every quadrant's catalog with sources that are never painted)."""
     from astropy.wcs import WCS
+    if not sources:
+        return sources
     with fits.open(image_path) as h:
         wcs = WCS(h[0].header)
         ny, nx = h[0].data.shape
-    kept = []
-    for s in sources:
-        try:
-            x, y = wcs.world_to_pixel_values(s.ra, s.dec)
-        except Exception:
-            continue
-        if 0 <= x < nx and 0 <= y < ny:
-            kept.append(s)
-    return kept
+    ra  = np.array([s.ra  for s in sources], dtype=float)
+    dec = np.array([s.dec for s in sources], dtype=float)
+    x, y = wcs.world_to_pixel_values(ra, dec)
+    inb = np.isfinite(x) & np.isfinite(y) & (x >= 0) & (x < nx) & (y >= 0) & (y < ny)
+    return [s for s, keep in zip(sources, inb) if keep]
 
 
 def augment_sexcat(
@@ -526,16 +595,18 @@ def augment_sexcat(
     if "INJECTED_NAME" not in orig_table.colnames:
         orig_table["INJECTED_NAME"] = ""
 
-    # ---- Filter transients already in the catalog ----
-    to_inject = _filter_already_in_catalog(transients, orig_table, match_radius_arcsec)
-
-    # ---- Keep only those inside this quadrant's footprint ----
+    # ---- Keep only those inside this quadrant's footprint (fast; do this first so
+    #      the per-source catalog cross-match below only sees the few survivors) ----
+    to_inject = transients
     if footprint_filter and diff_img_path is not None and to_inject:
         n_before = len(to_inject)
         to_inject = _filter_in_footprint(to_inject, diff_img_path)
         if len(to_inject) != n_before:
             logger.info(f"footprint: {len(to_inject)}/{n_before} transients fall in "
                         f"{Path(refsexcat_path).name}")
+
+    # ---- Drop those already present in the reference catalog ----
+    to_inject = _filter_already_in_catalog(to_inject, orig_table, match_radius_arcsec)
 
     if not to_inject:
         logger.info("No sources to inject after cross-matching — "

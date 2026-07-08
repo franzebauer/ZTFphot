@@ -288,6 +288,7 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--assoc-radius-sci ARCSEC` | SExtractor ASSOC radius for **sci-pos** photometry (default: 1.5; wider to allow epoch-to-epoch science-centroid shifts) |
 | `--merge-match-radius ARCSEC` | Cross-match radius for common sources between overlapping quadrants in the merge step (default: 1.5) |
 | `--inject-targets CSV` | CSV of targets (`ra,dec[,name]`) to inject as sources absent from the reference catalog. In the `catalog` step, targets inside each quadrant footprint and farther than `--target-match-radius` from any reference source are added to a non-destructive `*_refsexcat_augmented.fits` that `make_catalog`/`simulate` then prefer automatically. Injected sources appear in the light curves with `MAG_4_REF > 90`. Forces the `catalog` step; use `--force` so `simulate`/`sex`/`calibrate`/`lightcurves` also rebuild if outputs already exist. |
+| `--grabTNSobjs` | Inject real transients from the TNS public bulk catalog that overlap the processed quadrants (same injection path as `--inject-targets`; may be combined with it). Requires `--tns-cred-file` (JSON with `tns_id`/`type`/`name`) and `--tns-key-file` (API key). The bulk catalog is cached under `--tns-cache-dir` (default `<base-dir>/TNS`); pass `--tns-force-download` to refresh. |
 | `--merge-mag-bin W` | Magnitude-bin width (mag) for the per-magnitude quadrant cross-calibration in the merge step (default: 0.1; a very large value reduces to a single scalar offset) |
 
 ### Photometry variant

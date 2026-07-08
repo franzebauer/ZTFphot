@@ -113,8 +113,8 @@ def _filter_quadrants_by_wcs(
 
 
 def _inject_targets_into_quadrants(base_dir: Path, quadrants: list[dict],
-                                   targets_csv: Path, match_radius: float) -> None:
-    """Augment each quadrant's reference catalog with the targets from targets_csv
+                                   transients: list, match_radius: float) -> None:
+    """Augment each quadrant's reference catalog with the given transient sources
     that (a) lie inside the quadrant footprint and (b) are not already within
     match_radius of a reference source. Writes non-destructive *_refsexcat_augmented.fits;
     make_catalog and simulate prefer it automatically. Injected sources carry the
@@ -123,10 +123,9 @@ def _inject_targets_into_quadrants(base_dir: Path, quadrants: list[dict],
     _scripts = Path(__file__).parent
     if str(_scripts) not in _sys.path:
         _sys.path.insert(0, str(_scripts))
-    from transient_catalog import load_user_catalog, augment_sexcat
+    from transient_catalog import augment_sexcat
 
-    transients = load_user_catalog(targets_csv)
-    logger.info(f"inject-targets: {len(transients)} candidate source(s) from {targets_csv}")
+    logger.info(f"inject-targets: {len(transients)} candidate source(s)")
     n_quad = 0
     for q in quadrants:
         f, fc, ccd, qid_ = q["field"], q["filtercode"], q["ccdid"], q["qid"]
@@ -430,6 +429,19 @@ def main() -> None:
                         "--target-match-radius from any reference source are added to a "
                         "non-destructive augmented catalog that simulate/sex then use. "
                         "Injected sources carry MAG_4_REF > 90 in the light curves.")
+    p.add_argument("--grabTNSobjs",          action="store_true",
+                   help="Inject real transients from the TNS public bulk catalog that "
+                        "overlap the processed quadrants (footprint-filtered per "
+                        "quadrant). Same injection path as --inject-targets; may be "
+                        "combined with it. Requires --tns-cred-file and --tns-key-file.")
+    p.add_argument("--tns-cred-file",        type=Path, default=None, metavar="JSON",
+                   help="TNS marker credentials JSON (keys: tns_id, type, name)")
+    p.add_argument("--tns-key-file",         type=Path, default=None, metavar="FILE",
+                   help="Text file containing the TNS API key")
+    p.add_argument("--tns-cache-dir",        type=Path, default=None, metavar="DIR",
+                   help="Where to cache the TNS bulk catalog (default: <base-dir>/TNS)")
+    p.add_argument("--tns-force-download",   action="store_true",
+                   help="Re-download the TNS bulk catalog even if a cached copy exists")
     # Download filters (used when "download" is in steps)
     p.add_argument("--max-seeing",          type=float, default=None, metavar="ARCSEC")
     p.add_argument("--min-maglim",          type=float, default=None, metavar="MAG")
@@ -459,6 +471,9 @@ def main() -> None:
                    help="Suppress target-source plots (lightcurves, precision target marker). "
                         "Use when processing a whole quadrant without a specific target.")
     args = p.parse_args()
+
+    if args.grabTNSobjs and (args.tns_cred_file is None or args.tns_key_file is None):
+        p.error("--grabTNSobjs requires --tns-cred-file and --tns-key-file")
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -623,12 +638,27 @@ def main() -> None:
         _run_purge_batch(base_dir, epochs, quadrants, args)
     else:
         if "catalog"    in steps:
-            if args.inject_targets:
-                _inject_targets_into_quadrants(base_dir, quadrants, args.inject_targets,
+            _injected = False
+            if args.inject_targets or args.grabTNSobjs:
+                import sys as _sys
+                _sc = Path(__file__).parent
+                if str(_sc) not in _sys.path:
+                    _sys.path.insert(0, str(_sc))
+                _transients = []
+                if args.grabTNSobjs:
+                    from transient_catalog import load_tns_catalog
+                    _transients += load_tns_catalog(
+                        args.tns_cred_file, args.tns_key_file,
+                        args.tns_cache_dir or (base_dir / "TNS"),
+                        force_download=args.tns_force_download)
+                if args.inject_targets:
+                    from transient_catalog import load_user_catalog
+                    _transients += load_user_catalog(args.inject_targets)
+                _inject_targets_into_quadrants(base_dir, quadrants, _transients,
                                                args.target_match_radius)
+                _injected = True
             # injecting changes the source list, so the reference CSV must be rebuilt
-            step_make_catalog(base_dir, quadrants,
-                              force=args.force or bool(args.inject_targets))
+            step_make_catalog(base_dir, quadrants, force=args.force or _injected)
             if args.ra is not None and args.dec is not None:
                 _warn_target_coverage(base_dir, quadrants, args.ra, args.dec)
         if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,
