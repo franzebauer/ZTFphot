@@ -514,9 +514,9 @@ def _filter_already_in_catalog(
 
 def _filter_in_footprint(sources, image_path):
     """Keep only sources whose sky position falls inside the image frame.
-    Vectorised, so it is cheap even for a full TNS dump. Avoids injecting a target
-    into a quadrant whose footprint does not contain it (which would otherwise
-    bloat every quadrant's catalog with sources that are never painted)."""
+    Cheap even for a full TNS dump. Avoids injecting a target into a quadrant whose
+    footprint does not contain it (which would otherwise bloat every quadrant's
+    catalog with sources that are never painted)."""
     from astropy.wcs import WCS
     if not sources:
         return sources
@@ -525,9 +525,36 @@ def _filter_in_footprint(sources, image_path):
         ny, nx = h[0].data.shape
     ra  = np.array([s.ra  for s in sources], dtype=float)
     dec = np.array([s.dec for s in sources], dtype=float)
-    x, y = wcs.world_to_pixel_values(ra, dec)
-    inb = np.isfinite(x) & np.isfinite(y) & (x >= 0) & (x < nx) & (y >= 0) & (y < ny)
-    return [s for s, keep in zip(sources, inb) if keep]
+
+    # Coarse angular pre-filter around the image centre. The gnomonic WCS inverse
+    # does not converge far from the tangent point, so we must not feed it whole-sky
+    # coordinates; the forward pixel->world transform is always well-defined.
+    c_ra, c_dec = wcs.pixel_to_world_values(nx / 2.0, ny / 2.0)
+    dra  = ((ra - float(c_ra) + 180.0) % 360.0 - 180.0) * np.cos(np.radians(float(c_dec)))
+    ddec = dec - float(c_dec)
+    idx = np.where(dra**2 + ddec**2 < 1.0**2)[0]   # within ~1 deg of centre
+    if idx.size == 0:
+        return []
+
+    def _in_frame(x, y):
+        return np.isfinite(x) and np.isfinite(y) and 0 <= x < nx and 0 <= y < ny
+
+    kept = []
+    try:
+        x, y = wcs.world_to_pixel_values(ra[idx], dec[idx])
+        for j, i in enumerate(idx):
+            if _in_frame(x[j], y[j]):
+                kept.append(sources[i])
+    except Exception:
+        # fall back to per-source so one bad coordinate cannot abort the batch
+        for i in idx:
+            try:
+                x, y = wcs.world_to_pixel_values(float(ra[i]), float(dec[i]))
+            except Exception:
+                continue
+            if _in_frame(x, y):
+                kept.append(sources[i])
+    return kept
 
 
 def augment_sexcat(
