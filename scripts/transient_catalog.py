@@ -26,9 +26,10 @@ This module solves the problem by:
 Injected sources are marked with:
   - MAG_AUTO / MAG_APER = 99  (physically impossible sentinel; they have no real
     reference-image flux). This surfaces as MAG_4_REF > 90 in the light curves,
-    so injected sources are distinguishable in the output with no extra column.
-  - FLAGS    = 0     (so they pass the FLAGS==0 filter in simulate_science.py)
-  - FLUX_BEST set to a configurable detection flux (default: 5× image sky noise)
+    so injected sources are distinguishable in the output with no extra column,
+    and it also selects the boosted detection amplitude in simulate_science.py.
+  - FLAGS = 1 if a reference neighbour lies within 3 arcsec (SExtractor "close
+    neighbour" bit, so blends are flagged like real crowded sources), else 0.
 
 Modes
 -----
@@ -70,9 +71,8 @@ Programmatic API
     augmented_path = augment_sexcat(
         refsexcat_path = "ztf_000443_zr_c16_q2_refsexcat.fits",
         transients     = transients,
-        diff_img_path  = "ztf_..._scimrefdiffimg.fits",
+        diff_img_path  = "ztf_..._scimrefdiffimg.fits",  # WCS for footprint filter
         output_path    = "ztf_000443_zr_c16_q2_refsexcat_augmented.fits",
-        injection_sigma = 5.0,    # paint injected sources at 5-sigma flux
     )
 
 Notes
@@ -410,66 +410,6 @@ def _tns_mag(obj: dict) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Injection flux estimation
-# ---------------------------------------------------------------------------
-
-def estimate_injection_flux(
-    diff_img_path: str | Path,
-    sigma: float = 5.0,
-    bg_box_size: int = 64,
-) -> float:
-    """
-    Estimate the flux corresponding to an N-sigma detection threshold from
-    the sky noise of a ZTF difference image.
-
-    The difference image has been background-subtracted, so we estimate the
-    RMS of the sky from sigma-clipped statistics on a grid of boxes.
-
-    Parameters
-    ----------
-    diff_img_path : str or Path
-        Path to a difference image (.fits, already funpacked).
-    sigma : float
-        Multiplier above sky RMS to use as injection flux (default 5).
-    bg_box_size : int
-        Size of boxes used for local RMS estimation (pixels).
-
-    Returns
-    -------
-    float : injection flux in ADU (same units as FLUX_BEST in refsexcat.fits)
-    """
-    path = Path(diff_img_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Difference image not found: {path}")
-
-    with fits.open(path) as hdul:
-        data = hdul[0].data.astype(float)
-
-    # Mask NaN/inf
-    valid = data[np.isfinite(data)]
-    if valid.size == 0:
-        raise ValueError("Difference image contains no finite pixels")
-
-    # Sigma-clipped RMS: iteratively reject >3-sigma outliers to avoid
-    # contamination from actual sources
-    clipped = valid.copy()
-    for _ in range(5):
-        med  = np.median(clipped)
-        rms  = np.std(clipped)
-        clipped = clipped[np.abs(clipped - med) < 3.0 * rms]
-        if clipped.size < 100:
-            clipped = valid
-            break
-
-    sky_rms = float(np.std(clipped))
-    injection_flux = sigma * sky_rms
-
-    logger.info(f"Sky RMS from diff image: {sky_rms:.3f} ADU — "
-                f"injection flux ({sigma}σ): {injection_flux:.3f} ADU")
-    return injection_flux
-
-
-# ---------------------------------------------------------------------------
 # Reference catalog augmentation
 # ---------------------------------------------------------------------------
 
@@ -560,8 +500,6 @@ def augment_sexcat(
     transients: list[TransientSource],
     diff_img_path: Optional[str | Path] = None,
     output_path: Optional[str | Path] = None,
-    injection_sigma: float = 5.0,
-    injection_flux_override: Optional[float] = None,
     match_radius_arcsec: float = 1.0,
     footprint_filter: bool = True,
 ) -> Path:
@@ -581,15 +519,10 @@ def augment_sexcat(
         Sources to inject.  Sources already present in the catalog (within
         match_radius_arcsec) are silently skipped.
     diff_img_path : str or Path, optional
-        If provided, sky noise is estimated from this difference image to set
-        the injection flux.  Required unless injection_flux_override is given.
+        Difference image used only for the per-quadrant footprint filter (its WCS).
     output_path : str or Path, optional
         Where to write the augmented catalog.  Defaults to
         {refsexcat_stem}_augmented.fits in the same directory.
-    injection_sigma : float
-        N-sigma flux to paint injected sources at (default 5).
-    injection_flux_override : float, optional
-        Use this flux (ADU) instead of estimating from the diff image.
     match_radius_arcsec : float
         Sources within this radius of an existing reference source are not
         re-injected (default 1 arcsec).
@@ -636,28 +569,21 @@ def augment_sexcat(
                     "no augmented catalog written for this quadrant.")
         return refsexcat_path
 
-    # ---- Estimate injection flux ----
-    if injection_flux_override is not None:
-        injection_flux = float(injection_flux_override)
-        logger.info(f"Using override injection flux: {injection_flux:.3f} ADU")
-    elif diff_img_path is not None:
-        injection_flux = estimate_injection_flux(diff_img_path, sigma=injection_sigma)
-    else:
-        # Fallback: use median flux of faint reference sources / 10
-        # This is a rough estimate when no diff image is available.
-        sorted_flux = np.sort(orig_table["FLUX_BEST"])
-        injection_flux = float(np.percentile(sorted_flux[sorted_flux > 0], 10))
-        logger.warning(
-            f"No diff image provided and no flux override — using 10th-percentile "
-            f"reference flux as injection flux: {injection_flux:.3f} ADU. "
-            f"Pass diff_img_path or injection_flux_override for a better estimate."
-        )
+    # ---- Reference positions, for the neighbour-blend flag ----
+    # The simulated detection image paints every source at a fixed amplitude (only
+    # positions matter), so no per-source injection flux is computed. If an injected
+    # source has a reference neighbour within _BLEND_ARCSEC, we set SExtractor FLAGS
+    # bit 0 (value 1, "close neighbour biasing photometry") so it is flagged exactly
+    # like a real crowded source (carried to the light curves as FLAG_SE_REF).
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+    _ref_coords = SkyCoord(ra=np.asarray(orig_table["ALPHAWIN_J2000"], float) * u.deg,
+                           dec=np.asarray(orig_table["DELTAWIN_J2000"], float) * u.deg)
+    _BLEND_ARCSEC = 3.0
 
     # ---- Build synthetic rows for injected sources ----
     # Create a template row from the original table with all columns set to
-    # sensible defaults, then override the position and flux columns.
-
-    # Determine all column names and their dtypes from the original table
+    # sensible defaults, then override the position, magnitude and flag columns.
     injected_rows = []
 
     for src in to_inject:
@@ -679,12 +605,9 @@ def augment_sexcat(
         row["ALPHAWIN_J2000"] = src.ra
         row["DELTAWIN_J2000"] = src.dec
 
-        # Flux — needed by simulate_science.paint_psf
-        row["FLUX_BEST"]    = injection_flux
-        row["FLUXERR_BEST"] = 0.0   # unknown; pipeline will measure from diff image
-
-        # Magnitude columns (inverse of FLUX_BEST; set sentinel large value)
-        # These are not used by simulate_science but by make_catalog
+        # Magnitude sentinel (99) is the sole injected-source marker: it drives the
+        # brighter detection-image amplitude in simulate_science and surfaces as
+        # MAG_4_REF > 90 in the light curves. No injection flux is stored.
         for mc in ["MAG_BEST", "MAG_AUTO", "MAG_APER"]:
             if mc in orig_table.colnames:
                 if orig_table[mc].shape[1:]:
@@ -698,8 +621,12 @@ def augment_sexcat(
                 else:
                     row[ec] = 99.0
 
-        # SExtractor quality flags — 0 means "clean detection"
-        row["FLAGS"] = 0
+        # SExtractor quality flags: co-opt bit 0 (close neighbour) if a reference
+        # source lies within _BLEND_ARCSEC, so injected sources are blend-flagged
+        # like real crowded sources; 0 (clean) otherwise.
+        _nn = SkyCoord(ra=src.ra * u.deg, dec=src.dec * u.deg).separation(_ref_coords).arcsec.min() \
+            if len(_ref_coords) else np.inf
+        row["FLAGS"] = 1 if _nn < _BLEND_ARCSEC else 0
 
         injected_rows.append(row)
 
@@ -730,19 +657,13 @@ def augment_all_refsexcats(
     base_dir: str | Path,
     transients: list[TransientSource],
     bands: list[str] = None,
-    injection_sigma: float = 5.0,
-    injection_flux_override: Optional[float] = None,
     match_radius_arcsec: float = 1.0,
     footprint_filter: bool = True,
 ) -> dict[str, Path]:
     """
     Find all refsexcat.fits files under base_dir/Reference and augment each one.
-
-    For each refsexcat, we look for a representative science difference image
-    in the corresponding Science subdirectory to estimate injection flux.
-    Falls back to injection_flux_override if no diff image is found.
-
-    Returns a dict mapping original refsexcat path → augmented output path.
+    A representative difference image per quadrant supplies the WCS for the
+    footprint filter. Returns a dict mapping original refsexcat → augmented path.
     """
     from ztf_field_lookup import BAND_TO_FILTERCODE
 
@@ -778,17 +699,14 @@ def augment_all_refsexcats(
         if filtercodes and filtercode not in filtercodes:
             continue
 
-        # Find a representative diff image for flux estimation
+        # Find a representative diff image (WCS for the footprint filter)
         sci_quadrant_dir = (sci_root / field_str / filtercode
                             / parts[ccd_idx] / parts[q_idx])
         diff_imgs = sorted(sci_quadrant_dir.glob("*_scimrefdiffimg.fits")) if sci_quadrant_dir.exists() else []
         diff_img = diff_imgs[0] if diff_imgs else None
-
-        if diff_img is None and injection_flux_override is None:
-            logger.warning(
-                f"No diff image found for {refcat.parent.relative_to(base_dir)} — "
-                f"injection flux will use fallback 10th-percentile method"
-            )
+        if diff_img is None and footprint_filter:
+            logger.warning(f"No diff image for {refcat.parent.relative_to(base_dir)} — "
+                           f"footprint filter skipped for this quadrant")
 
         out_path = refcat.with_name(refcat.stem.replace("_refsexcat", "_refsexcat_augmented") + ".fits")
 
@@ -798,8 +716,6 @@ def augment_all_refsexcats(
                 transients=transients,
                 diff_img_path=diff_img,
                 output_path=out_path,
-                injection_sigma=injection_sigma,
-                injection_flux_override=injection_flux_override,
                 match_radius_arcsec=match_radius_arcsec,
                 footprint_filter=footprint_filter,
             )
@@ -856,17 +772,13 @@ if __name__ == "__main__":
     parser.add_argument("--refsexcat", type=Path, required=False,
                         help="Path to a single refsexcat.fits to augment")
     parser.add_argument("--diffimg",   type=Path, required=False,
-                        help="Path to diff image for flux estimation")
+                        help="Path to diff image (WCS for the footprint filter)")
     parser.add_argument("--output",    type=Path, required=False,
                         help="Output path for augmented catalog")
     parser.add_argument("--base-dir",  type=Path, required=False,
                         help="Base data directory: augment ALL refsexcats found there")
     parser.add_argument("--bands", nargs="+", default=None,
                         help="Bands to process when using --base-dir (default: all)")
-    parser.add_argument("--injection-sigma", type=float, default=5.0,
-                        help="Paint injected sources at N×sky_RMS (default: 5)")
-    parser.add_argument("--injection-flux",  type=float, default=None,
-                        help="Override injection flux (ADU); skips diff-image estimation")
     parser.add_argument("--match-radius",    type=float, default=1.0,
                         help="Skip injection if within N arcsec of existing source (default: 1)")
 
@@ -902,8 +814,7 @@ if __name__ == "__main__":
             base_dir=args.base_dir,
             transients=transients,
             bands=args.bands,
-            injection_sigma=args.injection_sigma,
-            injection_flux_override=args.injection_flux,
+            match_radius_arcsec=args.match_radius,
         )
         print(f"\nAugmented {len(results)} reference catalog(s).")
         for orig, out in results.items():
@@ -915,8 +826,6 @@ if __name__ == "__main__":
             transients=transients,
             diff_img_path=args.diffimg,
             output_path=args.output,
-            injection_sigma=args.injection_sigma,
-            injection_flux_override=args.injection_flux,
             match_radius_arcsec=args.match_radius,
         )
         print(f"\nAugmented catalog written to: {out}")

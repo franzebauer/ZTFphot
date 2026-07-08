@@ -46,11 +46,21 @@ def build_simulated_image(source_img, source_cat, save_name,
     size = 25
     # size = (np.ceil(fwhm) // 2 * 4 + 1)
 
-    _FIXED_FLUX = 1000  # all sources painted at the same flux; only positions matter
+    _FIXED_FLUX   = 1000  # baseline detection amplitude; only positions matter for photometry
+    _INJECT_BOOST = 5     # injected/target sources painted brighter so they and their
+                          # neighbours are cleanly detected, without a large boost that
+                          # would bleed into neighbours or shift the injected centroid
 
     wcs = WCS(difimg[0].header)
-    catalog = Table(catalog[1].data)
-    catalog = SkyCoord(ra=catalog['ALPHAWIN_J2000'], dec=catalog['DELTAWIN_J2000'], unit='deg')
+    _tbl = Table(catalog[1].data)
+    catalog = SkyCoord(ra=_tbl['ALPHAWIN_J2000'], dec=_tbl['DELTAWIN_J2000'], unit='deg')
+    # Injected sources carry the reference-mag sentinel (MAG_AUTO = 99); paint them at
+    # the boosted amplitude. Real sources (and any sci-pos catalog) stay at 1×.
+    if 'MAG_AUTO' in _tbl.colnames:
+        _amp = np.where(np.asarray(_tbl['MAG_AUTO'], dtype=float) >= 90.0,
+                        _FIXED_FLUX * _INJECT_BOOST, _FIXED_FLUX)
+    else:
+        _amp = np.full(len(_tbl), _FIXED_FLUX, dtype=float)
 
     data = np.zeros(difimg[0].data.shape, dtype=np.float32)
     # preserve NaN mask from the diff image (bad pixels / edge regions)
@@ -71,13 +81,13 @@ def build_simulated_image(source_img, source_cat, save_name,
         return (float((~nan_mask[sr0:sr1, sc0:sc1])[in_circle].sum())
                 / n_in_circle) if n_in_circle > 0 else 0.0
 
-    for object in catalog:
+    for i, object in enumerate(catalog):
         x, y = wcs.world_to_pixel(object)
         x_, y_ = int(np.floor(x)), int(np.floor(y))
         if not (0 <= x_ < ncols and 0 <= y_ < nrows):
             continue
         if _valid_frac(y_, x_) > 0.5:
-            psf = makeGaussian(size=size, fwhm=fwhm, center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX
+            psf = makeGaussian(size=size, fwhm=fwhm, center=(size//2 + (x - x_), size//2 + (y - y_))) * _amp[i]
             paint_psf(data, y_, x_, psf)
 
     if target_ra is not None and target_dec is not None:
@@ -87,7 +97,7 @@ def build_simulated_image(source_img, source_cat, save_name,
             x_, y_ = int(np.floor(x)), int(np.floor(y))
             if 0 <= x_ < ncols and 0 <= y_ < nrows and _valid_frac(y_, x_) > 0.5:
                 psf = makeGaussian(size=size, fwhm=fwhm,
-                                   center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX * 30
+                                   center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX * _INJECT_BOOST
                 paint_psf(data, y_, x_, psf)
 
     data = np.clip(data, 0, 32767).astype(np.int16)
