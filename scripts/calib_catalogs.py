@@ -417,8 +417,14 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             _nc_rms4_k = np.nan
             if flatfield is not None:
                 try:
+                    # A sparse quadrant can produce a degenerate flatfield whose
+                    # grid is (partly) NaN — too few sources per bin, "bins=0/400".
+                    # Applying it verbatim subtracts NaN and poisons every
+                    # magnitude, so treat undefined cells as a zero correction.
                     _ff_corr   = _apply_flatfield(alphafin, deltafin, flatfield)
+                    _ff_corr   = np.where(np.isfinite(_ff_corr), _ff_corr, 0.0)
                     _ff_at_c   = _apply_flatfield(ra_c, dec_c, flatfield)
+                    _ff_at_c   = np.where(np.isfinite(_ff_at_c), _ff_at_c, 0.0)
                     _nc_rms4_k = float(np.std(_dm_for_poly - _poly_fitted - _ff_at_c))
                 except Exception as _fe:
                     print(f"  Warning: flatfield apply failed k={k}: {_fe}")

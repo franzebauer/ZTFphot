@@ -56,11 +56,13 @@ import logging
 import shutil
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from astropy.io import fits as pyfits
+from astropy.io.fits.verify import VerifyWarning
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from scipy.optimize import curve_fit
@@ -193,9 +195,14 @@ def _calibrate_epoch(maginst, q_mag, q_err, errinst, ra, dec, class_star,
     Q_cal = Q_cal - _poly_corr
 
     # ── Step 4: stacked flatfield correction ─────────────────────────────────
+    # A sparse quadrant can yield a degenerate flatfield whose grid is entirely
+    # (or partly) NaN — e.g. too few sources per bin, "bins=0/400". Applying it
+    # verbatim would subtract NaN and poison every magnitude, so treat undefined
+    # cells as a zero correction (no flatfield where it could not be measured).
     if flatfield is not None:
         try:
-            Q_cal = Q_cal - _apply_flatfield(ra, dec, flatfield)
+            _ff = _apply_flatfield(ra, dec, flatfield)
+            Q_cal = Q_cal - np.where(np.isfinite(_ff), _ff, 0.0)
         except Exception as exc:
             logger.warning(f"    flatfield apply failed: {exc}")
 
@@ -256,12 +263,17 @@ _CAL_HDR_KEYS = ['OBSMJD', 'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
 def _write_cal_fits(path, hdr_vals, cols):
     """Write a per-epoch calibrated FITS in the format step_lightcurves expects."""
     prim = pyfits.PrimaryHDU()
-    for k in _CAL_HDR_KEYS:
-        v = hdr_vals.get(k, np.nan)
-        try:
-            prim.header[k] = float(v)
-        except (TypeError, ValueError):
-            prim.header[k] = v
+    # Some header keys (MAGZP_DIF, MAGZPRMS_DIF, INFOBITS_DIF) exceed 8 chars and
+    # become HIERARCH cards; step_lightcurves reads them back fine, so suppress
+    # the (purely cosmetic) VerifyWarning to keep batch logs clean.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", VerifyWarning)
+        for k in _CAL_HDR_KEYS:
+            v = hdr_vals.get(k, np.nan)
+            try:
+                prim.header[k] = float(v)
+            except (TypeError, ValueError):
+                prim.header[k] = v
     fcols = [
         pyfits.Column(name='ALPHAWIN_J2000',   format='D', array=cols['ra']),
         pyfits.Column(name='DELTAWIN_J2000',   format='D', array=cols['dec']),
@@ -279,7 +291,9 @@ def _write_cal_fits(path, hdr_vals, cols):
         pyfits.Column(name='VECTOR_ASSOC',     format='J', array=cols['assoc']),
     ]
     tbl = pyfits.BinTableHDU.from_columns(fcols)
-    pyfits.HDUList([prim, tbl]).writeto(path, overwrite=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", VerifyWarning)
+        pyfits.HDUList([prim, tbl]).writeto(path, overwrite=True)
 
 
 # ── reference download + catalog build ────────────────────────────────────────
