@@ -22,6 +22,9 @@ dependencies:
 
   # Geometry (required by ztfquery internally)
   - shapely
+  # pyproj bundles the PROJ C library; installed via conda-forge so pip does not
+  # try (and fail) to build it from source when installing ztfquery
+  - pyproj
 
   # funpack (from conda-forge); SExtractor installed separately — see README
   - cfitsio
