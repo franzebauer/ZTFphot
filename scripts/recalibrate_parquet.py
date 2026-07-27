@@ -61,6 +61,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from astropy.io import fits as pyfits
 from astropy.io.fits.verify import VerifyWarning
 from astropy.coordinates import SkyCoord
@@ -473,12 +474,27 @@ def recalibrate_file(path, args, auth):
 
     df = pd.read_parquet(path)
     need = {'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org', 'MAG_4_TOT_AB',
-            'ALPHAWIN_REF', 'DELTAWIN_REF', 'object_index',
-            'field', 'filtercode', 'ccdid', 'qid', 'OBSMJD'}
+            'ALPHAWIN_REF', 'DELTAWIN_REF', 'object_index', 'OBSMJD'}
     missing = need - set(df.columns)
     if missing:
         logger.warning(f"SKIP {path.name}: missing columns {sorted(missing)}")
         return False
+
+    # Quadrant identity: merged parquets carry field/filtercode/ccdid/qid as
+    # columns; per-quadrant (non-merged) parquets carry them in parquet metadata
+    # and are single-quadrant (no merge, no norm_offset).
+    merged_input = {'field', 'filtercode', 'ccdid', 'qid'} <= set(df.columns)
+    if not merged_input:
+        meta = pq.read_schema(path).metadata or {}
+        try:
+            df['field']      = int(meta[b'field'].decode())
+            df['filtercode'] = meta[b'filtercode'].decode()
+            df['ccdid']      = int(meta[b'ccdid'].decode())
+            df['qid']        = int(meta[b'qid'].decode())
+        except (KeyError, ValueError, AttributeError) as exc:
+            logger.warning(f"SKIP {path.name}: no quadrant columns and quadrant "
+                           f"metadata unreadable ({exc})")
+            return False
     if 'norm_offset' not in df.columns:
         df['norm_offset'] = np.float32(0.0)
 
@@ -545,22 +561,35 @@ def recalibrate_file(path, args, auth):
                   poly_degree=args.poly_degree, faint_err_max=args.faint_err_max)
         step_lightcurves(base_dir, quadrants, force=True, use_calibrated=True)
 
-        # 5. merge (needs a target tag only to name its output dir)
-        tra = float(np.nanmedian(pd.to_numeric(df['ALPHAWIN_REF'], errors='coerce')))
-        tdec = float(np.nanmedian(pd.to_numeric(df['DELTAWIN_REF'], errors='coerce')))
-        step_merge(base_dir, quadrants, force=True, target_ra=tra, target_dec=tdec)
-
-        # 6. collect output (merged if >=2 quads/band, else the single per-quad LC)
-        out_df = _collect_output(base_dir, quadrants)
-        if out_df is None or out_df.empty:
-            logger.warning(f"FAIL {path.name}: no recalibrated output produced")
-            return False
-
         out_dir = Path(args.outdir) if args.outdir else path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{path.stem}{args.suffix}.parquet"
-        out_df.to_parquet(out_path, index=False)
-        logger.info(f"  → {out_path}  ({len(out_df):,} rows, {out_df['object_index'].nunique()} objects)")
+
+        if merged_input:
+            # 5. merge (needs a target tag only to name its output dir)
+            tra = float(np.nanmedian(pd.to_numeric(df['ALPHAWIN_REF'], errors='coerce')))
+            tdec = float(np.nanmedian(pd.to_numeric(df['DELTAWIN_REF'], errors='coerce')))
+            step_merge(base_dir, quadrants, force=True, target_ra=tra, target_dec=tdec)
+            # 6. collect output (merged if >=2 quads/band, else single per-quad LC)
+            out_df = _collect_output(base_dir, quadrants)
+            if out_df is None or out_df.empty:
+                logger.warning(f"FAIL {path.name}: no recalibrated output produced")
+                return False
+            out_df.to_parquet(out_path, index=False)
+            logger.info(f"  → {out_path}  ({len(out_df):,} rows, "
+                        f"{out_df['object_index'].nunique()} objects)")
+        else:
+            # Non-merged (single-quadrant) input: copy the per-quadrant lightcurve
+            # verbatim, preserving its non-merged schema + parquet metadata (quad
+            # identity, MAGZP_REF). MAG_4_REF is added by step_lightcurves.
+            q = quadrants[0]
+            lc = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
+                  / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / "lightcurves.parquet")
+            if not lc.exists():
+                logger.warning(f"FAIL {path.name}: no recalibrated lightcurve produced")
+                return False
+            shutil.copy2(lc, out_path)
+            logger.info(f"  → {out_path}  ({pq.read_metadata(out_path).num_rows:,} rows)")
         return True
     finally:
         if args.keep_temp:
