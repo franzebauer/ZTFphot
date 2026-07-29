@@ -71,6 +71,20 @@ def find_final_parquets(work_dir: Path, ra: float, dec: float, bands: list,
     return results
 
 
+def _band_output_exists(results_dir: Path, tag: str, fc: str, suffix: str = "") -> bool:
+    """True if a saved light-curve parquet exists for this coordinate tag in the
+    given filtercode and ref/sci variant. Matches both the merged label
+    ({tag}_{fc}{suffix}_merged.parquet) and the single-quadrant label
+    ({tag}_{field}_{fc}_c{ccd}_q{qid}{suffix}.parquet). Used by --skip-existing so
+    a target is only skipped when every requested band is already present."""
+    if list(results_dir.glob(f"{tag}_{fc}{suffix}_merged.parquet")):
+        return True
+    for p in results_dir.glob(f"{tag}_*_{fc}_*.parquet"):
+        if ("_sci" in p.stem) == (suffix == "_sci"):
+            return True
+    return False
+
+
 def run_pipeline(pipeline: Path, ra: float, dec: float, work_dir: Path,
                  bands: list, workers: int, download_workers: int, purge_batch: int,
                  min_maglim: float, max_seeing: float,
@@ -353,11 +367,24 @@ def main():
             print(f"  Target {i}/{len(targets)}:  RA={ra}  Dec={dec}  ({tag})")
             print(sep)
 
-        # Optional: skip if results already present
+        # Optional: skip if results already present. In quadrant mode the tag
+        # already encodes the filtercode, so a coordinate/quadrant glob is
+        # band-specific. In RA/Dec mode the tag is coordinate-only, so require a
+        # parquet for *every* requested band (and the sci variant with --both) —
+        # otherwise a target already done in one filter would skip a new one.
         if args.skip_existing:
-            existing = list(results_dir.glob(f"{tag}_*.parquet"))
-            if existing:
-                print(f"  Already done ({len(existing)} parquet(s)) — skipping")
+            if quad_mode:
+                have = len(list(results_dir.glob(f"{tag}_*.parquet")))
+                skip = have > 0
+            else:
+                suffixes = ["", "_sci"] if args.both else [""]
+                want = [(BAND_TO_FC.get(b, f"z{b}"), s)
+                        for b in args.bands for s in suffixes]
+                have = sum(_band_output_exists(results_dir, tag, fc, s)
+                           for fc, s in want)
+                skip = have == len(want)
+            if skip:
+                print(f"  Already done ({have} parquet(s), all requested bands) — skipping")
                 n_skip += 1
                 continue
 

@@ -36,8 +36,10 @@ What it does, per input parquet
 
 Only the aperture-4 pre-calibration magnitude is retained in the parquet, so
 apertures 3/6/10 are corrected by the aperture-4 shift (they do not carry an
-independent recalibration).  Ref-position merged parquets only; _sci files are
-skipped.
+independent recalibration).  Handles both ref-position and science-position
+(`_sci`) products, merged and non-merged: `_sci` files are detected by name and
+calibrated at the per-epoch science centroids (ALPHA_SCI/DELTA_SCI) through the
+parallel `_sci` trees, with vetting seeded from the sci light curves.
 
 Usage
 -----
@@ -358,20 +360,24 @@ def _cal_quad_dir(base, kind, field, fc, ccd, qid):
 
 
 def _run_pass(base_dir, quadrants, df, refs, obj_match, ff_map, vet_masks,
-              poly_degree, faint_err_max):
+              poly_degree, faint_err_max, suffix="",
+              pos_ra='ALPHAWIN_REF', pos_dec='DELTAWIN_REF'):
     """Write _cal.fits (and pass-1 residual NPZ when ff_map is empty) for every
-    quadrant/epoch. Returns nothing; results land on disk for the pipeline steps."""
+    quadrant/epoch. Returns nothing; results land on disk for the pipeline steps.
+    `pos_ra`/`pos_dec` are the per-epoch positions used for the spatial fit and
+    written to _cal.fits — reference positions in ref-pos mode, the science
+    centroids (ALPHA_SCI/DELTA_SCI) in sci-pos mode."""
     pass1 = not ff_map
     for q in quadrants:
         field, fc, ccd, qid = q['field'], q['filtercode'], q['ccdid'], q['qid']
         key = (field, fc, ccd, qid)
         if key not in obj_match:
             continue
-        cal_dir = _cal_quad_dir(base_dir, "Calibrated", field, fc, ccd, qid)
+        cal_dir = _cal_quad_dir(base_dir, f"Calibrated{suffix}", field, fc, ccd, qid)
         cal_dir.mkdir(parents=True, exist_ok=True)
         for old in cal_dir.glob("*_cal.fits"):
             old.unlink()
-        resid_dir = _cal_quad_dir(base_dir, "FlatfieldResiduals", field, fc, ccd, qid)
+        resid_dir = _cal_quad_dir(base_dir, f"FlatfieldResiduals{suffix}", field, fc, ccd, qid)
         if pass1:
             resid_dir.mkdir(parents=True, exist_ok=True)
 
@@ -400,8 +406,8 @@ def _run_pass(base_dir, quadrants, df, refs, obj_match, ff_map, vet_masks,
             magQi = (pd.to_numeric(ep['MAG_4_TOT_AB_org'], errors='coerce').values
                      - pd.to_numeric(ep.get('norm_offset', 0.0), errors='coerce').fillna(0.0).values)
             errQi = pd.to_numeric(ep['MERR_4_TOT_AB_org'], errors='coerce').values
-            ra    = pd.to_numeric(ep['ALPHAWIN_REF'], errors='coerce').values
-            dec   = pd.to_numeric(ep['DELTAWIN_REF'], errors='coerce').values
+            ra    = pd.to_numeric(ep[pos_ra], errors='coerce').values
+            dec   = pd.to_numeric(ep[pos_dec], errors='coerce').values
 
             is_good = (vmask[csv_idx] if vmask is not None
                        else np.ones(len(csv_idx), dtype=bool))
@@ -465,16 +471,32 @@ def _load_vet_masks(base_dir, quadrants, refs, refs_coord):
     return masks
 
 
+def _seed_vet_input(base_dir, quadrants, suffix):
+    """step_vet (and vet_calibration_stars.py) read the ref-named
+    lightcurves.parquet; for a sci-position run, copy the sci light curves to that
+    name so variable calibrators are flagged from the sci data being calibrated."""
+    for q in quadrants:
+        d = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
+             / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}")
+        src = d / f"lightcurves{suffix}.parquet"
+        if src.exists():
+            shutil.copy2(src, d / "lightcurves.parquet")
+
+
 def recalibrate_file(path, args, auth):
     path = Path(path)
-    if "_sci" in path.stem:
-        logger.warning(f"SKIP {path.name}: sci-position parquet not supported")
-        return False
     logger.info(f"═══ {path.name} ═══")
+
+    # Science-position products live in parallel _sci trees and are photometered at
+    # the per-epoch science centroids (ALPHA_SCI/DELTA_SCI), which drive the spatial
+    # fit and the output positions; ref-pos uses the fixed reference positions.
+    is_sci = "_sci" in path.stem
+    suffix = "_sci" if is_sci else ""
+    pos_ra, pos_dec = ('ALPHA_SCI', 'DELTA_SCI') if is_sci else ('ALPHAWIN_REF', 'DELTAWIN_REF')
 
     df = pd.read_parquet(path)
     need = {'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org', 'MAG_4_TOT_AB',
-            'ALPHAWIN_REF', 'DELTAWIN_REF', 'object_index', 'OBSMJD'}
+            'ALPHAWIN_REF', 'DELTAWIN_REF', 'object_index', 'OBSMJD', pos_ra, pos_dec}
     missing = need - set(df.columns)
     if missing:
         logger.warning(f"SKIP {path.name}: missing columns {sorted(missing)}")
@@ -546,20 +568,26 @@ def recalibrate_file(path, args, auth):
 
         # 3. PASS 1 : calibrate (no flatfield) -> lightcurves -> vet
         _run_pass(base_dir, quadrants, df, refs, obj_match,
-                  ff_map={}, vet_masks={},
+                  ff_map={}, vet_masks={}, suffix=suffix,
+                  pos_ra=pos_ra, pos_dec=pos_dec,
                   poly_degree=args.poly_degree, faint_err_max=args.faint_err_max)
-        step_lightcurves(base_dir, quadrants, force=True, use_calibrated=True)
+        step_lightcurves(base_dir, quadrants, force=True, use_calibrated=True, suffix=suffix)
+        # vet reads the ref-named lightcurves.parquet; for sci, seed it from the sci
+        # light curves so variable calibrators are flagged from the same data.
+        if is_sci:
+            _seed_vet_input(base_dir, quadrants, suffix)
         step_vet(base_dir, quadrants)
 
         # 4. build flatfield, load vetting, PASS 2 : recalibrate -> lightcurves
         ff_map = step_build_flatfield(base_dir, quadrants, nbins=args.ff_bins,
                                       min_count=args.ff_min_count,
-                                      edge_split=args.ff_edge_split)
+                                      edge_split=args.ff_edge_split, suffix=suffix)
         vet_masks = _load_vet_masks(base_dir, quadrants, refs, refs_coord)
         _run_pass(base_dir, quadrants, df, refs, obj_match,
-                  ff_map=ff_map, vet_masks=vet_masks,
+                  ff_map=ff_map, vet_masks=vet_masks, suffix=suffix,
+                  pos_ra=pos_ra, pos_dec=pos_dec,
                   poly_degree=args.poly_degree, faint_err_max=args.faint_err_max)
-        step_lightcurves(base_dir, quadrants, force=True, use_calibrated=True)
+        step_lightcurves(base_dir, quadrants, force=True, use_calibrated=True, suffix=suffix)
 
         out_dir = Path(args.outdir) if args.outdir else path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -569,9 +597,10 @@ def recalibrate_file(path, args, auth):
             # 5. merge (needs a target tag only to name its output dir)
             tra = float(np.nanmedian(pd.to_numeric(df['ALPHAWIN_REF'], errors='coerce')))
             tdec = float(np.nanmedian(pd.to_numeric(df['DELTAWIN_REF'], errors='coerce')))
-            step_merge(base_dir, quadrants, force=True, target_ra=tra, target_dec=tdec)
+            step_merge(base_dir, quadrants, force=True, target_ra=tra, target_dec=tdec,
+                       suffix=suffix)
             # 6. collect output (merged if >=2 quads/band, else single per-quad LC)
-            out_df = _collect_output(base_dir, quadrants)
+            out_df = _collect_output(base_dir, quadrants, suffix)
             if out_df is None or out_df.empty:
                 logger.warning(f"FAIL {path.name}: no recalibrated output produced")
                 return False
@@ -584,7 +613,7 @@ def recalibrate_file(path, args, auth):
             # identity, MAGZP_REF). MAG_4_REF is added by step_lightcurves.
             q = quadrants[0]
             lc = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
-                  / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / "lightcurves.parquet")
+                  / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / f"lightcurves{suffix}.parquet")
             if not lc.exists():
                 logger.warning(f"FAIL {path.name}: no recalibrated lightcurve produced")
                 return False
@@ -598,7 +627,7 @@ def recalibrate_file(path, args, auth):
             shutil.rmtree(base_dir, ignore_errors=True)
 
 
-def _collect_output(base_dir, quadrants):
+def _collect_output(base_dir, quadrants, suffix=""):
     """Return the merged parquet if present, else the single-quadrant lightcurve
     with merge-schema columns added."""
     merged = sorted((base_dir / "LightCurves" / "merged").rglob("lightcurves_merged.parquet"))
@@ -610,10 +639,10 @@ def _collect_output(base_dir, quadrants):
 
     # quadrants whose band was not merged (single-quadrant bands)
     for q in quadrants:
-        if q['filtercode'] in merged_bands:
+        if f"{q['filtercode']}{suffix}" in merged_bands:
             continue
         lc = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
-              / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / "lightcurves.parquet")
+              / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / f"lightcurves{suffix}.parquet")
         if not lc.exists():
             continue
         d = pd.read_parquet(lc)
