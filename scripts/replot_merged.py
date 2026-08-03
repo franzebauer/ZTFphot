@@ -29,6 +29,8 @@ def main() -> None:
     ap.add_argument("--ra",      type=float, required=True)
     ap.add_argument("--dec",     type=float, required=True)
     ap.add_argument("--out-dir", type=Path,  required=True)
+    ap.add_argument("--bin-days", type=float, default=50.0,
+                    help="Bin width (days) for the binned light-curve overlay (default: 50)")
     ap.add_argument("--scripts", type=Path,  default=Path(__file__).parent,
                     help="Path to ZTFphot scripts directory")
     args = ap.parse_args()
@@ -69,7 +71,8 @@ def main() -> None:
             try:
                 make_lightcurves(tmp_pq,
                                  args.out_dir / f"lightcurves_{tag}.png",
-                                 args.ra, args.dec, tag=tag)
+                                 args.ra, args.dec, tag=tag,
+                                 bin_days=args.bin_days)
                 print(f"  lightcurves_{tag}.png")
             except Exception as e:
                 print(f"  WARNING: lightcurves failed for {tag}: {e}")

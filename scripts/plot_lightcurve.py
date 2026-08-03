@@ -5,7 +5,7 @@ Per-quadrant 2-panel light curve figure:
 
   Top:    target MJD vs MAG_4_TOT_AB, scatter coloured by MAGLIM
   Bottom: 5 IS_GOOD calibration stars nearest in magnitude to the target,
-          excluding high-sigma outliers (σ > 2× median of vet stars)
+          excluding high-sigma outliers (σ > 4× median of vet stars)
 
 Both panels share the same y-axis range (10–90th percentile of target mags ± 0.3).
 Panel widths are equal (colorbar occupies a dedicated narrow column).
@@ -118,7 +118,7 @@ def _pick_comps(clean: pd.DataFrame, tgt_obj, tgt_med: float,
                 vet_good: set, n_comp: int = 5) -> list:
     """
     Select n_comp IS_GOOD calibration stars nearest in magnitude to tgt_med,
-    excluding tgt_obj and high-sigma outliers (sigma > 2× median of vet stars).
+    excluding tgt_obj and high-sigma outliers (sigma > 4× median of vet stars).
     Falls back to all CLASS_STAR > 0.7 sources if vet catalog unavailable.
     """
     grp     = clean.groupby("object_index")
@@ -133,7 +133,7 @@ def _pick_comps(clean: pd.DataFrame, tgt_obj, tgt_med: float,
         cands = per_src[per_src.index.isin(vet_good)].copy()
         if not cands.empty:
             med_sigma = float(cands["std_mag"].median())
-            cands = cands[cands["std_mag"] <= 2.0 * med_sigma]
+            cands = cands[cands["std_mag"] <= 4.0 * med_sigma]
     else:
         # No vet catalog: fall back to CLASS_STAR > 0.7
         cs_col = ("CLASS_STAR" if "CLASS_STAR" in clean.columns
@@ -154,11 +154,48 @@ def _pick_comps(clean: pd.DataFrame, tgt_obj, tgt_med: float,
     return cands.sort_values("delta").index[:n_comp].tolist()
 
 
+def _bin_series(mjd, mag, merr, bin_days: float):
+    """Bin a light curve into fixed bin_days windows anchored at the first epoch.
+
+    Returns (bin_mjd, bin_mag, bin_err). Each bin's magnitude is an inverse-variance
+    weighted mean (unweighted mean where errors are missing); bin_mjd is the mean
+    epoch in the bin; bin_err is the weighted error 1/sqrt(Σ 1/σ²), or the standard
+    error of the mean, whichever is larger. Only bins that contain at least one epoch
+    are returned — empty windows are dropped, not plotted.
+    """
+    mjd = np.asarray(mjd, dtype=float)
+    mag = np.asarray(mag, dtype=float)
+    merr = (np.asarray(merr, dtype=float) if merr is not None
+            else np.full(mag.shape, np.nan))
+    ok = np.isfinite(mjd) & np.isfinite(mag)
+    mjd, mag, merr = mjd[ok], mag[ok], merr[ok]
+    if mjd.size == 0 or bin_days <= 0:
+        return np.array([]), np.array([]), np.array([])
+    bin_idx = np.floor((mjd - mjd.min()) / bin_days).astype(int)
+    bmjd, bmag, berr = [], [], []
+    for b in np.unique(bin_idx):
+        m = bin_idx == b
+        x, y, e = mjd[m], mag[m], merr[m]
+        w = np.where(np.isfinite(e) & (e > 0), 1.0 / e ** 2, 0.0)
+        if w.sum() > 0:
+            ymean = float(np.sum(w * y) / np.sum(w))
+            ew = float(1.0 / np.sqrt(np.sum(w)))
+        else:
+            ymean = float(np.mean(y))
+            ew = np.nan
+        sem = float(np.std(y) / np.sqrt(len(y))) if len(y) > 1 else 0.0
+        bmjd.append(float(np.mean(x)))
+        bmag.append(ymean)
+        berr.append(float(np.nanmax([ew, sem])))
+    return np.array(bmjd), np.array(bmag), np.array(berr)
+
+
 def make_lightcurves(lc_path: Path, out_path: Path,
                           target_ra: float, target_dec: float,
                           tag: str = "",
                           vet_catalog: Path | None = None,
-                          n_comp: int = 5) -> None:
+                          n_comp: int = 5,
+                          bin_days: float = 50.0) -> None:
     """
     Two-panel light curve figure for one quadrant.
 
@@ -245,6 +282,17 @@ def make_lightcurves(lc_path: Path, out_path: Path,
                         fmt=".", color="black", ms=5, elinewidth=0.7, alpha=0.85)
 
     tgt_std = float(np.nanstd(mag[ok]))
+
+    # binned target LC: weighted mean per bin_days window, black squares (no line)
+    bmjd, bmag, berr = _bin_series(mjd[ok], mag[ok], merr[ok], bin_days)
+    if bmjd.size:
+        ax_top.errorbar(bmjd, bmag, yerr=berr, fmt="s-", mfc="none",
+                        mec="black", ecolor="black", color="black",
+                        mew=1.0, lw=1.2,
+                        ms=7, elinewidth=1.4, capsize=2, zorder=5,
+                        label=f"{bin_days:g}-day binned")
+        ax_top.legend(fontsize=8, loc="upper right")
+
     ax_top.set_ylim(ylim)
     ax_top.set_ylabel("Calibrated magnitude (AB)", fontsize=10)
     ax_top.set_xlabel("MJD", fontsize=10)
@@ -268,15 +316,24 @@ def make_lightcurves(lc_path: Path, out_path: Path,
                     if _MERR_COL in crow.columns else None)
             ax_bot.errorbar(crow["OBSMJD"].values, crow[_MAG_COL].values,
                             yerr=cerr, fmt=".", color=color,
-                            ms=5, elinewidth=0.6, alpha=0.8,
+                            ms=5, elinewidth=0.6, alpha=0.4,
                             label=f"Star {ci + 1}  med={comp_med:.2f}")
+
+            # binned comparison LC: squares in the star's colour, thicker errorbars
+            bcmjd, bcmag, bcerr = _bin_series(
+                crow["OBSMJD"].values, crow[_MAG_COL].values, cerr, bin_days)
+            if bcmjd.size:
+                ax_bot.errorbar(bcmjd, bcmag, yerr=bcerr, fmt="s-", mfc="none",
+                                mec=color, ecolor=color, color=color,
+                                mew=1.0, lw=1.2,
+                                ms=7, elinewidth=1.4, capsize=2, zorder=5)
 
         ax_bot.set_ylim(ylim)
         ax_bot.set_ylabel("Calibrated magnitude (AB)", fontsize=10)
         ax_bot.set_xlabel("MJD", fontsize=10)
         ax_bot.set_title(
             f"Nearest {len(comp_idxs)} IS_GOOD calibration stars  "
-            f"(excl. σ > 2× median)", fontsize=10)
+            f"(excl. σ > 4× median)", fontsize=10)
         ax_bot.tick_params(labelsize=9)
         ax_bot.legend(fontsize=8, loc="upper right")
         ax_bot.grid(True, alpha=0.2)

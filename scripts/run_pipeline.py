@@ -470,6 +470,9 @@ def main() -> None:
     p.add_argument("--no-target",   action="store_true",
                    help="Suppress target-source plots (lightcurves, precision target marker). "
                         "Use when processing a whole quadrant without a specific target.")
+    p.add_argument("--lc-bin-days", type=float, default=50.0,
+                   help="Bin width (days) for the binned light-curve overlay in the "
+                        "lightcurves plot (default: 50).")
     args = p.parse_args()
 
     if args.grabTNSobjs and (args.tns_cred_file is None or args.tns_key_file is None):
@@ -785,7 +788,8 @@ def main() -> None:
                                          plot_root / f"lightcurves_{tag}.png",
                                          args.ra, args.dec,
                                          tag=tag,
-                                         vet_catalog=vet_cat_arg)
+                                         vet_catalog=vet_cat_arg,
+                                         bin_days=args.lc_bin_days)
                 else:
                     logger.info(f"  [{tag}] no light-curve parquet — skipping precision/lightcurves")
 
