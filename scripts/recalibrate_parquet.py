@@ -472,15 +472,20 @@ def _load_vet_masks(base_dir, quadrants, refs, refs_coord):
 
 
 def _seed_vet_input(base_dir, quadrants, suffix):
-    """step_vet (and vet_calibration_stars.py) read the ref-named
-    lightcurves.parquet; for a sci-position run, copy the sci light curves to that
-    name so variable calibrators are flagged from the sci data being calibrated."""
+    """step_vet (via vet_calibration_stars.py) reads the ref-named
+    lightcurves.parquet and writes vet_calib_stars.fits into the ref Calibrated/
+    tree; a sci-only run has only Calibrated_sci/, so copy the sci light curves to
+    the ref name and create the ref Calibrated/ dir the vet output is written to."""
     for q in quadrants:
         d = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
              / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}")
         src = d / f"lightcurves{suffix}.parquet"
         if src.exists():
             shutil.copy2(src, d / "lightcurves.parquet")
+        # vet_calibration_stars.py writes to Calibrated/ (no suffix) but does not
+        # mkdir; in a sci-only run that tree is absent, so create it here.
+        _cal_quad_dir(base_dir, "Calibrated", q['field'], q['filtercode'],
+                      q['ccdid'], q['qid']).mkdir(parents=True, exist_ok=True)
 
 
 def recalibrate_file(path, args, auth):
