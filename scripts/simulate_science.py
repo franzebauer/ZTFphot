@@ -90,20 +90,30 @@ def build_simulated_image(source_img, source_cat, save_name,
             psf = makeGaussian(size=size, fwhm=fwhm, center=(size//2 + (x - x_), size//2 + (y - y_))) * _amp[i]
             paint_psf(data, y_, x_, psf)
 
+    # Track the target's fate this epoch so the pipeline can report *why* a target
+    # ends up with no photometry (matched to a neighbour, off-frame, or on a mask).
+    target_fate = None
     if target_ra is not None and target_dec is not None:
         tgt = SkyCoord(ra=target_ra, dec=target_dec, unit='deg')
-        if len(catalog) == 0 or tgt.separation(catalog).min().arcsec >= match_radius:
+        matched = bool(len(catalog) > 0 and
+                       tgt.separation(catalog).min().arcsec < match_radius)
+        in_frame = painted = False
+        if not matched:
             x, y = wcs.world_to_pixel(tgt)
             x_, y_ = int(np.floor(x)), int(np.floor(y))
-            if 0 <= x_ < ncols and 0 <= y_ < nrows and _valid_frac(y_, x_) > 0.5:
+            in_frame = bool(0 <= x_ < ncols and 0 <= y_ < nrows)
+            if in_frame and _valid_frac(y_, x_) > 0.5:
+                painted = True
                 psf = makeGaussian(size=size, fwhm=fwhm,
                                    center=(size//2 + (x - x_), size//2 + (y - y_))) * _FIXED_FLUX * _INJECT_BOOST
                 paint_psf(data, y_, x_, psf)
+        target_fate = {"matched": matched, "in_frame": in_frame, "painted": painted}
 
     data = np.clip(data, 0, 32767).astype(np.int16)
     data[nan_mask] = 0  # replace NaNs with 0; int16 has no NaN
     difimg[0].data = data
     difimg.writeto(save_name, overwrite=True)
+    return target_fate
 
 
 def main():

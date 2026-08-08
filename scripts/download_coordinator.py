@@ -562,9 +562,15 @@ def download_all(
     mjd_min: float | None = None,
     mjd_max: float | None = None,
     min_epochs_per_quad: int | None = None,
+    products: str = "all",
 ) -> dict:
     """
     Download all science and reference products for the given epochs.
+
+    products : "all" (default), "ref" (reference stacks only), or "sci" (science
+    difference images only). Splitting lets the caller download the small reference
+    products first, drop quadrants whose target falls outside the reference
+    footprint, and only then fetch the costly science images.
 
     Parameters
     ----------
@@ -618,8 +624,10 @@ def download_all(
     auth = get_auth(username, password)
 
     # Build task lists (hard-reject already removed by filter_epochs; pass False here)
-    sci_tasks = _build_sci_tasks(epochs, base_dir, bands, skip_flagged=False)
-    ref_tasks = _build_ref_tasks(epochs, base_dir, bands)
+    sci_tasks = (_build_sci_tasks(epochs, base_dir, bands, skip_flagged=False)
+                 if products in ("all", "sci") else [])
+    ref_tasks = (_build_ref_tasks(epochs, base_dir, bands)
+                 if products in ("all", "ref") else [])
     all_tasks = ref_tasks + sci_tasks   # refs first — smaller, quick to confirm auth works
 
     # Load previously recorded permanent 404s — skip them silently this run

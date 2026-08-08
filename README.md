@@ -224,7 +224,7 @@ data/                       ← created in your working directory on first run
 | Step | CLI name | Description |
 |------|----------|-------------|
 | Field lookup | `lookup` | Query IRSA for ZTF field/CCD/quadrant coverage at the target position |
-| Download | `download` | Fetch science and reference images from IRSA |
+| Download | `download` | Fetch science and reference images from IRSA. With `--ra/--dec`, the small reference products are fetched first and any quadrant whose target falls outside the reference detector area is **dropped before the costly science download** (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
 | Reference catalog | `catalog` | Build reference CSV from `refsexcat.fits`; checks target coverage (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
 | Simulate (ref-pos) | `simulate` | Build simulated detection images (PSF at reference positions; injects target if absent from reference catalog) |
 | SExtractor (ref-pos) | `sex` | Dual-image aperture photometry on difference images using reference positions |
@@ -236,7 +236,7 @@ data/                       ← created in your working directory on first run
 | Recalibrate | `recalibrate` | Second calibration pass; identical to `calibrate` but runs after `flatfield` to apply the spatial correction. Because it shares output paths with `calibrate`, it **always force-overwrites** them (no `--force` needed) — otherwise the existing `_cal.fits` would be skipped and the flatfield never applied. |
 | Light curves | `lightcurves` | Assemble per-object parquet light curves from calibrated FITS |
 | Merge | `merge` | Cross-calibrate and merge multiple quadrants per band |
-| Plots | `plots` | Diagnostic plots (spatial residuals, RMS, precision, light curves); generates a placeholder if the target is not found (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
+| Plots | `plots` | Diagnostic plots (spatial residuals, RMS, precision, light curves). The light-curve plot overlays a binned series (open squares, `--lc-bin-days`, default 50 d) on the target and on each comparison star. Generates a placeholder if the target is not found (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
 
 ---
 
@@ -259,6 +259,8 @@ data/                       ← created in your working directory on first run
 | `--verbose` | Increase log verbosity |
 | `--status` | Print file-existence summary and exit |
 | `--no-target` | Suppress target-source plots (`make_lightcurves`, target marker in precision plot). Use when processing a whole quadrant without a specific target of interest. |
+| `--footprint-margin-px PIX` | Reference-image edge margin for the footprint gate (default: 3 px ≈ the 4 px primary-aperture radius). A quadrant is dropped before its science download if the target lands within this many pixels of the `refimg` edge (or outside it). Larger = more conservative against edge artefacts; see [Target coverage diagnostics](#target-coverage-diagnostics). |
+| `--lc-bin-days DAYS` | Bin width (days) for the binned overlay in the light-curve plot (default: 50). |
 
 ### Download quality cuts
 
@@ -464,17 +466,18 @@ File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each
 
 ## Target coverage diagnostics
 
-ZTF field/CCD/quadrant assignments are based on nominal grid footprints. Occasionally a target that nominally falls within a quadrant's bounding box actually lands outside the active detector area — in a CCD gap or within ~50 px of the chip boundary. The pipeline detects and handles this at three levels.
+ZTF field/CCD/quadrant assignments are based on nominal grid footprints, and ztfquery returns every quadrant *near* the target — not only those that contain it. Occasionally a target that nominally falls within a quadrant's bounding box actually lands outside the active **reference** detector area — in a CCD gap or right at the chip boundary. The pipeline detects and handles this at four levels.
 
-### 1. Automatic WCS exclusion at startup
+### 1. Reference-footprint gate before the science download
 
-After discovering quadrants on disk, the pipeline opens each quadrant's `refimg.fits`, converts the target RA/Dec to pixel coordinates via the WCS, and drops any quadrant where the target falls outside the active area (with a 50 px margin):
+Whenever `--ra/--dec` is given, the pipeline fetches each candidate quadrant's small reference products first, opens `refimg.fits`, converts the target RA/Dec to pixel coordinates via the WCS, and drops any quadrant where the target lands outside the active area — within `--footprint-margin-px` pixels of the edge (default 3 ≈ the 4 px aperture radius):
 
 ```
-WARNING: 000396_zg_c15_q1: target pixel (24, 3071) outside active area [50:6094, 50:6094] — dropping quadrant
+000782_zi_c07_q3: target pixel (1420, 3277) outside active area [3:3069, 3:3077] — dropping quadrant
+000782/zi/ccd07/q3: target outside reference footprint — skipping quadrant
 ```
 
-This runs before any pipeline step and prevents wasted computation on non-covering quadrants. No manual intervention is needed.
+This runs in **both** the normal and `--purge-batch` download paths, **before any science images are fetched**, so an out-of-footprint quadrant costs neither the (bulk) science download nor spurious photometry. The discriminator is deliberately the *reference* footprint: individual science epochs dither and can cover a target that the reference coadd — which defines where sources are actually measured — does not. The same WCS check also re-runs at startup on any quadrants already on disk. No manual intervention is needed.
 
 ### 2. `target_sep_arcsec` metadata in the parquet
 
@@ -497,6 +500,21 @@ lightcurves_000396_zg_c15_q1.png   ← "Target not found: nearest source 117.9" 
 ```
 
 This makes the failure **visible in the plots directory** rather than requiring users to notice a missing file.
+
+### 4. Per-target reason codes (`target_status.csv` / `sources_status.csv`)
+
+For a `--ra/--dec` run the pipeline records **why** the target did or did not get photometry. The `simulate` step writes each epoch's target fate under `TargetStatus/` (a directory `--purge-batch` never deletes), and at the end of the run `<base-dir>/target_status.csv` is written as one line `ra,dec,reason` with the coarse, best-across-quadrants reason:
+
+| Reason | Meaning |
+|--------|---------|
+| `OK` | target landed in a light curve |
+| `MATCHED_NEIGHBOR` | within `--target-match-radius` of a catalog source (photometered as that source) |
+| `NOT_DETECTED` | painted into ≥1 simulated image but absent from the light curve |
+| `ON_MASK` | in-frame but never painted — `_valid_frac ≤ 0.5` every epoch (target pixel persistently masked) |
+| `OUTSIDE_FOOTPRINT` | never in-frame in any epoch |
+| `NO_EPOCHS` | no epochs were simulated |
+
+`batch_pipeline.py` collects these into `<results-dir>/sources_status.csv` (one `ra,dec,reason` line per target), so a whole batch's good/failed targets — and the reason for each failure — are summarised in one file.
 
 ---
 

@@ -115,14 +115,15 @@ def _write_assoc_catalog(ref_csv_path: Path, assoc_path: Path,
 
 def _simulate_one(args: tuple) -> tuple[str, bool, str]:
     """Worker function for parallel simulate step."""
-    diff_path, refcat_path, sim_path, target_ra, target_dec, match_radius = args
-    import sys
+    (diff_path, refcat_path, sim_path, target_ra, target_dec,
+     match_radius, base_dir, tag) = args
+    import sys, json
     _scripts = Path(__file__).parent
     if str(_scripts) not in sys.path:
         sys.path.insert(0, str(_scripts))
     try:
         from simulate_science import build_simulated_image
-        build_simulated_image(
+        fate = build_simulated_image(
             source_img=str(diff_path),
             source_cat=str(refcat_path),
             save_name=str(sim_path),
@@ -130,6 +131,13 @@ def _simulate_one(args: tuple) -> tuple[str, bool, str]:
             target_dec=target_dec,
             match_radius=match_radius,
         )
+        # Persist the target's per-epoch fate under TargetStatus/ (a dir purge_images
+        # never touches) so run_pipeline can classify why a target lacks photometry,
+        # even after --purge-batch deletes the diff/simulated images.
+        if fate is not None and base_dir is not None:
+            sdir = Path(base_dir) / "TargetStatus" / tag
+            sdir.mkdir(parents=True, exist_ok=True)
+            (sdir / f"{_ffd_from_path(diff_path)}.json").write_text(json.dumps(fate))
         return (str(sim_path), True, "ok")
     except Exception as exc:
         return (str(sim_path), False, str(exc))
@@ -150,6 +158,7 @@ def step_simulate(
         sci_dir = q["sci_dir"]; ref_dir = q["ref_dir"]
         field = q["field"]; fc = q["filtercode"]
         ccd = q["ccdid"]; qid_ = q["qid"]
+        tag = f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}"
 
         # Prefer the injection-augmented catalog when present so injected targets
         # are painted into the simulated detection image.
@@ -166,7 +175,8 @@ def step_simulate(
             sim_path = diff_path.with_name(diff_path.stem + "_simulated.fits")
             if sim_path.exists() and not force:
                 continue
-            tasks.append((diff_path, refcat_path, sim_path, target_ra, target_dec, match_radius))
+            tasks.append((diff_path, refcat_path, sim_path, target_ra, target_dec,
+                          match_radius, base_dir, tag))
 
     if not tasks:
         logger.info("simulate: all simulated images already exist")

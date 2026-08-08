@@ -65,10 +65,75 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
     print("  * Diff imgs = 0 is expected after --purge-batch or --clean-up")
 
 
+def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radius):
+    """Classify why the target does/does not have photometry and write one CSV line
+    to base_dir/target_status.csv (ra,dec,reason). Coarse reason, best outcome across
+    quadrants: OK, MATCHED_NEIGHBOR, NOT_DETECTED, ON_MASK, OUTSIDE_FOOTPRINT, NO_EPOCHS.
+
+    Aggregates the per-epoch target fate written under TargetStatus/ by the simulate
+    step (survives --purge-batch), then upgrades to OK if the target actually landed
+    in a final light curve."""
+    import json, numpy as np, pandas as pd
+
+    matched = False
+    n_in_frame = n_painted = n_epochs = 0
+    for q in quadrants:
+        tag = f"{q['field']:06d}_{q['filtercode']}_c{q['ccdid']:02d}_q{q['qid']}"
+        sdir = base_dir / "TargetStatus" / tag
+        for jf in (sdir.glob("*.json") if sdir.exists() else []):
+            try:
+                d = json.loads(jf.read_text())
+            except Exception:
+                continue
+            n_epochs   += 1
+            matched     = matched or bool(d.get("matched"))
+            n_in_frame += int(bool(d.get("in_frame")))
+            n_painted  += int(bool(d.get("painted")))
+
+    # OK if the target (real neighbour or injected sentinel) is in a light curve
+    found = False
+    for q in quadrants:
+        lc = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
+              / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / "lightcurves.parquet")
+        if not lc.exists():
+            continue
+        try:
+            df = pd.read_parquet(lc, columns=['ALPHAWIN_REF', 'DELTAWIN_REF',
+                                              'MAG_4_TOT_AB', 'object_index'])
+        except Exception:
+            continue
+        pos = df.groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']].first().dropna()
+        if pos.empty:
+            continue
+        sep = np.hypot((pd.to_numeric(pos['ALPHAWIN_REF'], errors='coerce') - target_ra)
+                       * np.cos(np.radians(target_dec)),
+                       pd.to_numeric(pos['DELTAWIN_REF'], errors='coerce') - target_dec) * 3600.0
+        j = int(np.nanargmin(sep.values))
+        if sep.values[j] <= match_radius:
+            oi = pos.index[j]
+            if np.isfinite(pd.to_numeric(df.loc[df['object_index'] == oi, 'MAG_4_TOT_AB'],
+                                         errors='coerce')).any():
+                found = True
+                break
+
+    if found:              reason = "OK"
+    elif matched:          reason = "MATCHED_NEIGHBOR"
+    elif n_painted > 0:    reason = "NOT_DETECTED"
+    elif n_in_frame > 0:   reason = "ON_MASK"
+    elif n_epochs > 0:     reason = "OUTSIDE_FOOTPRINT"
+    else:                  reason = "NO_EPOCHS"
+
+    out = base_dir / "target_status.csv"
+    out.write_text(f"{target_ra},{target_dec},{reason}\n")
+    logger.info(f"target status: {reason} "
+                f"(epochs={n_epochs}, in_frame={n_in_frame}, painted={n_painted}) → {out}")
+    return reason
+
+
 def _filter_quadrants_by_wcs(
     base_dir: Path, quadrants: list[dict],
     target_ra: float, target_dec: float,
-    margin: int = 50,
+    margin: int = 3,
 ) -> list[dict]:
     """
     Drop quadrants whose refimg.fits WCS places the target outside the active
@@ -76,8 +141,10 @@ def _filter_quadrants_by_wcs(
     whose nominal grid footprint contains the target but the actual image does
     not (e.g. CCD gap, edge roll-off).
 
-    margin : pixels to subtract from each edge before declaring out-of-bounds,
-             to guard against sources right on the border with unreliable PSFs.
+    margin : pixels to subtract from each edge before declaring out-of-bounds.
+             Default 3 px ≈ the 4 px primary-aperture radius, so a source that is
+             mostly on the detector is kept; edge artefacts within a few px of the
+             boundary may still affect its photometry.
     """
     from astropy.wcs import WCS
     from astropy.io import fits as _fits
@@ -269,6 +336,19 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                                 assoc_radius=args.assoc_radius_sci)
             continue
 
+        # Footprint gate: fetch only the (small) reference products first, then skip
+        # the entire quadrant if the target falls outside the reference detector area
+        # (chip edge/gap). This avoids downloading any of this quadrant's science
+        # images — the costly part — for a target it can never photometer.
+        if (args.ra is not None and args.dec is not None
+                and ("download" in steps or args.purge_batch)):
+            download_all(q_epochs, base_dir=base_dir, bands=[fc[1:]],
+                         max_workers=args.download_workers, products="ref")
+            if not _filter_quadrants_by_wcs(base_dir, [q], args.ra, args.dec,
+                                            margin=args.footprint_margin_px):
+                logger.info(f"{tag}: target outside reference footprint — skipping quadrant")
+                continue
+
         n_batches = math.ceil(len(q_epochs) / N)
         logger.info(f"─── purge-batch {tag}: {len(q_epochs)} epochs → "
                     f"{n_batches} batches of {N} ───")
@@ -413,6 +493,11 @@ def main() -> None:
                         "to a source in the calibrated catalog. One radius for both, so "
                         "a target with no nearby reference source is injected and then "
                         "recovered.")
+    p.add_argument("--footprint-margin-px",  type=int, default=3, metavar="PIX",
+                   help="Reference-image edge margin (pixels, default 3 ≈ the 4 px "
+                        "aperture radius): a quadrant is dropped before science download "
+                        "if the target lands within this many pixels of the refimg edge "
+                        "(or outside it). Larger = more conservative against edge artefacts.")
     p.add_argument("--assoc-radius",         type=float, default=0.5, metavar="ARCSEC",
                    help="SExtractor ASSOC radius for ref-pos photometry (default 0.5; "
                         "tight because PSFs sit at exact reference positions)")
@@ -530,9 +615,8 @@ def main() -> None:
                     sys.exit(f"Epochs cache not found: {cache_path}\nRun the lookup step first.")
                 epochs = pd.read_parquet(cache_path)
 
-            logger.info("─── download ───")
-            download_all(
-                epochs, base_dir=base_dir, bands=bands,
+            _dl_kw = dict(
+                base_dir=base_dir, bands=bands,
                 max_workers=args.workers,
                 skip_flagged=args.skip_flagged,
                 max_seeing=args.max_seeing,
@@ -541,6 +625,34 @@ def main() -> None:
                 mjd_max=args.mjd_max,
                 min_epochs_per_quad=args.min_epochs_per_quad,
             )
+            logger.info("─── download: reference products ───")
+            download_all(epochs, products="ref", **_dl_kw)
+
+            # Drop quadrants whose target falls outside the *reference* footprint
+            # BEFORE the costly science download. ztfquery returns every quadrant
+            # near the target; some do not actually contain it (chip edge / gap), and
+            # their science images are wasted downloads + spurious photometry.
+            if args.ra is not None and args.dec is not None:
+                _uq = epochs[["field", "filtercode", "ccdid", "qid"]].drop_duplicates()
+                _quads = [dict(field=int(r.field), filtercode=str(r.filtercode),
+                               ccdid=int(r.ccdid), qid=int(r.qid),
+                               ref_dir=(base_dir / "Reference" / f"{int(r.field):06d}"
+                                        / str(r.filtercode) / f"ccd{int(r.ccdid):02d}"
+                                        / f"q{int(r.qid)}"))
+                          for r in _uq.itertuples(index=False)]
+                _kept = _filter_quadrants_by_wcs(base_dir, _quads, args.ra, args.dec,
+                                                 margin=args.footprint_margin_px)
+                _keep = {(q["field"], q["filtercode"], q["ccdid"], q["qid"]) for q in _kept}
+                if len(_kept) < len(_quads):
+                    _mask = [(int(f), str(fc), int(c), int(qd)) in _keep
+                             for f, fc, c, qd in zip(epochs["field"], epochs["filtercode"],
+                                                     epochs["ccdid"], epochs["qid"])]
+                    epochs = epochs[_mask]
+                    logger.info(f"footprint filter: dropped {len(_quads) - len(_kept)} "
+                                f"out-of-footprint quadrant(s) before science download")
+
+            logger.info("─── download: science products ───")
+            download_all(epochs, products="sci", **_dl_kw)
 
     # ── Discover quadrants on disk ────────────────────────────────────────────
     quadrants = find_quadrants(base_dir, bands=args.bands,
@@ -562,7 +674,8 @@ def main() -> None:
             logger.warning(f"No epoch cache found at {cache_path} — using all quadrants on disk")
 
     if args.ra is not None and args.dec is not None:
-        quadrants = _filter_quadrants_by_wcs(base_dir, quadrants, args.ra, args.dec)
+        quadrants = _filter_quadrants_by_wcs(base_dir, quadrants, args.ra, args.dec,
+                                             margin=args.footprint_margin_px)
 
     if args.status:
         _print_status(base_dir, quadrants)
@@ -792,6 +905,10 @@ def main() -> None:
                                          bin_days=args.lc_bin_days)
                 else:
                     logger.info(f"  [{tag}] no light-curve parquet — skipping precision/lightcurves")
+
+    if not args.no_target and args.ra is not None and args.dec is not None:
+        _write_target_status(base_dir, quadrants, args.ra, args.dec,
+                             args.target_match_radius)
 
     logger.info(f"Done in {time.time() - t0:.1f}s")
     _print_status(base_dir, quadrants)

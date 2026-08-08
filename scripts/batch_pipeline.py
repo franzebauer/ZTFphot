@@ -110,6 +110,30 @@ def run_pipeline(pipeline: Path, ra: float, dec: float, work_dir: Path,
     return ret.returncode
 
 
+def append_status(work_dir: Path, results_dir: Path, ra: float, dec: float,
+                  ok: bool) -> None:
+    """Append this target's coarse status to results_dir/sources_status.csv.
+    Reads run_pipeline's per-run target_status.csv (ra,dec,reason) when present;
+    falls back to parquet presence (OK / NO_STATUS) if the run died before writing."""
+    reason = None
+    ts = Path(work_dir) / "target_status.csv"
+    if ts.exists():
+        try:
+            parts = ts.read_text().strip().split(",")
+            reason = parts[2] if len(parts) >= 3 else None
+        except Exception:
+            reason = None
+    if reason is None:
+        reason = "OK" if ok else "NO_STATUS"
+    master = Path(results_dir) / "sources_status.csv"
+    write_header = not master.exists()
+    with open(master, "a") as f:
+        if write_header:
+            f.write("ra,dec,reason\n")
+        f.write(f"{ra},{dec},{reason}\n")
+    print(f"  status: {reason}  → {master}")
+
+
 def save_results(work_dir: Path, ra: float, dec: float, bands: list,
                  results_dir: Path, both: bool = False) -> bool:
     """Copy final parquets and plots to results_dir. Returns True if any parquet found."""
@@ -425,6 +449,7 @@ def main():
             if rc != 0:
                 print(f"  WARNING: pipeline exit code {rc} — saving whatever exists")
             ok = save_results(work_dir, ra, dec, args.bands, results_dir, both=args.both)
+            append_status(work_dir, results_dir, ra, dec, ok)
 
         if ok:
             n_ok += 1
