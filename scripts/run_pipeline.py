@@ -388,28 +388,33 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 return _sci_sexcat_path(ffd).exists() or perm404
             return True
 
-        for bi, start in enumerate(range(0, len(q_epochs), N)):
-            batch    = q_epochs.iloc[start:start + N]
-            # Normalise filefracday to integer string to match filenames on disk
-            ffds     = [str(int(float(v))) for v in batch["filefracday"]]
-            is_first = (bi == 0)
+        import re as _re
+        _MAX_DL_RETRIES = 3          # discard an epoch after this many consecutive download-fail cycles
 
-            ffds_set = set(ffds)
+        def _process_batch(this_batch, is_first, label):
+            """Download + simulate/sex + purge one batch. Returns the set of ffds whose
+            science download failed transiently (503/timeout), so the caller can carry
+            them into the next cycle. Permanent 404s are NOT returned (never retried)."""
+            nonlocal catalog_done
+            ffds_set = {str(int(float(v))) for v in this_batch["filefracday"]}
 
-            # Skip batch entirely if all SEx catalogs exist (or epoch was a permanent 404)
-            if not args.force and all(_epoch_done(ffd) for ffd in ffds):
-                logger.info(f"  batch {bi+1}/{n_batches}: all SEx catalogs exist — skipping")
+            if not args.force and all(_epoch_done(f) for f in ffds_set):
+                logger.info(f"  {label}: all SEx catalogs exist — skipping")
                 purge_images(base_dir, [q], sci=True, ref=is_first,
                              filefracdays=ffds_set, dry_run=args.dry_run)
-                continue
+                return set()
 
-            logger.info(f"  batch {bi+1}/{n_batches}: {len(batch)} epochs")
+            logger.info(f"  {label}: {len(this_batch)} epochs")
 
-            # Download this batch (ref products skipped automatically if already on disk)
+            failed = set()
             if "download" in steps or args.purge_batch:
                 band = fc[1:]   # zg→g, zr→r, zi→i
-                download_all(batch, base_dir=base_dir, bands=[band],
-                             max_workers=args.download_workers)
+                res = download_all(this_batch, base_dir=base_dir, bands=[band],
+                                   max_workers=args.download_workers)
+                for url in res.get("failed_urls", []):     # transient failures only
+                    m = _re.search(r"ztf_(\d+)_", url)
+                    if m:
+                        failed.add(m.group(1))
 
             if "catalog" in steps and not catalog_done:
                 step_make_catalog(base_dir, [q], force=args.force)
@@ -440,10 +445,51 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                                 match_radius=args.target_match_radius,
                                 assoc_radius=args.assoc_radius_sci)
 
-            # Purge: always remove sci products; ref only after first batch
+            # Purge: always remove sci products; ref only after first batch. Failed
+            # epochs were never downloaded, so there is nothing of theirs to purge.
             purge_images(base_dir, [q],
                          sci=True, ref=is_first,
                          filefracdays=ffds_set, dry_run=args.dry_run)
+            return failed
+
+        def _update_carry(this_batch, failed, fail_count):
+            """Increment per-ffd failure counts, drop epochs that hit _MAX_DL_RETRIES,
+            and return the DataFrame of epochs to retry in the next cycle."""
+            keep = []
+            for _, row in this_batch.iterrows():
+                ffd = str(int(float(row["filefracday"])))
+                if ffd in failed:
+                    fail_count[ffd] = fail_count.get(ffd, 0) + 1
+                    if fail_count[ffd] >= _MAX_DL_RETRIES:
+                        logger.warning(f"  {field:06d}/{fc}/c{ccd:02d}/q{qid_} ffd {ffd}: "
+                                       f"discarded after {_MAX_DL_RETRIES} consecutive "
+                                       f"download-failure cycles")
+                    else:
+                        keep.append(row)
+                else:
+                    fail_count.pop(ffd, None)   # succeeded (or already done): reset streak
+            return pd.DataFrame(keep) if keep else q_epochs.iloc[0:0]
+
+        # Carry-forward retry: a batch's transient download failures are prepended to the
+        # NEXT batch (downloaded at the same rate), so IRSA gets time to recover between
+        # attempts. An epoch is only given up after _MAX_DL_RETRIES cycles in a row.
+        carry = q_epochs.iloc[0:0]
+        fail_count: dict[str, int] = {}
+        for bi, start in enumerate(range(0, len(q_epochs), N)):
+            batch      = q_epochs.iloc[start:start + N]
+            this_batch = pd.concat([carry, batch]).drop_duplicates(subset="filefracday")
+            failed     = _process_batch(this_batch, is_first=(bi == 0),
+                                        label=f"batch {bi+1}/{n_batches}"
+                                              + (f" (+{len(carry)} carried)" if len(carry) else ""))
+            carry = _update_carry(this_batch, failed, fail_count)
+
+        # Drain any epochs still failing from the final batches, giving each its
+        # remaining retry cycles before it is discarded.
+        drain = 0
+        while len(carry) > 0:
+            drain += 1
+            failed = _process_batch(carry, is_first=False, label=f"retry-drain {drain}")
+            carry = _update_carry(carry, failed, fail_count)
 
 
 def main() -> None:
