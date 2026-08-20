@@ -42,6 +42,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         'MAG_10_TOT_AB', 'MERR_10_TOT_AB',
         'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org',
         'MAG_4_REF',
+        'FLUX_4_TOT_AB', 'FERR_4_TOT_AB', 'FLUX_6_TOT_AB',   # bipolar μJy flux
         'APCORR46',
     ]
     int32_cols = [
@@ -73,8 +74,10 @@ _DROP_COLS = {
     'ALPHAWIN_J2000', 'DELTAWIN_J2000',   # dropped in ref-pos; renamed to ALPHA_SCI/DELTA_SCI in sci-pos
     'FLAGS',                               # = FLAG_SE_DIF; dropped
     'FLUX_3_TOT_AB', 'FERR_3_TOT_AB',
-    'FLUX_4_TOT_AB', 'FERR_4_TOT_AB',
-    'FLUX_6_TOT_AB', 'FERR_6_TOT_AB',
+    # FLUX_4_TOT_AB / FERR_4_TOT_AB / FLUX_6_TOT_AB are KEPT — bipolar μJy flux
+    # (sign-preserving; the negative-flux epochs the magnitude drops to NaN). 6px
+    # carried for the aperture-correction check.
+    'FERR_6_TOT_AB',
     'FLUX_10_TOT_AB', 'FERR_10_TOT_AB',
     'FLUX_AUTO_TOT_AB', 'FERR_AUTO_TOT_AB',
     'FLUX_3_DIF', 'FERR_3_DIF',

@@ -345,3 +345,137 @@ def make_lightcurves(lc_path: Path, out_path: Path,
     fig.savefig(out_path, dpi=130, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
     logger.info(f"  lightcurves → {out_path}")
+
+
+_FLUX_COL = "FLUX_4_TOT_AB"
+_FERR_COL = "FERR_4_TOT_AB"
+
+
+def make_lightcurves_flux(lc_path: Path, out_path: Path,
+                          target_ra: float, target_dec: float,
+                          tag: str = "",
+                          vet_catalog: Path | None = None,
+                          n_comp: int = 5,
+                          bin_days: float = 50.0) -> None:
+    """
+    Flux (μJy) equivalent of make_lightcurves. Difference photometry is bipolar, so
+    this shows the fainter-than-reference (negative-flux) epochs the magnitude drops
+    to NaN. Top: target FLUX_4_TOT_AB vs MJD with a zero line; bottom: comparison
+    stars. Each panel auto-scales (the target sits near 0 μJy, comps near their
+    reference flux).
+    """
+    try:
+        df = pd.read_parquet(lc_path)
+    except Exception as e:
+        logger.warning(f"  cannot read {lc_path}: {e}")
+        return
+    if _FLUX_COL not in df.columns:
+        logger.info(f"  {_FLUX_COL} missing — skipping flux lightcurve plot")
+        return
+
+    df[_FLUX_COL] = pd.to_numeric(df[_FLUX_COL], errors="coerce")
+    clean = df[df["INFOBITS_DIF"] == 0].copy()
+
+    tgt_coord = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
+    tgt_obj, tgt_med, sep_arcsec = _find_target(clean, tgt_coord)
+    if tgt_obj is None:
+        logger.warning(f"  target not found within 3\" in {tag} (nearest: {sep_arcsec:.1f}\") [flux]")
+        _make_no_target_plot(out_path, tag, target_ra, target_dec, sep_arcsec)
+        return
+
+    tgt_rows = (clean[clean["object_index"] == tgt_obj].sort_values("OBSMJD").copy())
+    tgt_rows = tgt_rows[np.isfinite(pd.to_numeric(tgt_rows[_FLUX_COL], errors="coerce"))]
+    if tgt_rows.empty:
+        return
+
+    vet_good  = _load_vet_good_indices(vet_catalog, clean)
+    comp_idxs = _pick_comps(clean, tgt_obj, tgt_med, vet_good, n_comp)
+
+    fig = plt.figure(figsize=(14, 10))
+    gs  = fig.add_gridspec(2, 2, width_ratios=[20, 1], hspace=0.32, wspace=0.05)
+    ax_top = fig.add_subplot(gs[0, 0])
+    ax_bot = fig.add_subplot(gs[1, 0])
+    cax    = fig.add_subplot(gs[0, 1])
+    fig.add_subplot(gs[1, 1]).set_visible(False)
+    fig.suptitle(f"Flux light curve — {tag}  (target RA={target_ra:.4f} Dec={target_dec:+.4f})",
+                 fontsize=11)
+
+    mjd  = tgt_rows["OBSMJD"].values
+    flux = pd.to_numeric(tgt_rows[_FLUX_COL], errors="coerce").values
+    ferr = (pd.to_numeric(tgt_rows[_FERR_COL], errors="coerce").values
+            if _FERR_COL in tgt_rows.columns else np.full(len(flux), np.nan))
+    ml   = (pd.to_numeric(tgt_rows["MAGLIM"], errors="coerce").values
+            if "MAGLIM" in tgt_rows.columns else np.full(len(flux), np.nan))
+    ok = np.isfinite(flux) & np.isfinite(mjd)
+
+    ax_top.axhline(0.0, color="grey", lw=0.8, ls="--", zorder=1)
+    if np.any(np.isfinite(ml[ok])):
+        c_norm = mcolors.Normalize(vmin=np.nanpercentile(ml[ok], 5),
+                                   vmax=np.nanpercentile(ml[ok], 95))
+        sc = ax_top.scatter(mjd[ok], flux[ok], c=ml[ok], cmap="plasma",
+                            norm=c_norm, s=20, zorder=3)
+        fig.colorbar(sc, cax=cax, label="MAGLIM (mag)")
+        if np.any(np.isfinite(ferr[ok])):
+            ax_top.errorbar(mjd[ok], flux[ok], yerr=ferr[ok], fmt="none",
+                            ecolor="grey", elinewidth=0.6, alpha=0.5, zorder=2)
+    else:
+        cax.set_visible(False)
+        ax_top.errorbar(mjd[ok], flux[ok],
+                        yerr=ferr[ok] if np.any(np.isfinite(ferr[ok])) else None,
+                        fmt=".", color="black", ms=5, elinewidth=0.7, alpha=0.85)
+
+    fv = flux[ok]
+    if len(fv) >= 2:
+        lo, hi = float(np.percentile(fv, 2)), float(np.percentile(fv, 98))
+        pad = 0.1 * (hi - lo + 1e-9)
+        ax_top.set_ylim(lo - pad, hi + pad)
+
+    bmjd, bflux, bferr = _bin_series(mjd[ok], flux[ok], ferr[ok], bin_days)
+    if bmjd.size:
+        ax_top.errorbar(bmjd, bflux, yerr=bferr, fmt="s-", mfc="none",
+                        mec="black", ecolor="black", color="black", mew=1.0, lw=1.2,
+                        ms=7, elinewidth=1.4, capsize=2, zorder=5,
+                        label=f"{bin_days:g}-day binned")
+        ax_top.legend(fontsize=8, loc="upper right")
+
+    ax_top.set_ylabel("Flux (μJy)", fontsize=10)
+    ax_top.set_xlabel("MJD", fontsize=10)
+    ax_top.set_title(
+        f"Target  mean={np.nanmean(fv):.1f} μJy  σ={np.nanstd(fv):.1f} μJy  "
+        f"N={int(ok.sum())}  (finite mag: {int(np.isfinite(pd.to_numeric(tgt_rows['MAG_4_TOT_AB'], errors='coerce')).sum()) if 'MAG_4_TOT_AB' in tgt_rows.columns else 0})",
+        fontsize=10)
+    ax_top.tick_params(labelsize=9)
+    ax_top.grid(True, alpha=0.2)
+
+    if comp_idxs:
+        ax_bot.axhline(0.0, color="grey", lw=0.8, ls="--", zorder=1)
+        for ci, (comp_oi, color) in enumerate(zip(comp_idxs, _COMP_COLORS)):
+            crow = clean[clean["object_index"] == comp_oi].sort_values("OBSMJD").copy()
+            cfv = pd.to_numeric(crow[_FLUX_COL], errors="coerce").values
+            keep = np.isfinite(cfv)
+            if not keep.any():
+                continue
+            cmjd = crow["OBSMJD"].values[keep]; cflux = cfv[keep]
+            cferr = (pd.to_numeric(crow[_FERR_COL], errors="coerce").values[keep]
+                     if _FERR_COL in crow.columns else None)
+            ax_bot.errorbar(cmjd, cflux, yerr=cferr, fmt=".", color=color,
+                            ms=5, elinewidth=0.6, alpha=0.4,
+                            label=f"Star {ci + 1}  med={np.nanmedian(cflux):.0f}")
+            bcmjd, bcf, bcfe = _bin_series(cmjd, cflux, cferr, bin_days)
+            if bcmjd.size:
+                ax_bot.errorbar(bcmjd, bcf, yerr=bcfe, fmt="s-", mfc="none",
+                                mec=color, ecolor=color, color=color, mew=1.0, lw=1.2,
+                                ms=7, elinewidth=1.4, capsize=2, zorder=5)
+        ax_bot.set_ylabel("Flux (μJy)", fontsize=10)
+        ax_bot.set_xlabel("MJD", fontsize=10)
+        ax_bot.set_title(f"Nearest {len(comp_idxs)} IS_GOOD calibration stars", fontsize=10)
+        ax_bot.tick_params(labelsize=9)
+        ax_bot.legend(fontsize=8, loc="upper right")
+        ax_bot.grid(True, alpha=0.2)
+    else:
+        ax_bot.set_visible(False)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=130, bbox_inches="tight", pad_inches=0.05)
+    plt.close(fig)
+    logger.info(f"  flux lightcurves → {out_path}")

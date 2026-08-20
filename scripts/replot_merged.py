@@ -38,7 +38,7 @@ def main() -> None:
     if str(args.scripts) not in sys.path:
         sys.path.insert(0, str(args.scripts))
 
-    from plot_diagnostics import make_precision, make_lightcurves
+    from plot_diagnostics import make_precision, make_lightcurves, make_lightcurves_flux
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -73,7 +73,11 @@ def main() -> None:
                                  args.out_dir / f"lightcurves_{tag}.png",
                                  args.ra, args.dec, tag=tag,
                                  bin_days=args.bin_days)
-                print(f"  lightcurves_{tag}.png")
+                make_lightcurves_flux(tmp_pq,
+                                      args.out_dir / f"lightcurves_{tag}_flux.png",
+                                      args.ra, args.dec, tag=tag,
+                                      bin_days=args.bin_days)
+                print(f"  lightcurves_{tag}.png (+_flux)")
             except Exception as e:
                 print(f"  WARNING: lightcurves failed for {tag}: {e}")
 

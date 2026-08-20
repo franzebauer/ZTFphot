@@ -15,7 +15,7 @@ import logging
 from plot_residuals   import make_spatial_rms, make_spatial_iqr
 from plot_calibration import make_rms
 from plot_precision   import make_precision
-from plot_lightcurve  import make_lightcurves
+from plot_lightcurve  import make_lightcurves, make_lightcurves_flux
 
 logger = logging.getLogger(__name__)
 
@@ -23,5 +23,5 @@ __all__ = [
     "make_spatial_rms", "make_spatial_iqr",
     "make_rms",
     "make_precision",
-    "make_lightcurves",
+    "make_lightcurves", "make_lightcurves_flux",
 ]

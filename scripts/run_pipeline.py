@@ -68,11 +68,13 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
 def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radius):
     """Classify why the target does/does not have photometry and write one CSV line
     to base_dir/target_status.csv (ra,dec,reason). Coarse reason, best outcome across
-    quadrants: OK, MATCHED_NEIGHBOR, NOT_DETECTED, ON_MASK, OUTSIDE_FOOTPRINT, NO_EPOCHS.
+    quadrants: OK, MATCHED_NEIGHBOR, NOT_RECOVERED, ON_MASK, OUTSIDE_FOOTPRINT, NO_EPOCHS.
 
+    OK means the target has a light curve, i.e. at least one finite FLUX measurement —
+    positive OR negative (a fainter-than-reference detection is still a detection).
+    NOT_RECOVERED means it was painted but SExtractor/ASSOC never produced any row.
     Aggregates the per-epoch target fate written under TargetStatus/ by the simulate
-    step (survives --purge-batch), then upgrades to OK if the target actually landed
-    in a final light curve."""
+    step (survives --purge-batch), then upgrades to OK from the final light curve."""
     import json, numpy as np, pandas as pd
 
     matched = False
@@ -97,9 +99,16 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
               / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / "lightcurves.parquet")
         if not lc.exists():
             continue
+        # A finite FLUX is a real measurement — including the negative-flux
+        # (fainter-than-reference) detections the magnitude drops to NaN. Difference
+        # photometry is bipolar, so "detected" must not require a positive magnitude.
+        # Fall back to magnitude for parquets written before the flux column existed.
         try:
+            import pyarrow.parquet as _pq
+            _meas = 'FLUX_4_TOT_AB' if 'FLUX_4_TOT_AB' in set(_pq.read_schema(lc).names) \
+                    else 'MAG_4_TOT_AB'
             df = pd.read_parquet(lc, columns=['ALPHAWIN_REF', 'DELTAWIN_REF',
-                                              'MAG_4_TOT_AB', 'object_index'])
+                                              _meas, 'object_index'])
         except Exception:
             continue
         pos = df.groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']].first().dropna()
@@ -111,14 +120,14 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
         j = int(np.nanargmin(sep.values))
         if sep.values[j] <= match_radius:
             oi = pos.index[j]
-            if np.isfinite(pd.to_numeric(df.loc[df['object_index'] == oi, 'MAG_4_TOT_AB'],
+            if np.isfinite(pd.to_numeric(df.loc[df['object_index'] == oi, _meas],
                                          errors='coerce')).any():
                 found = True
                 break
 
     if found:              reason = "OK"
     elif matched:          reason = "MATCHED_NEIGHBOR"
-    elif n_painted > 0:    reason = "NOT_DETECTED"
+    elif n_painted > 0:    reason = "NOT_RECOVERED"   # painted but no measurement produced
     elif n_in_frame > 0:   reason = "ON_MASK"
     elif n_epochs > 0:     reason = "OUTSIDE_FOOTPRINT"
     else:                  reason = "NO_EPOCHS"
@@ -544,9 +553,11 @@ def main() -> None:
                         "aperture radius): a quadrant is dropped before science download "
                         "if the target lands within this many pixels of the refimg edge "
                         "(or outside it). Larger = more conservative against edge artefacts.")
-    p.add_argument("--assoc-radius",         type=float, default=0.5, metavar="ARCSEC",
-                   help="SExtractor ASSOC radius for ref-pos photometry (default 0.5; "
-                        "tight because PSFs sit at exact reference positions)")
+    p.add_argument("--assoc-radius",         type=float, default=1.0, metavar="ARCSEC",
+                   help="SExtractor ASSOC radius for ref-pos photometry (default 1.0). Wide "
+                        "enough that a blend-shifted detection centroid (injected target near "
+                        "a reference source) still matches the target; safe because real ZTF "
+                        "sources are typically >5 arcsec apart.")
     p.add_argument("--assoc-radius-sci",     type=float, default=1.5, metavar="ARCSEC",
                    help="SExtractor ASSOC radius for sci-pos photometry (default 1.5; "
                         "wider to allow epoch-to-epoch science-centroid shifts)")
@@ -897,7 +908,7 @@ def main() -> None:
             from plot_diagnostics import (
                 make_spatial_rms, make_spatial_iqr,
                 make_rms, make_precision,
-                make_lightcurves,
+                make_lightcurves, make_lightcurves_flux,
             )
 
             plot_root = base_dir / f"Plots{suffix}"
@@ -949,6 +960,12 @@ def main() -> None:
                                          tag=tag,
                                          vet_catalog=vet_cat_arg,
                                          bin_days=args.lc_bin_days)
+                        make_lightcurves_flux(lc_path,
+                                              plot_root / f"lightcurves_{tag}_flux.png",
+                                              args.ra, args.dec,
+                                              tag=tag,
+                                              vet_catalog=vet_cat_arg,
+                                              bin_days=args.lc_bin_days)
                 else:
                     logger.info(f"  [{tag}] no light-curve parquet — skipping precision/lightcurves")
 

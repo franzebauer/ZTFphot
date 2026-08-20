@@ -507,9 +507,9 @@ For a `--ra/--dec` run the pipeline records **why** the target did or did not ge
 
 | Reason | Meaning |
 |--------|---------|
-| `OK` | target landed in a light curve |
+| `OK` | target has a light curve — ≥1 finite **flux** measurement, **positive or negative** (a fainter-than-reference detection is still a detection; difference photometry is bipolar) |
 | `MATCHED_NEIGHBOR` | within `--target-match-radius` of a catalog source (photometered as that source) |
-| `NOT_DETECTED` | painted into ≥1 simulated image but absent from the light curve |
+| `NOT_RECOVERED` | painted into ≥1 simulated image but SExtractor/ASSOC never produced any row |
 | `ON_MASK` | in-frame but never painted — `_valid_frac ≤ 0.5` every epoch (target pixel persistently masked) |
 | `OUTSIDE_FOOTPRINT` | never in-frame in any epoch |
 | `NO_EPOCHS` | no epochs were simulated |

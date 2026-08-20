@@ -47,9 +47,10 @@ def build_simulated_image(source_img, source_cat, save_name,
     # size = (np.ceil(fwhm) // 2 * 4 + 1)
 
     _FIXED_FLUX   = 1000  # baseline detection amplitude; only positions matter for photometry
-    _INJECT_BOOST = 5     # injected/target sources painted brighter so they and their
-                          # neighbours are cleanly detected, without a large boost that
-                          # would bleed into neighbours or shift the injected centroid
+    _INJECT_BOOST = 10    # injected/target sources painted brighter so they dominate a blend
+                          # with a close reference source: a higher ratio pulls the merged
+                          # detection centroid onto the target so ASSOC recovers it (10:1 at
+                          # ~3 px separation → ~0.3" offset, inside --assoc-radius)
 
     wcs = WCS(difimg[0].header)
     _tbl = Table(catalog[1].data)

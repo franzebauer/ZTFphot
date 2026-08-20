@@ -557,9 +557,15 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             interpolation = np.interp(Q_cal[k], median_mag_per_bin, rms_per_bin)
             Q_err[k]      = np.array([max(i, j) for i, j in zip(interpolation, errmagQi[k])])
 
-            flux_ab[k]    = 10.0**(-0.4 * (np.float64(Q_cal[k]) + 48.6))
-            fluxerr_ab[k] = (0.4 * np.log(10)
-                             * 10.0**(-0.4 * (Q_cal[k] + 48.6)) * Q_err[k])
+            # Bipolar flux (μJy) from the total instrumental flux (ref+diff) placed on
+            # the ZTF per-epoch zeropoint. Sign-preserving: epochs fainter than the
+            # reference survive here as NEGATIVE flux, whereas the magnitude is NaN —
+            # so the flux mean is unbiased where the magnitude median is censored.
+            # Calibrated by the ZTF ZP only (not the staged poly/flatfield/faint terms
+            # that adjust the magnitude); a proper flux calibration is a later step.
+            _zp_ujy       = 10.0**(-0.4 * (np.float64(magzp_dif) - 23.9))
+            flux_ab[k]    = np.float64(flux_tot[k]) * _zp_ujy
+            fluxerr_ab[k] = np.float64(flux_dif_err_tmp) * _zp_ujy
 
             rms     = np.sum((diff - fit)**2) / len(maginst)
             chi_red = (np.sum(((diff - fit)**2) / (errf**2 + var_fit)) / (len(maginst) - 2))
