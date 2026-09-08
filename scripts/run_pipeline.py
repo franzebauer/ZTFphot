@@ -68,10 +68,13 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
 def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radius):
     """Classify why the target does/does not have photometry and write one CSV line
     to base_dir/target_status.csv (ra,dec,reason). Coarse reason, best outcome across
-    quadrants: OK, MATCHED_NEIGHBOR, NOT_RECOVERED, ON_MASK, OUTSIDE_FOOTPRINT, NO_EPOCHS.
+    quadrants: OK, LACKS_REFIMG_DETECTION, MATCHED_NEIGHBOR, NOT_RECOVERED, ON_MASK,
+    OUTSIDE_FOOTPRINT, NO_EPOCHS.
 
     OK means the target has a light curve, i.e. at least one finite FLUX measurement —
     positive OR negative (a fainter-than-reference detection is still a detection).
+    LACKS_REFIMG_DETECTION is OK but with no reference source (MAG_4_REF NaN), so its
+    FLUX_4_TOT_AB is bipolar *difference* flux, not total — treat with care (blends).
     NOT_RECOVERED means it was painted but SExtractor/ASSOC never produced any row.
     Aggregates the per-epoch target fate written under TargetStatus/ by the simulate
     step (survives --purge-batch), then upgrades to OK from the final light curve."""
@@ -92,8 +95,12 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
             n_in_frame += int(bool(d.get("in_frame")))
             n_painted  += int(bool(d.get("painted")))
 
-    # OK if the target (real neighbour or injected sentinel) is in a light curve
+    # OK if the target (real neighbour or injected sentinel) is in a light curve.
+    # Also record whether the target has a reference-image detection: a NaN MAG_4_REF
+    # means no reference source, so FLUX_4_TOT_AB is the (bipolar) *difference* flux,
+    # not a total — the user must treat it accordingly (and watch for blends).
     found = False
+    tgt_has_ref = True
     for q in quadrants:
         lc = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
               / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / "lightcurves.parquet")
@@ -105,10 +112,12 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
         # Fall back to magnitude for parquets written before the flux column existed.
         try:
             import pyarrow.parquet as _pq
-            _meas = 'FLUX_4_TOT_AB' if 'FLUX_4_TOT_AB' in set(_pq.read_schema(lc).names) \
-                    else 'MAG_4_TOT_AB'
-            df = pd.read_parquet(lc, columns=['ALPHAWIN_REF', 'DELTAWIN_REF',
-                                              _meas, 'object_index'])
+            _cols = set(_pq.read_schema(lc).names)
+            _meas = 'FLUX_4_TOT_AB' if 'FLUX_4_TOT_AB' in _cols else 'MAG_4_TOT_AB'
+            _want = ['ALPHAWIN_REF', 'DELTAWIN_REF', _meas, 'object_index']
+            if 'MAG_4_REF' in _cols:
+                _want.append('MAG_4_REF')
+            df = pd.read_parquet(lc, columns=_want)
         except Exception:
             continue
         pos = df.groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']].first().dropna()
@@ -120,12 +129,17 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
         j = int(np.nanargmin(sep.values))
         if sep.values[j] <= match_radius:
             oi = pos.index[j]
-            if np.isfinite(pd.to_numeric(df.loc[df['object_index'] == oi, _meas],
-                                         errors='coerce')).any():
+            _trow = df.loc[df['object_index'] == oi]
+            if 'MAG_4_REF' in df.columns:
+                tgt_has_ref = bool(np.isfinite(
+                    pd.to_numeric(_trow['MAG_4_REF'], errors='coerce')).any())
+            if np.isfinite(pd.to_numeric(_trow[_meas], errors='coerce')).any():
                 found = True
                 break
 
-    if found:              reason = "OK"
+    if found and not tgt_has_ref:
+                           reason = "LACKS_REFIMG_DETECTION"  # has flux, but no reference source
+    elif found:            reason = "OK"
     elif matched:          reason = "MATCHED_NEIGHBOR"
     elif n_painted > 0:    reason = "NOT_RECOVERED"   # painted but no measurement produced
     elif n_in_frame > 0:   reason = "ON_MASK"
@@ -892,7 +906,8 @@ def main() -> None:
         if "lightcurves" in steps:
             step_lightcurves(base_dir, quadrants, force=args.force,
                              use_calibrated=("calibrate" in steps or "recalibrate" in steps),
-                             suffix=suffix, target_ra=args.ra, target_dec=args.dec)
+                             suffix=suffix, target_ra=args.ra, target_dec=args.dec,
+                             target_match_radius=args.target_match_radius)
 
         if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
                                               target_ra=args.ra, target_dec=args.dec,
@@ -934,6 +949,8 @@ def main() -> None:
                                      plot_root / f"spatial_rms_{tag}.png", tag)
                     make_spatial_iqr(resid_dir,
                                      plot_root / f"spatial_IQR_{tag}.png", tag)
+                    # (flux variants intentionally not emitted — the fractional-flux
+                    # residual diverges for faint sources; mmag is the right unit here)
                 else:
                     logger.info(f"  [{tag}] no residual NPZ files — skipping spatial_rms/IQR")
 

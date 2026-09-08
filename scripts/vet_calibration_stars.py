@@ -5,8 +5,11 @@ Flag variable calibration stars using their lightcurve scatter relative to
 the local photometric precision locus.
 
 This directly corresponds to what is visible in Fig 3: sources whose
-magnitude std across clean epochs exceeds threshold × the running-median
-locus at that magnitude are flagged as unreliable calibrators.
+UNBIASED bipolar-flux scatter (σ of FLUX_4_TOT_AB in μJy, which keeps the
+fainter-than-reference epochs the magnitude drops to NaN) across clean epochs
+exceeds threshold × the running-median locus at that magnitude are flagged as
+unreliable calibrators. Using flux σ (not the censored magnitude std) catches
+variables that dip faint, which the magnitude-based test used to miss.
 
 Sources must pass all calibration eligibility criteria to be considered:
   CLASS_STAR_REF >= 0.7  (stellar morphology)
@@ -16,12 +19,12 @@ Sources must pass all calibration eligibility criteria to be considered:
 
 Algorithm
 ---------
-1. Load lightcurves.parquet; compute per-source median mag and std across
-   FLAG_CLEAN & FLAG_DET epochs.
+1. Load lightcurves.parquet; compute per-source median and std of the bipolar
+   flux (FLUX_4_TOT_AB, μJy) across clean epochs.
 2. Restrict to calibration-eligible sources (above criteria).
 3. Match to reference catalog to get q_mag.
-4. Fit locus: running median of std in 0.5-mag bins (robust against outliers).
-5. Flag sources with std > threshold × locus(q_mag).
+4. Fit locus: running median of σ_flux in 0.5-mag bins (robust against outliers).
+5. Flag sources with σ_flux > threshold × locus(q_mag).
 6. Write vet_calib_stars_{field}_{band}_c{ccd}_q{qid}.fits with IS_GOOD column.
 
 Usage
@@ -47,19 +50,20 @@ def _flux_to_mag(flux):
         return np.where(flux > 0, -2.5 * np.log10(flux) - 48.6, np.nan)
 
 
-def fit_locus(q_mag, std_mmag, bin_width=0.5, mag_lo=14.0, mag_hi=19.0):
-    """Running-median locus of std vs reference magnitude (in mmag).
+def fit_locus(q_mag, std_vals, bin_width=0.5, mag_lo=14.0, mag_hi=19.0):
+    """Running-median locus of per-source scatter vs reference magnitude.
 
+    `std_vals` is in whatever unit the caller passes (μJy flux σ here).
     Returns (bin_centers, bin_medians) for use with np.interp.
     Uses median, so a minority of variable stars don't inflate the locus.
     """
     edges = np.arange(mag_lo, mag_hi + bin_width, bin_width)
     centers, medians = [], []
     for lo, hi in zip(edges[:-1], edges[1:]):
-        m = (q_mag >= lo) & (q_mag < hi) & np.isfinite(std_mmag) & (std_mmag > 0)
+        m = (q_mag >= lo) & (q_mag < hi) & np.isfinite(std_vals) & (std_vals > 0)
         if m.sum() >= 5:
             centers.append(0.5 * (lo + hi))
-            medians.append(float(np.median(std_mmag[m])))
+            medians.append(float(np.median(std_vals[m])))
     return np.array(centers), np.array(medians)
 
 
@@ -85,16 +89,19 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
     # ── Load and aggregate lightcurves ────────────────────────────────────────
     df = pd.read_parquet(parquet_path)
     clean = df[df['INFOBITS_DIF'] == 0].copy()
-    clean['mag'] = pd.to_numeric(clean['MAG_4_TOT_AB'], errors='coerce')
-    clean = clean[clean['mag'].notna()]
+    # Vet on the UNBIASED bipolar flux scatter (μJy), not the censored magnitude std:
+    # keeping every clean epoch — including the fainter-than-reference (negative-flux)
+    # ones the magnitude drops to NaN — so a source that dips faint is no longer hidden.
+    clean['flux'] = pd.to_numeric(clean['FLUX_4_TOT_AB'], errors='coerce')
+    clean = clean[clean['flux'].notna()]
 
     grp   = clean.groupby('object_index')
     stats = grp.agg(
         ra        = ('ALPHAWIN_REF', 'first'),
         dec       = ('DELTAWIN_REF', 'first'),
-        n         = ('mag', 'count'),
-        med_mag   = ('mag', 'median'),
-        std_mag   = ('mag', 'std'),
+        n         = ('flux', 'count'),
+        med_flux  = ('flux', 'median'),
+        std_flux  = ('flux', 'std'),
     ).reset_index()
 
     # FLAG_SE_REF still stored per-source in the parquet
@@ -132,7 +139,7 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
         (stats['q_mag'] > 14.0) &
         (stats['q_mag'] < 19.0) &
         (stats['n'] >= min_epochs) &
-        stats['std_mag'].notna()
+        stats['std_flux'].notna()
     ].copy()
 
     print(f"\nVetting {field_str}/{band}/ccd{ccd_str}/q{qid}")
@@ -146,37 +153,61 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
         sys.exit(1)
 
     # ── Fit precision locus ───────────────────────────────────────────────────
-    std_mmag = calib['std_mag'].values * 1000
-    bin_centers, bin_medians = fit_locus(calib['q_mag'].values, std_mmag)
+    # Locus = the MEDIAN σ_flux of the whole population at each magnitude, fit over ALL
+    # well-sampled sources with NO CLASS_STAR/FLAG_SE cuts and across the FULL magnitude
+    # range. Restricting it to unsaturated stars left the bright bins empty (bright stars
+    # are saturated → FLAG_SE≠0), so the locus started at 14 mag and every ~13-mag source
+    # was compared against a locus ~5× too low and flagged. Using the full population
+    # makes the locus self-calibrating: a source counts as variable only if it scatters
+    # more than its peers of the same brightness. The median is robust to the variable
+    # minority, so including them does not inflate it appreciably.
+    locus_src = stats[(stats['n'] >= min_epochs) &
+                      stats['std_flux'].notna() &
+                      stats['q_mag'].notna()]
+    bin_centers, bin_medians = fit_locus(locus_src['q_mag'].values,
+                                         locus_src['std_flux'].values,
+                                         mag_lo=12.0, mag_hi=22.5)
 
     if len(bin_centers) < 3:
         print("ERROR: too few populated magnitude bins to fit locus.")
         sys.exit(1)
 
-    print(f"\n  Precision locus (q_mag, median std):")
+    print(f"\n  Precision locus (q_mag, median σ_flux):")
     for c, m in zip(bin_centers, bin_medians):
-        print(f"    {c:.1f} mag  →  {m:.1f} mmag")
+        print(f"    {c:.1f} mag  →  {m:.3f} μJy")
 
-    mag_clip = np.clip(calib['q_mag'].values, bin_centers[0], bin_centers[-1])
-    locus    = np.interp(mag_clip, bin_centers, bin_medians)   # mmag
+    # ── Flag ALL well-sampled sources against the calibrator locus ────────────
+    # Extends variability detection beyond the 14–19 calibrator range (and beyond
+    # stellar sources): the locus is fit on clean calibrators above, but every
+    # source with enough epochs is tested, using the locus extrapolated flat past
+    # 14–19. Safe for calibration — calib_catalog re-applies its own 14–19 /
+    # CLASS_STAR cuts, so flags on out-of-range sources don't affect the zero-point.
+    flag_src = stats[(stats['n'] >= min_epochs) &
+                     stats['std_flux'].notna() &
+                     stats['q_mag'].notna()].copy()
+    mag_clip = np.clip(flag_src['q_mag'].values, bin_centers[0], bin_centers[-1])
+    locus    = np.interp(mag_clip, bin_centers, bin_medians)   # μJy
 
-    calib['locus']   = locus
-    calib['ratio']   = std_mmag / np.where(locus > 0, locus, np.nan)
-    calib['is_bad']  = calib['ratio'] > threshold
+    flag_src['locus']  = locus
+    flag_src['ratio']  = flag_src['std_flux'].values / np.where(locus > 0, locus, np.nan)
+    flag_src['is_bad'] = flag_src['ratio'] > threshold
 
-    n_bad   = int(calib['is_bad'].sum())
-    n_total = len(calib)
-    print(f"\n  Threshold : {threshold:.1f}× local median std")
-    print(f"  Flagged   : {n_bad} / {n_total} ({100*n_bad/n_total:.1f}%)")
+    n_bad     = int(flag_src['is_bad'].sum())
+    n_total   = len(flag_src)
+    _in_cal   = (flag_src['q_mag'] > 14.0) & (flag_src['q_mag'] < 19.0)
+    n_bad_cal = int(flag_src.loc[_in_cal, 'is_bad'].sum())
+    print(f"\n  Threshold : {threshold:.1f}× local median σ_flux")
+    print(f"  Flagged   : {n_bad} / {n_total} sources ({100*n_bad/n_total:.1f}%)  "
+          f"[{n_bad_cal} within 14–19 mag]")
 
     if n_bad > 0:
-        worst = calib[calib['is_bad']].nlargest(15, 'ratio')
-        print(f"\n  Top flagged stars:")
+        worst = flag_src[flag_src['is_bad']].nlargest(15, 'ratio')
+        print(f"\n  Top flagged sources:")
         for _, row in worst.iterrows():
             print(f"    RA={row['ra']:.4f}  Dec={row['dec']:.4f}  "
                   f"q_mag={row['q_mag']:.2f}  "
-                  f"std={row['std_mag']*1000:.1f} mmag  "
-                  f"locus={row['locus']:.1f} mmag  "
+                  f"σ_flux={row['std_flux']:.3f} μJy  "
+                  f"locus={row['locus']:.3f} μJy  "
                   f"ratio={row['ratio']:.2f}×  N={int(row['n'])}")
 
     # ── Build reference catalog with IS_GOOD flag ─────────────────────────────
@@ -184,7 +215,7 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
     ref_out['IS_GOOD'] = True
 
     if n_bad > 0:
-        bad_ref_indices = calib.loc[calib['is_bad'], 'ref_idx'].values
+        bad_ref_indices = flag_src.loc[flag_src['is_bad'], 'ref_idx'].values
         ref_out.loc[bad_ref_indices, 'IS_GOOD'] = False
 
     n_good = int(ref_out['IS_GOOD'].sum())
@@ -212,7 +243,7 @@ if __name__ == '__main__':
     p.add_argument('--qid',         type=int,   required=True)
     p.add_argument('--base-dir',    default=Path("data"),
                    help="Data directory (default: ./data in current working directory)")
-    p.add_argument('--threshold',   type=float, default=2.0,
+    p.add_argument('--threshold',   type=float, default=1.5,
                    help='Flag sources with std > THRESHOLD × local locus (default: 2.0)')
     p.add_argument('--min-epochs',  type=int,   default=20,
                    help='Min clean epochs required (default: 20 for reliable std)')

@@ -351,6 +351,20 @@ _FLUX_COL = "FLUX_4_TOT_AB"
 _FERR_COL = "FERR_4_TOT_AB"
 
 
+def _robust_flux_half(vals, k=3.0):
+    """Robust symmetric half-range about the median: 95th-percentile deviation plus
+    k·(clipped σ), so the y-limits are not set by one outlier point."""
+    v = np.asarray(vals, dtype=float); v = v[np.isfinite(v)]
+    if len(v) < 2:
+        return (float(v[0]) if len(v) else 0.0), 1.0
+    c   = float(np.median(v))
+    dev = np.abs(v - c)
+    p95 = float(np.percentile(dev, 95))
+    inl = v[dev <= p95] if p95 > 0 else v
+    sig = float(np.std(inl)) if len(inl) > 1 else float(np.std(v))
+    return c, max(p95 + k * sig, 1e-3)
+
+
 def make_lightcurves_flux(lc_path: Path, out_path: Path,
                           target_ra: float, target_dec: float,
                           tag: str = "",
@@ -425,10 +439,8 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
                         fmt=".", color="black", ms=5, elinewidth=0.7, alpha=0.85)
 
     fv = flux[ok]
-    if len(fv) >= 2:
-        lo, hi = float(np.percentile(fv, 2)), float(np.percentile(fv, 98))
-        pad = 0.1 * (hi - lo + 1e-9)
-        ax_top.set_ylim(lo - pad, hi + pad)
+    c_t, h_t = _robust_flux_half(fv)
+    ax_top.set_ylim(c_t - h_t, c_t + h_t)   # widened below to ≥ the star range
 
     bmjd, bflux, bferr = _bin_series(mjd[ok], flux[ok], ferr[ok], bin_days)
     if bmjd.size:
@@ -449,6 +461,7 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
 
     if comp_idxs:
         ax_bot.axhline(0.0, color="grey", lw=0.8, ls="--", zorder=1)
+        comp_all = []
         for ci, (comp_oi, color) in enumerate(zip(comp_idxs, _COMP_COLORS)):
             crow = clean[clean["object_index"] == comp_oi].sort_values("OBSMJD").copy()
             cfv = pd.to_numeric(crow[_FLUX_COL], errors="coerce").values
@@ -456,6 +469,7 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
             if not keep.any():
                 continue
             cmjd = crow["OBSMJD"].values[keep]; cflux = cfv[keep]
+            comp_all.append(cflux)
             cferr = (pd.to_numeric(crow[_FERR_COL], errors="coerce").values[keep]
                      if _FERR_COL in crow.columns else None)
             ax_bot.errorbar(cmjd, cflux, yerr=cferr, fmt=".", color=color,
@@ -466,6 +480,12 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
                 ax_bot.errorbar(bcmjd, bcf, yerr=bcfe, fmt="s-", mfc="none",
                                 mec=color, ecolor=color, color=color, mew=1.0, lw=1.2,
                                 ms=7, elinewidth=1.4, capsize=2, zorder=5)
+        # robust symmetric ranges: stars set their own; target is at least as wide
+        if comp_all:
+            c_s, h_s = _robust_flux_half(np.concatenate(comp_all))
+            ax_bot.set_ylim(c_s - h_s, c_s + h_s)
+            _h = max(h_t, h_s)
+            ax_top.set_ylim(c_t - _h, c_t + _h)
         ax_bot.set_ylabel("Flux (μJy)", fontsize=10)
         ax_bot.set_xlabel("MJD", fontsize=10)
         ax_bot.set_title(f"Nearest {len(comp_idxs)} IS_GOOD calibration stars", fontsize=10)

@@ -72,14 +72,17 @@ def _load_resid_npz(resid_dir: Path) -> list[dict]:
     return epochs
 
 
-def _stack_stage(epochs: list[dict], rk: str, dk: str, mk: str):
-    """Stack arrays for one stage across all epochs. Returns (ra, dec, dm) in mmag."""
+def _stack_stage(epochs: list[dict], rk: str, dk: str, mk: str, flux: bool = False):
+    """Stack arrays for one stage across all epochs. Returns (ra, dec, dm), in mmag
+    (magnitude residual) or, if flux=True, in % fractional flux residual
+    (Δflux/flux = 10**(-0.4·Δmag) − 1)."""
     ras, decs, dms = [], [], []
     for e in epochs:
         if rk in e and mk in e:
             ras.append(e[rk])
             decs.append(e[dk])
-            dm = e[mk] * 1000   # mag → mmag
+            dm = ((10.0 ** (-0.4 * e[mk]) - 1.0) * 100.0 if flux   # mag → % flux
+                  else e[mk] * 1000)                               # mag → mmag
             # dm_0 / dm_all_pre carry a bulk offset (aperture correction + any
             # per-epoch ZP shift) that has not yet been removed.  Zero-centre
             # each epoch independently so the spatial pattern is centred near
@@ -113,7 +116,7 @@ def _bin_grid(ra, dec, dm, nbins, stat_fn):
     return grid, ra_edges, dec_edges
 
 
-def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric):
+def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit="mmag"):
     """
     Plot one spatial panel. Returns (im, subtitle_str) — caller sets the title.
     """
@@ -138,9 +141,10 @@ def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric):
 
     sig_samp_str = f"{sig_samp:.1f}" if np.isfinite(sig_samp) else "—"
     sig_map_str  = f"{sig_map:.1f}"  if np.isfinite(sig_map)  else "—"
+    _u = r"\%" if unit == "%" else r"\mathrm{mmag}"
     subtitle = (
-        f"$\\sigma_{{\\mathrm{{sample}}}}={sig_samp_str}\\,\\mathrm{{mmag}}\\quad "
-        f"\\sigma_{{\\mathrm{{map}}}}={sig_map_str}\\,\\mathrm{{mmag}}\\quad "
+        f"$\\sigma_{{\\mathrm{{sample}}}}={sig_samp_str}\\,{_u}\\quad "
+        f"\\sigma_{{\\mathrm{{map}}}}={sig_map_str}\\,{_u}\\quad "
         f"N={n_pts:,}$"
     )
 
@@ -151,23 +155,27 @@ def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric):
     return im
 
 
-def _make_spatial_fig(epochs, out_path, tag, nbins, stat_fn, cmap, symmetric, fig_title):
+def _make_spatial_fig(epochs, out_path, tag, nbins, stat_fn, cmap, symmetric,
+                      fig_title, flux=False):
+    unit = "%" if flux else "mmag"
     fig, axes = plt.subplots(2, 4, figsize=(22, 10),
                              gridspec_kw=dict(wspace=0.15, hspace=0.25))
     fig.suptitle(f"{fig_title} — {tag}", fontsize=14, y=0.998)
     fig.text(0.5, 0.965,
-             r"residual $=$ measured magnitude $-$ ZTF reference-catalog magnitude",
+             (r"residual $=$ (measured flux $-$ reference flux) / reference flux"
+              if flux else
+              r"residual $=$ measured magnitude $-$ ZTF reference-catalog magnitude"),
              ha="center", va="top", fontsize=10, style="italic")
 
     for ax, (rk, dk, mk, label) in zip(axes.flatten(), _STAGES):
-        ra, dec, dm = _stack_stage(epochs, rk, dk, mk)
+        ra, dec, dm = _stack_stage(epochs, rk, dk, mk, flux=flux)
         if ra is None or len(ra) == 0:
             ax.set_visible(False)
             continue
-        im = _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric)
+        im = _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit=unit)
         cb = plt.colorbar(im, ax=ax, shrink=0.88, pad=0.02)
         cb.ax.tick_params(labelsize=7)
-        cb.set_label("mmag", fontsize=10)
+        cb.set_label(unit, fontsize=10)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
@@ -177,10 +185,11 @@ def _make_spatial_fig(epochs, out_path, tag, nbins, stat_fn, cmap, symmetric, fi
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def make_spatial_rms(resid_dir: Path, out_path: Path, tag: str = "",
-                     nbins: int = 20) -> None:
+                     nbins: int = 20, flux: bool = False) -> None:
     """
     Median residual per spatial bin — shows systematic calibration offsets.
     Diverging colormap (RdBu_r), symmetric about zero, independent per panel.
+    flux=True renders the fractional-flux (%) residual instead of mmag.
     """
     epochs = _load_resid_npz(resid_dir)
     if not epochs:
@@ -190,15 +199,17 @@ def make_spatial_rms(resid_dir: Path, out_path: Path, tag: str = "",
                       stat_fn=np.median,
                       cmap="RdBu_r",
                       symmetric=True,
-                      fig_title="Spatial calibration residuals (median)")
+                      fig_title="Spatial calibration residuals (median)",
+                      flux=flux)
     logger.info(f"  spatial_rms → {out_path}")
 
 
 def make_spatial_iqr(resid_dir: Path, out_path: Path, tag: str = "",
-                     nbins: int = 20) -> None:
+                     nbins: int = 20, flux: bool = False) -> None:
     """
     IQR (75th−25th percentile) per spatial bin — shows epoch-to-epoch scatter.
     Sequential colormap (YlOrRd), always positive, independent per panel.
+    flux=True renders the fractional-flux (%) residual instead of mmag.
     """
     epochs = _load_resid_npz(resid_dir)
     if not epochs:
@@ -212,5 +223,6 @@ def make_spatial_iqr(resid_dir: Path, out_path: Path, tag: str = "",
                       stat_fn=_iqr,
                       cmap="YlOrRd",
                       symmetric=False,
-                      fig_title="Spatial calibration IQR (75th−25th percentile)")
+                      fig_title="Spatial calibration IQR (75th−25th percentile)",
+                      flux=flux)
     logger.info(f"  spatial_IQR → {out_path}")

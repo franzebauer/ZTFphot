@@ -90,7 +90,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                   poly_degree=2, flatfield=None,
                   target_ra=None, target_dec=None,
                   target_match_radius=1.0,
-                  residuals_out=None, faint_err_max=0.5):
+                  residuals_out=None, faint_err_max=0.5,
+                  apply_faint_correction=False):
 
     table_ref = pd.read_csv(ref_catalog)
 
@@ -431,11 +432,32 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                 Q_cal[k] = Q_cal[k] - _ff_corr
             # ── end flatfield correction ────────────────────────────────────
 
+            # ── Flux steps 1–4: same ZP/poly/flatfield corrections, applied
+            # multiplicatively (sign-preserving) so FLUX_k_TOT_AB is calibrated
+            # consistently with the magnitude. The linear-fit term is n + m·mag
+            # for finite-mag epochs; the rare negative-flux epoch (mag = NaN) falls
+            # back to the constant intercept n (m·mag ≲1% and undefined there).
+            _zp_ujy      = 10.0**(-0.4 * (np.float64(magzp_dif) - 23.9))
+            _zp_corr     = np.where(np.isfinite(final_fit), final_fit, coefficients[0])
+            _cal_corr    = _zp_corr + _poly_corr + _ff_corr
+            _cal_factor  = 10.0**(0.4 * _cal_corr)
+            flux_cal_k   = np.float64(flux_tot[k]) * _zp_ujy * _cal_factor
+            flux_ref_ujy = np.float64(flux_ref_tot[k]) * _zp_ujy
+            # ── end flux steps 1–4 ──────────────────────────────────────────
+
             # ── Step 5: faint-source per-bin smoothed correction ────────────
             # Applied LAST, on the residuals that survive all spatial corrections
             # (linear ZP + 2D poly + flatfield), so it removes the magnitude-
-            # dependent offset left in faint sources. Bin the all-source residual
-            # in 0.25-mag steps (18.5–22) and take the 3σ-clipped median per bin.
+            # dependent offset left in faint sources. The per-bin median is taken
+            # on the CALIBRATED FLUX residual (flux_cal/flux_ref − 1), which is
+            # bipolar: fainter-than-reference epochs (mag = NaN) survive as negative
+            # values and are INCLUDED, so the median is unbiased where the magnitude
+            # residual Q_cal−q_mag would be censored bright. Binned at MEASURED mag
+            # in 0.25-mag steps (18.5–22) — the SAME coordinate the curve is applied
+            # at, so the taper region lines up — with a reference-mag fallback for the
+            # negative-flux epochs (mag = NaN) so they still land in a bin. The per-bin
+            # linear-flux median is converted to a mag offset (−2.5·log10(1+r)) for the
+            # shared correction curve.
             # The correction curve is: 0 at 18.5 mag, a linear taper from there up
             # to the empirical profile starting at the 19.0–19.25 bin, the smoothed
             # bin medians to the last bin, then held flat out to 24 mag. The whole
@@ -444,36 +466,44 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             _FC_EDGES   = np.arange(18.5, 22.0001, 0.25)
             _FC_CENTERS = 0.5 * (_FC_EDGES[:-1] + _FC_EDGES[1:])
 
+            # Mag residual kept for the NC_N calibrator count and the dm_3 diagnostic.
             residual_all = Q_cal[k] - q_mag_all
             faint_nc_mask = (
                 (maginst_all > 19.0) & (maginst_all < 21.0) &
                 (errinst_all < 0.5) & np.isfinite(residual_all)
             )
 
-            # The err cut selects which sources define the per-bin correction.
-            # At the faint end (near MAGLIM) a tight cut keeps only the higher-SNR
-            # sources — a different population from the one the correction is
-            # applied to — which under-corrects those bins. faint_err_max loosens
-            # it so the correction is built from the same population it corrects.
+            # Unbiased faint bias: fractional residual of the calibrated flux vs the
+            # reference flux, bipolar so negative (fainter-than-reference) epochs are
+            # kept. No measurement-error cut — gating on errinst re-censors the faint
+            # noisy sources we specifically want in the median; the 3σ MAD clip per
+            # bin handles outliers. flux_ref_ujy = 0 for the reference-less target,
+            # which the NaN reference mag excludes from the bin coordinate anyway.
+            with np.errstate(divide='ignore', invalid='ignore'):
+                _flux_resid = flux_cal_k / flux_ref_ujy - 1.0
+            # Bin coordinate: measured mag, with a reference-mag fallback only where the
+            # measured mag is NaN (negative-flux epochs) so they are still binned.
+            _bin_mag = np.where(np.isfinite(magQi[k]), magQi[k], q_mag_all)
             _bin_med = np.full(len(_FC_CENTERS), np.nan)
             _all_fc_mask = (
-                (maginst_all >= 18.5) & (maginst_all < 22.0) &
-                (errinst_all < faint_err_max) & np.isfinite(residual_all)
+                (_bin_mag >= 18.5) & (_bin_mag < 22.0) & np.isfinite(_flux_resid)
             )
             for _ib, (_lo, _hi) in enumerate(zip(_FC_EDGES[:-1], _FC_EDGES[1:])):
-                _bm = _all_fc_mask & (maginst_all >= _lo) & (maginst_all < _hi)
+                _bm = _all_fc_mask & (_bin_mag >= _lo) & (_bin_mag < _hi)
                 if _bm.sum() >= 5:
-                    _r   = residual_all[_bm]
+                    _r   = _flux_resid[_bm]
                     _med = np.nanmedian(_r)
                     _mad = np.nanmedian(np.abs(_r - _med))
                     _gd  = (np.abs(_r - _med) < 3.0 * 1.4826 * _mad
                             if _mad > 0 else np.ones(len(_r), dtype=bool))
                     if _gd.sum() >= 3:
-                        _bin_med[_ib] = float(np.nanmedian(_r[_gd]))
+                        _rmed = float(np.nanmedian(_r[_gd]))
+                        if _rmed > -0.999:   # guard log of a non-positive flux ratio
+                            _bin_med[_ib] = -2.5 * np.log10(1.0 + _rmed)
 
             faint_corr_curve = None
             _valid_fc = np.isfinite(_bin_med)
-            if _valid_fc.sum() >= 3:
+            if apply_faint_correction and _valid_fc.sum() >= 3:
                 # fill empty bins by interpolating across the populated ones
                 _filled = np.interp(_FC_CENTERS, _FC_CENTERS[_valid_fc], _bin_med[_valid_fc])
                 # control points: 0 at 18.5 → linear taper to the empirical profile
@@ -497,10 +527,16 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
 
             # residual_all here is the all-source residual AFTER the flatfield but
             # BEFORE this faint step — saved as dm_3 for the diagnostic plot.
+            # Apply at MEASURED mag (keeps the current magnitude behaviour); for a
+            # negative-flux epoch (mag = NaN) fall back to the source's reference mag
+            # so its flux is not wiped to NaN; the reference-less target (both NaN) → 0.
+            _corr_all = np.zeros(len(magQi[k]))
             if faint_corr_curve is not None:
-                _corr_all = np.interp(magQi[k], faint_corr_curve[0], faint_corr_curve[1],
-                                      left=0.0, right=faint_corr_curve[1][-1])
-                Q_cal[k] = Q_cal[k] - _corr_all
+                _apply_mag = np.where(np.isfinite(magQi[k]), magQi[k], q_mag_all)
+                _corr_all  = np.interp(_apply_mag, faint_corr_curve[0], faint_corr_curve[1],
+                                       left=0.0, right=faint_corr_curve[1][-1])
+                _corr_all  = np.where(np.isfinite(_corr_all), _corr_all, 0.0)
+                Q_cal[k]   = Q_cal[k] - _corr_all
             # ── end faint-source correction ─────────────────────────────────
 
             # ── Accumulate diagnostics for k=1 (primary aperture) ──────────
@@ -557,15 +593,16 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             interpolation = np.interp(Q_cal[k], median_mag_per_bin, rms_per_bin)
             Q_err[k]      = np.array([max(i, j) for i, j in zip(interpolation, errmagQi[k])])
 
-            # Bipolar flux (μJy) from the total instrumental flux (ref+diff) placed on
-            # the ZTF per-epoch zeropoint. Sign-preserving: epochs fainter than the
-            # reference survive here as NEGATIVE flux, whereas the magnitude is NaN —
-            # so the flux mean is unbiased where the magnitude median is censored.
-            # Calibrated by the ZTF ZP only (not the staged poly/flatfield/faint terms
-            # that adjust the magnitude); a proper flux calibration is a later step.
-            _zp_ujy       = 10.0**(-0.4 * (np.float64(magzp_dif) - 23.9))
-            flux_ab[k]    = np.float64(flux_tot[k]) * _zp_ujy
-            fluxerr_ab[k] = np.float64(flux_dif_err_tmp) * _zp_ujy
+            # Bipolar flux (μJy), fully calibrated: the ZTF per-epoch ZP (flux_cal_k,
+            # steps 1–4 above) times the shared faint correction 10^(0.4·_corr_all).
+            # Sign-preserving — epochs fainter than the reference survive as NEGATIVE
+            # flux (where the magnitude is NaN), so the flux mean is unbiased where the
+            # magnitude median is censored. The multiplicative factors carry into the
+            # error (fractional error preserved).
+            _faint_factor = 10.0**(0.4 * _corr_all)
+            flux_ab[k]    = flux_cal_k * _faint_factor
+            fluxerr_ab[k] = (np.abs(np.float64(flux_dif_err_tmp))
+                             * _zp_ujy * _cal_factor * _faint_factor)
 
             rms     = np.sum((diff - fit)**2) / len(maginst)
             chi_red = (np.sum(((diff - fit)**2) / (errf**2 + var_fit)) / (len(maginst) - 2))

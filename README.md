@@ -371,8 +371,11 @@ Both files share the same `object_index` and can be joined on `(object_index, OB
 | `CLASS_STAR_OBJ` | float32 | SExtractor star/galaxy classifier (0=galaxy, 1=star) |
 | `MAG_3_TOT_AB` | float32 | Calibrated AB mag, 3 px diameter aperture |
 | `MERR_3_TOT_AB` | float32 | Magnitude error, 3 px aperture |
-| `MAG_4_TOT_AB` | float32 | Calibrated AB mag, 4 px diameter aperture (primary) |
+| `MAG_4_TOT_AB` | float32 | Calibrated AB mag, 4 px diameter aperture (primary). **NaN when total flux ≤ 0** (fainter-than-reference epoch) — use `FLUX_4_TOT_AB` there |
 | `MERR_4_TOT_AB` | float32 | Magnitude error, 4 px aperture |
+| `FLUX_4_TOT_AB` | float32 | **Bipolar** total flux (μJy), 4 px aperture — retains the negative (fainter-than-reference) epochs the magnitude drops to NaN. For a reference-less target (`target_ref_mag` = NaN) this is the *difference* flux, not total |
+| `FERR_4_TOT_AB` | float32 | Flux error (μJy), 4 px aperture |
+| `FLUX_6_TOT_AB` | float32 | Bipolar total flux (μJy), 6 px aperture (carried for the aperture-correction check) |
 | `MAG_6_TOT_AB` | float32 | Calibrated AB mag, 6 px diameter aperture |
 | `MERR_6_TOT_AB` | float32 | Magnitude error, 6 px aperture |
 | `MAG_10_TOT_AB` | float32 | Calibrated AB mag, 10 px diameter aperture |
@@ -394,7 +397,7 @@ Both files share the same `object_index` and can be joined on `(object_index, OB
 | `INFOBITS_DIF` | int32 | Image quality flags (see ZTF documentation) |
 | `APCORR46` | float32 | Aperture correction from 4 px to 6 px (mag) |
 
-File-level metadata keys: `field`, `filtercode`, `ccdid`, `qid`, `MAGZP_REF_{tag}`, `MAGZPRMS_REF_{tag}`, `target_sep_arcsec` (arcsec distance from target to the nearest reference catalog source; `nan` if `--ra`/`--dec` not provided).
+File-level metadata keys: `field`, `filtercode`, `ccdid`, `qid`, `MAGZP_REF_{tag}`, `MAGZPRMS_REF_{tag}`, `target_sep_arcsec` (arcsec distance from target to the nearest reference catalog source; `nan` if `--ra`/`--dec` not provided), `target_ref_mag` (reference AB mag of the target's matched source, or `nan` if the target has **no** reference detection — see [Target coverage diagnostics §2](#2-target_sep_arcsec--target_ref_mag-metadata-in-the-parquet)).
 
 ### Per-quadrant sci-pos (`LightCurves/{field}/{fc}/ccd{ccd}/q{qid}/lightcurves_sci.parquet`)
 
@@ -479,15 +482,25 @@ Whenever `--ra/--dec` is given, the pipeline fetches each candidate quadrant's s
 
 This runs in **both** the normal and `--purge-batch` download paths, **before any science images are fetched**, so an out-of-footprint quadrant costs neither the (bulk) science download nor spurious photometry. The discriminator is deliberately the *reference* footprint: individual science epochs dither and can cover a target that the reference coadd — which defines where sources are actually measured — does not. The same WCS check also re-runs at startup on any quadrants already on disk. No manual intervention is needed.
 
-### 2. `target_sep_arcsec` metadata in the parquet
+### 2. `target_sep_arcsec` / `target_ref_mag` metadata in the parquet
 
-Every per-quadrant light curve parquet records the nearest reference source distance (in arcsec) as file-level metadata under the key `target_sep_arcsec`. Read it with:
+Every per-quadrant light curve parquet records target metadata as file-level keys:
 
 ```python
 import pyarrow.parquet as pq
 meta = pq.read_schema("lightcurves.parquet").metadata
-print(meta[b"target_sep_arcsec"])   # e.g. b"117.968"
+print(meta[b"target_sep_arcsec"])   # nearest ref source to target, arcsec, e.g. b"117.968"
+print(meta[b"target_ref_mag"])      # reference AB mag of the target, or b"nan" if NONE
 ```
+
+**You must check `target_ref_mag`.** If it is `nan`, the target has **no reference-image
+detection** — so its `FLUX_4_TOT_AB` is the **bipolar *difference* flux** (`flux_ref = 0`,
+total = difference), *not* a total flux, and the magnitude columns are NaN whenever that
+difference is negative. Such a target may also be **blended** with a nearby reference
+source (its flux then contaminated by that source's subtraction residual). To recover a
+clean light curve you would need the correct deblended reference magnitude and to confirm
+the blended neighbour is non-variable. Batch runs also surface this: the target's
+`sources_status.csv` reason is **`LACKS_REFIMG_DETECTION`** (rather than `OK`).
 
 A value much larger than the typical inter-source spacing (~5–10 arcsec in a ZTF field) indicates the target position is in an unpopulated or masked region that the WCS check did not catch (e.g. a vignetted corner with valid pixel coordinates but no real detections).
 
@@ -507,7 +520,8 @@ For a `--ra/--dec` run the pipeline records **why** the target did or did not ge
 
 | Reason | Meaning |
 |--------|---------|
-| `OK` | target has a light curve — ≥1 finite **flux** measurement, **positive or negative** (a fainter-than-reference detection is still a detection; difference photometry is bipolar) |
+| `OK` | target has a light curve — ≥1 finite **flux** measurement, **positive or negative** (a fainter-than-reference detection is still a detection; difference photometry is bipolar) — *and* has a reference detection |
+| `LACKS_REFIMG_DETECTION` | has a flux light curve but **no reference source** (`target_ref_mag` = NaN) — `FLUX_4_TOT_AB` is bipolar *difference* flux, not total; check for blends (see [§2](#2-target_sep_arcsec--target_ref_mag-metadata-in-the-parquet)) |
 | `MATCHED_NEIGHBOR` | within `--target-match-radius` of a catalog source (photometered as that source) |
 | `NOT_RECOVERED` | painted into ≥1 simulated image but SExtractor/ASSOC never produced any row |
 | `ON_MASK` | in-frame but never painted — `_valid_frac ≤ 0.5` every epoch (target pixel persistently masked) |

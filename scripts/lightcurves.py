@@ -102,6 +102,7 @@ def step_lightcurves(
     suffix: str = "",
     target_ra: float | None = None,
     target_dec: float | None = None,
+    target_match_radius: float = 1.0,
 ) -> int:
     """
     Assemble light curves from calibrated per-epoch FITS for each quadrant.
@@ -113,6 +114,8 @@ def step_lightcurves(
       MAGZP_REF_{field}_{fc}_c{ccd}_q{qid}
       MAGZPRMS_REF_{field}_{fc}_c{ccd}_q{qid}
       target_sep_arcsec  (nearest ref source to target; NaN if target not given)
+      target_ref_mag     (reference AB mag of the target's matched source, or NaN if
+                          reference-less — then FLUX_4_TOT_AB is difference flux)
     """
     import numpy as np
     from astropy.io import fits as pyfits
@@ -183,8 +186,12 @@ def step_lightcurves(
         magzp_ref_val    = float(pd.to_numeric(ref['MAGZP_REF'],    errors='coerce').iloc[0]) if 'MAGZP_REF'    in ref.columns else float('nan')
         magzprms_ref_val = float(pd.to_numeric(ref['MAGZPRMS_REF'], errors='coerce').iloc[0]) if 'MAGZPRMS_REF' in ref.columns else float('nan')
 
-        # Nearest ref source to target — stored as metadata for downstream diagnostics
+        # Nearest ref source to target — stored as metadata for downstream diagnostics.
+        # target_ref_mag = that source's reference AB mag if it is within the match
+        # radius (i.e. the target HAS a reference detection); NaN when reference-less
+        # (then FLUX_4_TOT_AB is bipolar difference flux, not total — see README).
         target_sep_val = float('nan')
+        target_ref_mag = float('nan')
         if target_ra is not None and target_dec is not None:
             from astropy.coordinates import SkyCoord
             import astropy.units as u
@@ -196,7 +203,14 @@ def step_lightcurves(
             if _ok.any():
                 _tgt  = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
                 _cats = SkyCoord(ra=_ra[_ok] * u.deg,  dec=_dec[_ok] * u.deg)
-                target_sep_val = float(_tgt.separation(_cats).arcsec.min())
+                _seps = _tgt.separation(_cats).arcsec
+                _jmin = int(np.argmin(_seps))
+                target_sep_val = float(_seps[_jmin])
+                if (target_sep_val <= target_match_radius
+                        and 'MAG_APER_4px' in ref.columns and 'MAGZP_REF' in ref.columns):
+                    _rm = (pd.to_numeric(ref['MAG_APER_4px'], errors='coerce').values[_ok]
+                           + pd.to_numeric(ref['MAGZP_REF'], errors='coerce').values[_ok])
+                    target_ref_mag = float(_rm[_jmin])
 
         frames = []
         for cal_path in cal_files:
@@ -264,6 +278,7 @@ def step_lightcurves(
             f'MAGZP_REF_{tag}'.encode():    str(magzp_ref_val).encode(),
             f'MAGZPRMS_REF_{tag}'.encode(): str(magzprms_ref_val).encode(),
             b'target_sep_arcsec':           str(target_sep_val).encode(),
+            b'target_ref_mag':              str(target_ref_mag).encode(),
         }
         table = table.replace_schema_metadata({**existing_meta, **extra_meta})
         pq.write_table(table, lc_out)

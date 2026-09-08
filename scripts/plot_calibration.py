@@ -93,7 +93,15 @@ def _binned_center_curves(mag, resid, edges):
     return cen, med, mean, mode, cmed
 
 
-def _faint_residual_panel(ax, resid_dir, which="post", curves=True) -> None:
+def _mmag_to_pct(mmag):
+    """Signed magnitude residual (mmag) → % fractional flux residual (exact)."""
+    return (10.0 ** (-0.4 * np.asarray(mmag, float) / 1000.0) - 1.0) * 100.0
+
+
+_SCAT_MMAG_TO_PCT = 0.4 * np.log(10) / 10.0   # small-scatter mmag → % flux (~0.0921)
+
+
+def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) -> None:
     """Full-sample residual (mmag) vs calibrated magnitude, as a per-magnitude-
     column-normalised density.
 
@@ -112,7 +120,8 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True) -> None:
                  + ("(before calibration)" if is_pre
                     else "(after calib; median / mean / mode)"))
     ax.set_xlabel("Calibrated magnitude (AB)")
-    ax.set_ylabel("Residual: measured − ZTF ref (mmag)")
+    ax.set_ylabel("Residual: (measured − ref) / ref (%)" if flux
+                  else "Residual: measured − ZTF ref (mmag)")
 
     mags, res = [], []
     if resid_dir is not None:
@@ -124,7 +133,8 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True) -> None:
             if "mag_all" not in d or key not in d:
                 continue
             m = np.asarray(d["mag_all"], float)
-            r = np.asarray(d[key], float) * 1000.0  # mag → mmag
+            r = (_mmag_to_pct(np.asarray(d[key], float) * 1000.0) if flux
+                 else np.asarray(d[key], float) * 1000.0)  # mag → % flux or mmag
             if is_pre:
                 # remove the per-epoch bulk offset (aperture corr + ZP shift), as in
                 # the spatial_rms plot, so the magnitude structure isn't smeared out
@@ -148,7 +158,7 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True) -> None:
         return
 
     m_lo, m_hi = np.percentile(mag, [1, 99.5])
-    ylim = 200.0
+    ylim = 20.0 if flux else 200.0
 
     # Per-magnitude-column normalised density: each 0.1-mag column is scaled to its
     # own peak, so the residual distribution *shape* is visible at every magnitude
@@ -185,11 +195,12 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True) -> None:
 
 
 def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
-             resid_dir: Path | None = None) -> None:
+             resid_dir: Path | None = None, flux: bool = False) -> None:
     df = _load_epoch_headers(cal_dir)
     if df.empty:
         logger.warning(f"No calibrated epochs in {cal_dir}")
         return
+    u = "%" if flux else "mmag"
 
     stages = ["NC_RMS0", "NC_RMS1", "NC_RMS2", "NC_RMSFC", "NC_RMS3", "NC_RMS4"]
     labels = ["Before\ncal", "After\nlinear", "After\n3σ clip",
@@ -208,19 +219,20 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
 
     # ── Top-left: calibrator RMS boxplot ──
     ax = ax_box
-    data_box = [df[s].dropna().values for s in stages]
+    _sc = _SCAT_MMAG_TO_PCT if flux else 1.0     # RMS is scatter → linear mmag→% flux
+    data_box = [df[s].dropna().values * _sc for s in stages]
     bp = ax.boxplot(data_box, patch_artist=True, medianprops=dict(color="black", lw=2))
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color); patch.set_alpha(0.6)
     ax.set_xticks(range(1, len(labels) + 1))
     ax.set_xticklabels(labels, fontsize=8)
-    ax.set_ylabel("Calibrator RMS (mmag)")
+    ax.set_ylabel(f"Calibrator RMS ({u})")
     ax.set_title("Calibrators: distribution per calibration step")
     ax.set_ylim(bottom=0)
 
     # ── Bottom row: before / after calibration residual density ──
-    _faint_residual_panel(ax_pre,  resid_dir, which="pre",  curves="median")
-    _faint_residual_panel(ax_post, resid_dir, which="post", curves="all")
+    _faint_residual_panel(ax_pre,  resid_dir, which="pre",  curves="median", flux=flux)
+    _faint_residual_panel(ax_post, resid_dir, which="post", curves="all",    flux=flux)
 
     # ── Top-middle: ZP correction vs seeing ──
     ax = ax_zp
@@ -240,20 +252,22 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
         apcorr_vals = np.where(np.isfinite(apcorr_vals), apcorr_vals, 0.0)
         zpc = zpc + apcorr_vals
         med_apcorr  = float(np.nanmedian(apcorr_vals))
+        if flux:
+            zpc = _mmag_to_pct(zpc); med_apcorr = float(_mmag_to_pct(med_apcorr))
         sc  = ax.scatter(s, zpc, c=mlv, cmap="plasma", s=10, alpha=0.7,
                          vmin=np.nanpercentile(mlv, 5), vmax=np.nanpercentile(mlv, 95))
         plt.colorbar(sc, ax=ax, label="MAGLIM (mag)")
         ax.axhline(0, color="k", lw=0.8, ls="--")
         ax.text(0.03, 0.97,
-                f"med = {float(np.nanmedian(zpc)):.1f} mmag\nσ = {float(np.nanstd(zpc)):.1f} mmag",
+                f"med = {float(np.nanmedian(zpc)):.1f} {u}\nσ = {float(np.nanstd(zpc)):.1f} {u}",
                 transform=ax.transAxes, va="top", fontsize=8,
                 bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
         ax.text(0.97, 0.03,
-                f"AperCorr 4→6px = {med_apcorr:.1f} mmag",
+                f"AperCorr 4→6px = {med_apcorr:.1f} {u}",
                 transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
                 bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
     ax.set_xlabel("Seeing (arcsec)")
-    ax.set_ylabel("Linear ZP correction @ mag 17 (mmag)")
+    ax.set_ylabel(f"Linear ZP correction @ mag 17 ({u})")
     ax.set_title("ZP correction vs seeing\n(coloured by limiting magnitude)")
 
     # ── Top-right: faint correction curves ──
@@ -261,6 +275,8 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     fc_cols = [f"NC_FC_{i:02d}" for i in range(7)]
     fc_mags = [18.75, 19.25, 19.75, 20.25, 20.75, 21.25, 21.75]
     fc_data = df[fc_cols].replace(_SENTINEL, np.nan)
+    if flux:
+        fc_data = fc_data.apply(_mmag_to_pct)   # signed faint correction mmag → % flux
     ml_vals = df["MAGLIM"].values
     if fc_data.notna().any().any():
         ml_min = np.nanpercentile(ml_vals, 5)
@@ -283,7 +299,7 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
         plt.colorbar(sm, ax=ax, label="MAGLIM (mag)")
         ax.legend(fontsize=8)
     ax.set_xlabel("Source magnitude (AB)")
-    ax.set_ylabel("Faint correction applied (mmag)")
+    ax.set_ylabel(f"Faint correction applied ({u})")
     ax.set_title("Per-epoch faint correction vs magnitude\n(coloured by limiting magnitude)")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)

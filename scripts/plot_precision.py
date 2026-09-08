@@ -92,10 +92,10 @@ def _load_vet_rejected(vet_catalog: Path, df: pd.DataFrame) -> set:
         return set()
 
 
-def _running_median(grp: pd.DataFrame, edges: np.ndarray):
+def _running_median(grp: pd.DataFrame, edges: np.ndarray, scale: float = 1000.0):
     cx, my = [], []
     for lo, hi in zip(edges[:-1], edges[1:]):
-        s = grp[(grp["med"] >= lo) & (grp["med"] < hi)]["std"] * 1000
+        s = grp[(grp["med"] >= lo) & (grp["med"] < hi)]["std"] * scale
         if len(s) >= 5:
             cx.append(0.5 * (lo + hi))
             my.append(float(np.median(s)))
@@ -107,22 +107,32 @@ def _running_median(grp: pd.DataFrame, edges: np.ndarray):
 def make_precision(lc_path: Path, out_path: Path, tag: str = "",
                         target_ra: float | None = None,
                         target_dec: float | None = None,
-                        vet_catalog: Path | None = None) -> None:
+                        vet_catalog: Path | None = None,
+                        flux: bool = False) -> None:
     df = pd.read_parquet(lc_path)
 
-    if _MAG_COL not in df.columns:
-        logger.warning(f"  {_MAG_COL} missing — skipping precision plot")
+    # flux mode: per-source scatter σ from the bipolar FLUX column (μJy) — unbiased,
+    # since it keeps the negative-flux epochs the magnitude drops to NaN. Brightness
+    # axis uses MAG_4_REF (reference mag) when present, else the (biased) median mag.
+    _STD = "FLUX_4_TOT_AB" if flux else _MAG_COL
+    _BRT = ("MAG_4_REF" if (flux and "MAG_4_REF" in df.columns) else _MAG_COL)
+    _YS  = 1.0 if flux else 1000.0                 # μJy, or mag→mmag
+    _YU  = "μJy" if flux else "mmag"
+    if _STD not in df.columns:
+        logger.warning(f"  {_STD} missing — skipping {'flux ' if flux else ''}precision plot")
         return
 
-    df[_MAG_COL] = pd.to_numeric(df[_MAG_COL], errors="coerce")
+    for _c in {_STD, _BRT, _MAG_COL}:
+        if _c in df.columns:
+            df[_c] = pd.to_numeric(df[_c], errors="coerce")
 
     clean = df[df["INFOBITS_DIF"] == 0].copy()
 
     # ── per-source summary for top panels ─────────────────────────────────────
     agg = clean.groupby("object_index").agg(
-        n=(_MAG_COL, "count"),
-        med=(_MAG_COL, "median"),
-        std=(_MAG_COL, "std"),
+        n=(_STD, "count"),
+        med=(_BRT, "median"),
+        std=(_STD, "std"),
     ).dropna(subset=["std"])
     cs_col = "CLASS_STAR" if "CLASS_STAR" in clean.columns else \
              "CLASS_STAR_OBJ" if "CLASS_STAR_OBJ" in clean.columns else None
@@ -135,7 +145,7 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
     # ── per-source summary from pre-calibration mags (aperture-corrected maginst)
     _ORG_COL = "MAG_4_TOT_AB_org"
     grp_org = None
-    if _ORG_COL in clean.columns:
+    if _ORG_COL in clean.columns and not flux:   # no pre-calibration flux column
         clean[_ORG_COL] = pd.to_numeric(clean[_ORG_COL], errors="coerce")
         agg_org = clean.groupby("object_index").agg(
             n_org=(_ORG_COL, "count"),
@@ -218,21 +228,21 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
         vet_mask = grp.index.isin(vet_rejected)
         if vet_mask.any():
             ax.scatter(grp.loc[vet_mask, "med"],
-                       grp.loc[vet_mask, "std"] * 1000,
+                       grp.loc[vet_mask, "std"] * _YS,
                        s=27, facecolors="none", edgecolors="grey",
                        linewidths=0.6, alpha=0.7, zorder=2, label="Vet-rejected")
 
-        sc = ax.scatter(grp["med"], grp["std"] * 1000,
+        sc = ax.scatter(grp["med"], grp["std"] * _YS,
                         c=c_vals, cmap=cmap_name, norm=c_norm,
                         s=4, alpha=0.5, rasterized=True, zorder=3)
         plt.colorbar(sc, ax=ax, label=clabel, shrink=0.88)
 
         # running median locus — calibrated (solid) and pre-calibration (dotted)
-        cx, my = _running_median(grp, edges)
+        cx, my = _running_median(grp, edges, scale=_YS)
         if cx:
             ax.plot(cx, my, "k-", lw=2, zorder=4, label="Median σ (calibrated)")
         if grp_org is not None:
-            cx_org, my_org = _running_median(grp_org, edges)
+            cx_org, my_org = _running_median(grp_org, edges, scale=_YS)
             if cx_org:
                 ax.plot(cx_org, my_org, "k--", lw=1.5, zorder=4,
                         label="Median σ (pre-calibration)")
@@ -247,21 +257,23 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
             ax.axvline(med_maglim, color="orange", lw=1, ls="--", alpha=0.7,
                        label=f"Median MAGLIM={med_maglim:.1f}")
 
-        # median NC_RMS4
-        if np.isfinite(nc_rms4_med):
+        # median NC_RMS4 (calibrator RMS, mmag — magnitude plot only)
+        if np.isfinite(nc_rms4_med) and not flux:
             ax.axhline(nc_rms4_med, color="gray", lw=1, ls=":", alpha=0.6)
 
         # target
         if tgt_obj_idx is not None and tgt_obj_idx in grp.index:
             r = grp.loc[tgt_obj_idx]
-            ax.plot(r["med"], r["std"] * 1000, "*", ms=14, color="red",
-                    zorder=5, label=f"Target  σ={r['std']*1000:.1f} mmag")
+            ax.plot(r["med"], r["std"] * _YS, "*", ms=14, color="red",
+                    zorder=5, label=f"Target  σ={r['std']*_YS:.1f} {_YU}")
 
         ax.set_yscale("log")
-        ax.set_ylim(1, 1000)
+        ax.set_ylim((0.3, 3000) if flux else (1, 1000))
         ax.set_xlim(13, 23)
-        ax.set_xlabel("Median calibrated magnitude (AB)", fontsize=10)
-        ax.set_ylabel("σ_mag across epochs (mmag)", fontsize=10)
+        ax.set_xlabel(("Reference magnitude (AB)" if _BRT == "MAG_4_REF"
+                       else "Median calibrated magnitude (AB)"), fontsize=10)
+        ax.set_ylabel(f"σ_flux across epochs ({_YU})" if flux
+                      else f"σ_mag across epochs ({_YU})", fontsize=10)
         ax.tick_params(labelsize=9)
         ax.grid(True, alpha=0.2)
         ax.legend(fontsize=7, loc="upper left")

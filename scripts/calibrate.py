@@ -59,7 +59,7 @@ def step_vet(base_dir: Path, quadrants: list[dict]) -> int:
             sys.executable, str(vet_script),
             "--field", str(field), "--band", fc,
             "--ccd", str(ccd), "--qid", str(qid_),
-            "--base-dir", str(base_dir), "--threshold", "2.5",
+            "--base-dir", str(base_dir), "--threshold", "1.5",
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
