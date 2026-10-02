@@ -178,11 +178,11 @@ ZTFphot/                    ← this repository
     migrate_parquets.py
     rekey_merged_parquet.py
     lc_viewer.py
-    plot_calibration.py
+    plot_rms.py
     plot_diagnostics.py
     plot_lightcurve.py
     plot_precision.py
-    plot_residuals.py
+    plot_spatial.py
     SExtractor/
 
 data/                       ← created in your working directory on first run

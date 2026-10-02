@@ -1,5 +1,5 @@
 """
-plot_residuals.py
+plot_spatial.py
 -----------------
 Two paired spatial diagnostic plots, sharing the same 8-panel layout:
 
@@ -13,17 +13,20 @@ Panel order (2 rows × 4 cols):
   4. After 3σ clip (calibrators)
   5. After 2D poly (calibrators)
   6. After flatfield (calibrators)
-  7. After flatfield, before faint (all sources)
+  7. After flatfield (all sources)
   8. After calibration (all sources)
 
-Each panel has an independent colorbar.
+Colour ranges are FIXED, not per-panel, so the progression toward zero is visible.
+Two ranges are used: the all-source panels (1, 7, 8) share one scale and the 14-19 mag
+calibrator panels (2-6) share another, since the all-source spread is far larger and a
+single scale would flatten the calibrator panels to a uniform colour.
 Per-panel title includes: σ_sample (std of stacked residuals),
 σ_map (std of binned grid), N (total point-epoch pairs used).
 
-Panels 7 and 8 bracket the faint-source correction (which runs last, after the
-flatfield): panel 7 is the all-source residual entering it, panel 8 the result.
-The correction is ~0 for the 14–19 mag calibrators, so it has no dedicated
-calibrator panel.
+Panels 7 and 8 are both the all-source residual after the flatfield. They used to
+bracket the faint-source correction, which ran last; that correction is now
+disabled, so the two panels show the same quantity and any difference between
+them indicates a stale residual NPZ written while it was still active.
 
 Reads *_resid.npz from FlatfieldResiduals/.  NPZ arrays (all in magnitudes):
   ra_0/dec_0/dm_0       calibrators, before any correction
@@ -31,9 +34,14 @@ Reads *_resid.npz from FlatfieldResiduals/.  NPZ arrays (all in magnitudes):
   ra_2/dec_2/dm_2       calibrators, after 3σ iterative clip
   ra_4/dec_4/dm_4       calibrators, after 2D polynomial
   ra_5/dec_5/dm_5       calibrators, after spatial flatfield
-  ra_3/dec_3/dm_3       all matched sources, after flatfield, before faint corr
+  ra_3/dec_3/dm_3       all matched sources, after flatfield (the faint correction
+                        that once followed it is disabled)
   ra_all/dec_all/dm_all_pre   all matched sources, before calibration
   ra_all/dec_all/dm_all_post  all matched sources, after full calibration
+  dflux_all_post              bipolar FRACTIONAL FLUX residual, the uncensored
+                              counterpart of dm_all_post. Saved by calib_catalogs but
+                              NOT used here: these plots are magnitude-only, matching
+                              the flatfield and polynomial they diagnose.
 """
 
 from __future__ import annotations
@@ -56,7 +64,7 @@ _STAGES = [
     ("ra_2",   "dec_2",   "dm_2",        "After 3σ clip (calibrators)"),
     ("ra_4",   "dec_4",   "dm_4",        "After 2D poly (calibrators)"),
     ("ra_5",   "dec_5",   "dm_5",        "After flatfield (calibrators)"),
-    ("ra_3",   "dec_3",   "dm_3",        "After flatfield, before faint (all sources)"),
+    ("ra_3",   "dec_3",   "dm_3",        "After flatfield (all sources)"),
     ("ra_all", "dec_all", "dm_all_post", "After calibration (all sources)"),
 ]
 
@@ -72,17 +80,19 @@ def _load_resid_npz(resid_dir: Path) -> list[dict]:
     return epochs
 
 
-def _stack_stage(epochs: list[dict], rk: str, dk: str, mk: str, flux: bool = False):
-    """Stack arrays for one stage across all epochs. Returns (ra, dec, dm), in mmag
-    (magnitude residual) or, if flux=True, in % fractional flux residual
-    (Δflux/flux = 10**(-0.4·Δmag) − 1)."""
+def _stack_stage(epochs: list[dict], rk: str, dk: str, mk: str):
+    """Stack arrays for one stage across all epochs. Returns (ra, dec, dm) in mmag.
+
+    These plots are magnitude-only: the flatfield and the polynomial they diagnose are
+    both fit in magnitudes, so mmag is the native unit. (calib_catalogs also saves an
+    uncensored bipolar flux residual, dflux_all_post, but nothing here consumes it.)
+    """
     ras, decs, dms = [], [], []
     for e in epochs:
         if rk in e and mk in e:
             ras.append(e[rk])
             decs.append(e[dk])
-            dm = ((10.0 ** (-0.4 * e[mk]) - 1.0) * 100.0 if flux   # mag → % flux
-                  else e[mk] * 1000)                               # mag → mmag
+            dm = e[mk] * 1000                                      # mag → mmag
             # dm_0 / dm_all_pre carry a bulk offset (aperture correction + any
             # per-epoch ZP shift) that has not yet been removed.  Zero-centre
             # each epoch independently so the spatial pattern is centred near
@@ -116,9 +126,15 @@ def _bin_grid(ra, dec, dm, nbins, stat_fn):
     return grid, ra_edges, dec_edges
 
 
-def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit="mmag"):
+def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit="mmag",
+           vlim=None):
     """
     Plot one spatial panel. Returns (im, subtitle_str) — caller sets the title.
+
+    vlim: (vmin, vmax) to force. Passing one shared range for every panel is what
+    makes the convergence toward zero legible — with per-panel autoscaling each
+    panel rescales to its own spread, so a well-corrected panel looks as colourful
+    as an uncorrected one.
     """
     grid, ra_edges, dec_edges = _bin_grid(ra, dec, dm, nbins, stat_fn)
     finite = grid[np.isfinite(grid)]
@@ -128,7 +144,9 @@ def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit="mmag")
     sig_samp = float(np.std(dm_fin))  if len(dm_fin) > 1 else np.nan
     sig_map  = float(np.std(finite))  if len(finite)  > 1 else np.nan
 
-    if symmetric:
+    if vlim is not None:
+        vmin, vmax = vlim
+    elif symmetric:
         vmax = max(1.0, float(np.nanpercentile(np.abs(finite), 95))) if len(finite) else 20.0
         vmin = -vmax
     else:
@@ -156,23 +174,49 @@ def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit="mmag")
 
 
 def _make_spatial_fig(epochs, out_path, tag, nbins, stat_fn, cmap, symmetric,
-                      fig_title, flux=False):
-    unit = "%" if flux else "mmag"
+                      fig_title):
+    unit = "mmag"
     fig, axes = plt.subplots(2, 4, figsize=(22, 10),
                              gridspec_kw=dict(wspace=0.15, hspace=0.25))
     fig.suptitle(f"{fig_title} — {tag}", fontsize=14, y=0.998)
     fig.text(0.5, 0.965,
-             (r"residual $=$ (measured flux $-$ reference flux) / reference flux"
-              if flux else
-              r"residual $=$ measured magnitude $-$ ZTF reference-catalog magnitude"),
+             r"residual $=$ measured magnitude $-$ ZTF reference-catalog magnitude",
              ha="center", va="top", fontsize=10, style="italic")
 
+    # Fixed colour ranges, so the progression toward zero is visible instead of every
+    # panel autoscaling to its own spread. TWO ranges, not one: the all-source panels
+    # include faint sources and have a far larger spread than the 14–19 mag calibrator
+    # panels, and forcing a single scale on both flattens the calibrator panels to a
+    # uniform colour. Each group is scaled by its own first (uncorrected) stage:
+    #   all-source  → stage 0 "Before (all sources)"
+    #   calibrators → stage 1 "Before (calibrators)"
+    _ALL_SRC = {"dm_all_pre", "dm_all_post", "dm_3"}
+
+    def _range_from(stage_idx):
+        rk, dk, mk, _ = _STAGES[stage_idx]
+        ra, dec, dm = _stack_stage(epochs, rk, dk, mk)
+        if ra is None or not len(ra):
+            return None
+        g, _, _ = _bin_grid(ra, dec, dm, nbins, stat_fn)
+        f = g[np.isfinite(g)]
+        if not len(f):
+            return None
+        if symmetric:
+            v = max(1.0, float(np.nanpercentile(np.abs(f), 95)))
+            return (-v, v)
+        return (0.0, max(1.0, float(np.nanpercentile(f, 95))))
+
+    vlim_all = _range_from(0)   # "Before (all sources)"
+    vlim_cal = _range_from(1)   # "Before (calibrators)"
+
     for ax, (rk, dk, mk, label) in zip(axes.flatten(), _STAGES):
-        ra, dec, dm = _stack_stage(epochs, rk, dk, mk, flux=flux)
+        ra, dec, dm = _stack_stage(epochs, rk, dk, mk)
         if ra is None or len(ra) == 0:
             ax.set_visible(False)
             continue
-        im = _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit=unit)
+        _vl = vlim_all if mk in _ALL_SRC else vlim_cal
+        im = _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit=unit,
+                    vlim=_vl)
         cb = plt.colorbar(im, ax=ax, shrink=0.88, pad=0.02)
         cb.ax.tick_params(labelsize=7)
         cb.set_label(unit, fontsize=10)
@@ -185,11 +229,10 @@ def _make_spatial_fig(epochs, out_path, tag, nbins, stat_fn, cmap, symmetric,
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def make_spatial_rms(resid_dir: Path, out_path: Path, tag: str = "",
-                     nbins: int = 20, flux: bool = False) -> None:
+                     nbins: int = 20) -> None:
     """
     Median residual per spatial bin — shows systematic calibration offsets.
     Diverging colormap (RdBu_r), symmetric about zero, independent per panel.
-    flux=True renders the fractional-flux (%) residual instead of mmag.
     """
     epochs = _load_resid_npz(resid_dir)
     if not epochs:
@@ -199,17 +242,15 @@ def make_spatial_rms(resid_dir: Path, out_path: Path, tag: str = "",
                       stat_fn=np.median,
                       cmap="RdBu_r",
                       symmetric=True,
-                      fig_title="Spatial calibration residuals (median)",
-                      flux=flux)
+                      fig_title="Spatial calibration residuals (median)")
     logger.info(f"  spatial_rms → {out_path}")
 
 
 def make_spatial_iqr(resid_dir: Path, out_path: Path, tag: str = "",
-                     nbins: int = 20, flux: bool = False) -> None:
+                     nbins: int = 20) -> None:
     """
     IQR (75th−25th percentile) per spatial bin — shows epoch-to-epoch scatter.
     Sequential colormap (YlOrRd), always positive, independent per panel.
-    flux=True renders the fractional-flux (%) residual instead of mmag.
     """
     epochs = _load_resid_npz(resid_dir)
     if not epochs:
@@ -223,6 +264,5 @@ def make_spatial_iqr(resid_dir: Path, out_path: Path, tag: str = "",
                       stat_fn=_iqr,
                       cmap="YlOrRd",
                       symmetric=False,
-                      fig_title="Spatial calibration IQR (75th−25th percentile)",
-                      flux=flux)
+                      fig_title="Spatial calibration IQR (75th−25th percentile)")
     logger.info(f"  spatial_IQR → {out_path}")

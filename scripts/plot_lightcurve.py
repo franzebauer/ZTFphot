@@ -226,7 +226,14 @@ def make_lightcurves(lc_path: Path, out_path: Path,
     tgt_rows = (clean[clean["object_index"] == tgt_obj]
                 .sort_values("OBSMJD").copy())
     tgt_rows[_MAG_COL] = pd.to_numeric(tgt_rows[_MAG_COL], errors="coerce")
+    # Count epochs BEFORE the magnitude cut, so the title can report how many were
+    # lost. The cut below is stricter than "finite": it also removes wild magnitudes
+    # outside 10–26. Both losses are reported separately — epochs with no magnitude at
+    # all (total flux ≤0, the censored ones) and epochs cut for being out of range.
+    _n_tot  = int(len(tgt_rows))
+    _n_nan  = int(tgt_rows[_MAG_COL].isna().sum())
     tgt_rows = tgt_rows[tgt_rows[_MAG_COL].between(10, 26)]
+    _n_cut  = _n_tot - _n_nan - int(len(tgt_rows))
     if tgt_rows.empty:
         return
 
@@ -296,9 +303,15 @@ def make_lightcurves(lc_path: Path, out_path: Path,
     ax_top.set_ylim(ylim)
     ax_top.set_ylabel("Calibrated magnitude (AB)", fontsize=10)
     ax_top.set_xlabel("MJD", fontsize=10)
-    ax_top.set_title(
-        f"Target  med={tgt_med:.2f}  σ={tgt_std*1000:.0f} mmag  N={int(ok.sum())}",
-        fontsize=10)
+    # Report the plotted count against the TOTAL number of target epochs (counted
+    # before the magnitude cut), so this is consistent with the flux panel's N. The
+    # NaN count is the censored epochs — fainter than the reference, total flux ≤0,
+    # so no magnitude exists. A large NaN fraction means the source spends time below
+    # its reference level and the magnitude light curve is a biased view of it.
+    _ttl = (f"Target  med={tgt_med:.2f}  σ={tgt_std*1000:.0f} mmag  "
+            f"N={int(ok.sum())} of {_n_tot}  (NaN mag: {_n_nan}")
+    _ttl += f", cut: {_n_cut})" if _n_cut else ")"
+    ax_top.set_title(_ttl, fontsize=10)
     ax_top.tick_params(labelsize=9)
     ax_top.grid(True, alpha=0.2)
 

@@ -1,5 +1,5 @@
 """
-plot_calibration.py
+plot_rms.py
 -------------------
 Fig 2 — Calibration RMS improvement & corrections (4 panels).
 Top row (summary): calibrator RMS boxplot per stage | linear ZP correction vs
@@ -98,7 +98,6 @@ def _mmag_to_pct(mmag):
     return (10.0 ** (-0.4 * np.asarray(mmag, float) / 1000.0) - 1.0) * 100.0
 
 
-_SCAT_MMAG_TO_PCT = 0.4 * np.log(10) / 10.0   # small-scatter mmag → % flux (~0.0921)
 
 
 def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) -> None:
@@ -119,10 +118,17 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) 
     ax.set_title("Full-sample residual vs magnitude\n"
                  + ("(before calibration)" if is_pre
                     else "(after calib; median / mean / mode)"))
-    ax.set_xlabel("Calibrated magnitude (AB)")
     ax.set_ylabel("Residual: (measured − ref) / ref (%)" if flux
                   else "Residual: measured − ZTF ref (mmag)")
 
+    # Bin by REFERENCE magnitude (qmag_all), not the calibrated magnitude. The
+    # calibrated magnitude is censored — an epoch whose total flux is ≤0 has no
+    # magnitude and cannot be binned at all — so binning by it keeps only the
+    # bright-scattered survivors in the faint bins and manufactures a spurious
+    # positive residual ramp above ~19 mag. The reference magnitude is defined for
+    # every epoch, so the faint bins keep their full (symmetric) distribution.
+    # Falls back to mag_all for NPZs written before qmag_all was saved.
+    _used_ref = True
     mags, res = [], []
     if resid_dir is not None:
         for p in sorted(Path(resid_dir).glob("*_resid.npz")):
@@ -130,9 +136,13 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) 
                 d = np.load(str(p))
             except Exception:
                 continue
-            if "mag_all" not in d or key not in d:
+            if key not in d or ("qmag_all" not in d and "mag_all" not in d):
                 continue
-            m = np.asarray(d["mag_all"], float)
+            if "qmag_all" in d:
+                m = np.asarray(d["qmag_all"], float)
+            else:
+                m = np.asarray(d["mag_all"], float)
+                _used_ref = False
             r = (_mmag_to_pct(np.asarray(d[key], float) * 1000.0) if flux
                  else np.asarray(d[key], float) * 1000.0)  # mag → % flux or mmag
             if is_pre:
@@ -147,6 +157,9 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) 
         ax.text(0.5, 0.5, "no mag_all in resid.npz\n(re-run recalibrate)",
                 ha="center", va="center", transform=ax.transAxes, fontsize=9)
         return
+    # Label honestly: a stale NPZ falls back to the censored calibrated magnitude.
+    ax.set_xlabel("Reference magnitude (AB)" if _used_ref
+                  else "Calibrated magnitude (AB) — censored, re-run recalibrate")
 
     mag   = np.concatenate(mags)
     resid = np.concatenate(res)
@@ -195,31 +208,45 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) 
 
 
 def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
-             resid_dir: Path | None = None, flux: bool = False) -> None:
+             resid_dir: Path | None = None) -> None:
+    """Single 6-panel calibration figure; there is no separate flux variant.
+
+    Rows 1–2 always show the residual in BOTH unit systems (magnitude above,
+    % flux below, x-aligned). The remaining two panels — calibrator RMS per step
+    and the linear ZP vs seeing — are natively magnitude quantities (the linear
+    fit and the flatfield are both built in mag), so they stay in mmag.
+    """
     df = _load_epoch_headers(cal_dir)
     if df.empty:
         logger.warning(f"No calibrated epochs in {cal_dir}")
         return
-    u = "%" if flux else "mmag"
+    u = "mmag"
 
-    stages = ["NC_RMS0", "NC_RMS1", "NC_RMS2", "NC_RMSFC", "NC_RMS3", "NC_RMS4"]
+    # NC_RMSFC ("After faint corr.") dropped — Step 5 is disabled, so that stage is
+    # identical to the preceding one and only added a flat segment to the trend.
+    stages = ["NC_RMS0", "NC_RMS1", "NC_RMS2", "NC_RMS3", "NC_RMS4"]
     labels = ["Before\ncal", "After\nlinear", "After\n3σ clip",
-              "After\nfaint corr.", "After\n2D poly", "After\nflatfield"]
-    colors = ["#888888", "C0", "C1", "C2", "C3", "C4"]
+              "After\n2D poly", "After\nflatfield"]
+    colors = ["#888888", "C0", "C1", "C3", "C4"]
 
+    # 6 panels. Rows 1–2 are the SAME residual-vs-magnitude diagnostic in the two unit
+    # systems — magnitude on top, % flux directly beneath and x-aligned — so the
+    # magnitude faint-end bias is read off by eye against the unbiased flux version.
+    # Row 3 carries the per-step RMS box plot and the ZP-vs-seeing trend.
     from matplotlib.gridspec import GridSpec
-    fig = plt.figure(figsize=(20, 10))
-    gs  = GridSpec(2, 6, figure=fig, hspace=0.32, wspace=0.6)
-    ax_box  = fig.add_subplot(gs[0, 0:2])   # top-left    (calibrators)
-    ax_zp   = fig.add_subplot(gs[0, 2:4])   # top-middle  (calibrators)
-    ax_corr = fig.add_subplot(gs[0, 4:6])   # top-right   (faint correction)
-    ax_pre  = fig.add_subplot(gs[1, 0:3])   # bottom-left  (before calibration)
-    ax_post = fig.add_subplot(gs[1, 3:6])   # bottom-right (after calibration)
+    fig = plt.figure(figsize=(20, 15))
+    gs  = GridSpec(3, 6, figure=fig, hspace=0.38, wspace=0.6)
+    ax_pre   = fig.add_subplot(gs[0, 0:3])            # mag  residual, before
+    ax_post  = fig.add_subplot(gs[0, 3:6])            # mag  residual, after
+    ax_pre_f = fig.add_subplot(gs[1, 0:3], sharex=ax_pre)    # flux residual, before
+    ax_post_f= fig.add_subplot(gs[1, 3:6], sharex=ax_post)   # flux residual, after
+    ax_box   = fig.add_subplot(gs[2, 0:3])            # RMS change per calibration step
+    ax_zp    = fig.add_subplot(gs[2, 3:6])            # linear ZP vs seeing
     fig.suptitle(f"Calibration RMS improvement & corrections — {tag}", fontsize=13)
 
     # ── Top-left: calibrator RMS boxplot ──
     ax = ax_box
-    _sc = _SCAT_MMAG_TO_PCT if flux else 1.0     # RMS is scatter → linear mmag→% flux
+    _sc = 1.0                                    # mmag (no flux variant of this panel)
     data_box = [df[s].dropna().values * _sc for s in stages]
     bp = ax.boxplot(data_box, patch_artist=True, medianprops=dict(color="black", lw=2))
     for patch, color in zip(bp["boxes"], colors):
@@ -230,9 +257,17 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     ax.set_title("Calibrators: distribution per calibration step")
     ax.set_ylim(bottom=0)
 
-    # ── Bottom row: before / after calibration residual density ──
-    _faint_residual_panel(ax_pre,  resid_dir, which="pre",  curves="median", flux=flux)
-    _faint_residual_panel(ax_post, resid_dir, which="post", curves="all",    flux=flux)
+    # ── Rows 1–2: before/after residual, in magnitude (row 1) and % flux (row 2) ──
+    # Always both units: seeing them together is the point — the magnitude row carries
+    # the faint-end censoring bias, the flux row does not, and the x-alignment makes
+    # the divergence obvious.
+    _faint_residual_panel(ax_pre,    resid_dir, which="pre",  curves="median", flux=False)
+    _faint_residual_panel(ax_post,   resid_dir, which="post", curves="all",    flux=False)
+    _faint_residual_panel(ax_pre_f,  resid_dir, which="pre",  curves="median", flux=True)
+    _faint_residual_panel(ax_post_f, resid_dir, which="post", curves="all",    flux=True)
+    # Cut every magnitude axis at 23 — beyond that is noise-floor scatter only.
+    for _a in (ax_pre, ax_post, ax_pre_f, ax_post_f):
+        _a.set_xlim(right=23.0)
 
     # ── Top-middle: ZP correction vs seeing ──
     ax = ax_zp
@@ -252,8 +287,6 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
         apcorr_vals = np.where(np.isfinite(apcorr_vals), apcorr_vals, 0.0)
         zpc = zpc + apcorr_vals
         med_apcorr  = float(np.nanmedian(apcorr_vals))
-        if flux:
-            zpc = _mmag_to_pct(zpc); med_apcorr = float(_mmag_to_pct(med_apcorr))
         sc  = ax.scatter(s, zpc, c=mlv, cmap="plasma", s=10, alpha=0.7,
                          vmin=np.nanpercentile(mlv, 5), vmax=np.nanpercentile(mlv, 95))
         plt.colorbar(sc, ax=ax, label="MAGLIM (mag)")
@@ -262,45 +295,19 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
                 f"med = {float(np.nanmedian(zpc)):.1f} {u}\nσ = {float(np.nanstd(zpc)):.1f} {u}",
                 transform=ax.transAxes, va="top", fontsize=8,
                 bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
-        ax.text(0.97, 0.03,
+        ax.text(0.03, 0.03,
                 f"AperCorr 4→6px = {med_apcorr:.1f} {u}",
-                transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
+                transform=ax.transAxes, ha="left", va="bottom", fontsize=8,
                 bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
     ax.set_xlabel("Seeing (arcsec)")
-    ax.set_ylabel(f"Linear ZP correction @ mag 17 ({u})")
+    # The linear ZP fit is diff = n + m·mag; this is that fit evaluated at mag 17
+    # (a representative calibrator magnitude), with the 4→6px aperture correction
+    # added back in, expressed in mmag.
+    ax.set_ylabel(f"Linear ZP correction, evaluated at mag 17 ({u})")
     ax.set_title("ZP correction vs seeing\n(coloured by limiting magnitude)")
 
-    # ── Top-right: faint correction curves ──
-    ax = ax_corr
-    fc_cols = [f"NC_FC_{i:02d}" for i in range(7)]
-    fc_mags = [18.75, 19.25, 19.75, 20.25, 20.75, 21.25, 21.75]
-    fc_data = df[fc_cols].replace(_SENTINEL, np.nan)
-    if flux:
-        fc_data = fc_data.apply(_mmag_to_pct)   # signed faint correction mmag → % flux
-    ml_vals = df["MAGLIM"].values
-    if fc_data.notna().any().any():
-        ml_min = np.nanpercentile(ml_vals, 5)
-        ml_max = np.nanpercentile(ml_vals, 95)
-        norm   = mcolors.Normalize(vmin=ml_min, vmax=ml_max)
-        cmap   = plt.cm.plasma
-        for i, row in fc_data.iterrows():
-            vals = row.values.astype(float)
-            ok   = np.isfinite(vals)
-            if ok.sum() >= 3:
-                color = cmap(norm(ml_vals[i])) if np.isfinite(ml_vals[i]) else "gray"
-                ax.plot(np.array(fc_mags)[ok], vals[ok], color=color, lw=0.5, alpha=0.4)
-        med_fc = fc_data.median(axis=0).values
-        ok = np.isfinite(med_fc)
-        if ok.sum() >= 3:
-            ax.plot(np.array(fc_mags)[ok], med_fc[ok], "k-", lw=2, label="Median")
-        ax.axhline(0, color="k", lw=0.8, ls="--")
-        sm = ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        plt.colorbar(sm, ax=ax, label="MAGLIM (mag)")
-        ax.legend(fontsize=8)
-    ax.set_xlabel("Source magnitude (AB)")
-    ax.set_ylabel(f"Faint correction applied ({u})")
-    ax.set_title("Per-epoch faint correction vs magnitude\n(coloured by limiting magnitude)")
+    # The per-epoch faint-correction curve panel (NC_FC_00…06 vs magnitude) was removed
+    # here: the Step 5 faint correction is disabled, so those headers are all -999.
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130, bbox_inches="tight")

@@ -922,7 +922,7 @@ def main() -> None:
                 _sys.path.insert(0, str(_SCRIPTS))
             from plot_diagnostics import (
                 make_spatial_rms, make_spatial_iqr,
-                make_rms, make_precision,
+                make_rms, make_precision, make_position,
                 make_lightcurves, make_lightcurves_flux,
             )
 
@@ -970,6 +970,11 @@ def main() -> None:
                                    plot_root / f"precision_{tag}.png",
                                    tag, _tgt_ra, _tgt_dec,
                                    vet_catalog=vet_cat_arg)
+                    # Astrometry: sci-pos only — returns without writing in ref-pos,
+                    # where there are no per-epoch positions.
+                    make_position(lc_path,
+                                  plot_root / f"position_{tag}.png",
+                                  tag, _tgt_ra, _tgt_dec)
                     if not args.no_target and args.ra is not None and args.dec is not None:
                         make_lightcurves(lc_path,
                                          plot_root / f"lightcurves_{tag}.png",

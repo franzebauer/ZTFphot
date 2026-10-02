@@ -586,8 +586,27 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                              ra_all=alphafin.astype(float),
                              dec_all=deltafin.astype(float),
                              mag_all=Q_cal[k].astype(float),
+                             # Reference magnitude: the unbiased x-axis for the
+                             # residual-vs-magnitude panels. mag_all (calibrated) is
+                             # censored — epochs with total flux ≤0 have no magnitude
+                             # and cannot be binned — so binning by it selects only
+                             # the bright-scattered survivors at faint mags and
+                             # manufactures a spurious positive residual ramp.
+                             qmag_all=np.asarray(q_mag_all, dtype=float),
                              dm_all_pre=(maginst_all - q_mag_all).astype(float),
                              dm_all_post=(Q_cal[k] - q_mag_all).astype(float),
+                             # Bipolar FLUX residual (fractional): the uncensored
+                             # counterpart of dm_all_post. The magnitude residual is
+                             # NaN wherever total flux ≤0, so the faint end of any
+                             # all-source panel drawn from it keeps only the
+                             # bright-scattered survivors. This keeps every epoch,
+                             # negative flux included, and cannot be recovered by
+                             # converting dm_all_post after the fact.
+                             dflux_all_post=np.asarray(
+                                 np.where(flux_ref_ujy > 0,
+                                          flux_cal_k / np.where(flux_ref_ujy > 0,
+                                                                flux_ref_ujy, np.nan) - 1.0,
+                                          np.nan), dtype=float),
                              apcorr_4_6=np.float64(_apcorr_4_6))
 
             interpolation = np.interp(Q_cal[k], median_mag_per_bin, rms_per_bin)

@@ -24,13 +24,14 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 
     float64: OBSMJD (MJD precision), ALPHAWIN_REF, DELTAWIN_REF, ALPHA_OBJ,
              DELTA_OBJ (astrometric precision at RA~330 deg)
-    float32: all photometric quantities and per-epoch scalars
+    float32: all photometric quantities and per-epoch scalars, plus the sci-pos
+             epoch offsets DRA_SCI/DDEC_SCI (arcsec from the reference position,
+             2 dp — absolute degrees would need float64 to hold 0.01")
     Int32:   integer indices and flag words
     """
     float64_cols = [
         'OBSMJD',
         'ALPHAWIN_REF', 'DELTAWIN_REF',
-        'ALPHA_SCI', 'DELTA_SCI',
     ]
     float32_cols = [
         'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
@@ -43,6 +44,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org',
         'MAG_4_REF',
         'FLUX_4_TOT_AB', 'FERR_4_TOT_AB', 'FLUX_6_TOT_AB',   # bipolar μJy flux
+        'DRA_SCI', 'DDEC_SCI',                               # sci-pos offsets, arcsec
         'APCORR46',
     ]
     int32_cols = [
@@ -263,6 +265,22 @@ def step_lightcurves(
         drop = [c for c in _DROP_COLS if c in all_lcs.columns]
         if drop:
             all_lcs = all_lcs.drop(columns=drop)
+
+        # Sci-pos: store epoch positions as offsets FROM THE REFERENCE position in
+        # arcsec (2 dp, float32) rather than absolute degrees. The absolute values
+        # need float64 to preserve 0.01" (float32 degrees only resolves ~0.03" at
+        # these declinations), so this is ~4x cheaper and directly plottable. Using
+        # the reference as the baseline — not the per-source median epoch position —
+        # keeps any astrometric *bias* visible, not just the scatter.
+        if {'ALPHA_SCI', 'DELTA_SCI', 'ALPHAWIN_REF', 'DELTAWIN_REF'} <= set(all_lcs.columns):
+            _cd = np.cos(np.radians(pd.to_numeric(all_lcs['DELTAWIN_REF'], errors='coerce')))
+            _dra = ((pd.to_numeric(all_lcs['ALPHA_SCI'], errors='coerce')
+                     - pd.to_numeric(all_lcs['ALPHAWIN_REF'], errors='coerce')) * _cd * 3600.0)
+            _ddec = ((pd.to_numeric(all_lcs['DELTA_SCI'], errors='coerce')
+                      - pd.to_numeric(all_lcs['DELTAWIN_REF'], errors='coerce')) * 3600.0)
+            all_lcs['DRA_SCI']  = _dra.round(2).astype('float32')
+            all_lcs['DDEC_SCI'] = _ddec.round(2).astype('float32')
+            all_lcs = all_lcs.drop(columns=['ALPHA_SCI', 'DELTA_SCI'])
 
         all_lcs = _cast_lc_dtypes(all_lcs)
 
