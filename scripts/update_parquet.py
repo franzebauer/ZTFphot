@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -115,7 +116,7 @@ def _load(path: Path) -> pd.DataFrame:
 
 # ── reference catalogs + source matching ─────────────────────────────────────
 
-def _fetch_references(base: Path, quads, auth, retries: int) -> list:
+def _fetch_references(base: Path, quads, auth, retries: int, wait: float) -> list:
     """refimg + refsexcat per quadrant, retrying transient (503/HTML) failures."""
     import time
     from download_coordinator import ref_url, ref_local_path, download_file
@@ -130,7 +131,7 @@ def _fetch_references(base: Path, quads, auth, retries: int) -> list:
                 if st in ("ok", "skipped", "404"):
                     break
                 logger.warning(f"  reference {suf} for {q}: {msg} — retry {attempt + 1}/{retries}")
-                time.sleep(30 * (attempt + 1))
+                time.sleep(wait * (attempt + 1))
             if st not in ("ok", "skipped"):
                 logger.warning(f"  reference {suf} for {q}: giving up ({st})")
                 good = False
@@ -140,21 +141,34 @@ def _fetch_references(base: Path, quads, auth, retries: int) -> list:
     return ok
 
 
-def _download_epochs(dc, todo: pd.DataFrame, base: Path, fc: str, a) -> None:
-    """Science products of the epochs to add; transient failures (IRSA 503s, HTML error
-    pages) are retried in further rounds with increasing waits."""
+def _download_epochs(dc, todo: pd.DataFrame, base: Path, fc: str, a) -> list[str]:
+    """Science products of the epochs to add. Transient failures (IRSA 503s, dropped
+    connections) get a few SHORT retry rounds (--retry-wait s x round); whatever still
+    fails is deferred rather than waited for — the target is processed without those
+    epochs and they are recorded in the output (epochs_deferred), for --retry-deferred.
+    Returns the deferred filefracdays."""
     import time
     for attempt in range(a.download_retries + 1):
         res = dc.download_all(todo, base_dir=base, bands=[fc[1:]], products="sci",
                               max_workers=a.download_workers)
         if not res["failed_urls"]:
-            return
+            break
         if attempt < a.download_retries:
+            wait = a.retry_wait * (attempt + 1)
             logger.warning(f"  {len(res['failed_urls'])} downloads failed — retry "
-                           f"{attempt + 1}/{a.download_retries} in {60 * (attempt + 1)} s")
-            time.sleep(60 * (attempt + 1))
-    logger.warning(f"  {len(res['failed_urls'])} downloads still failing; those epochs are "
-                   f"not added this time (rerun later)")
+                           f"{attempt + 1}/{a.download_retries} in {wait:.0f} s")
+            time.sleep(wait)
+    deferred = []
+    for r in todo.itertuples():
+        ffd = str(int(float(r.filefracday)))
+        diff = dc.sci_local_path(base, int(r.field), r.filtercode, int(r.ccdid), int(r.qid),
+                                 ffd, "scimrefdiffimg.fits")
+        if not diff.exists():
+            deferred.append(ffd)
+    if deferred:
+        logger.warning(f"  {len(deferred)} epoch(s) deferred (download still failing) — "
+                       f"processed without them; add later with --retry-deferred")
+    return deferred
 
 
 def _ref_catalog(base: Path, q) -> pd.DataFrame:
@@ -431,14 +445,24 @@ def update_target(paths: list[Path], a, auth) -> bool:
         if a.dry_run or len(todo) == 0:
             if len(todo) == 0:
                 logger.info("  nothing to add")
+                if not a.dry_run:
+                    for path in variants.values():
+                        _clear_deferred(path)
             return True
 
         # 2. references + catalogs, then only the missing/new epochs
-        quads = _fetch_references(base, quads_in, auth, a.download_retries)
+        # References are essential: a quadrant missing them would lose its rows, so a
+        # (transient) reference failure fails the whole target — nothing is written and
+        # the next run retries it — rather than dropping the quadrant.
+        quads = _fetch_references(base, quads_in, auth, max(a.download_retries, 3), a.retry_wait)
+        if len(quads) < len(quads_in):
+            logger.warning(f"FAIL {first.name}: reference products unavailable for "
+                           f"{sorted(set(quads_in) - set(quads))} — target skipped, rerun later")
+            return False
         (base / "Catalogs").mkdir(exist_ok=True)
         make_catalog(str(base / "Catalogs"), str(base / "Reference"))
         refs = {q: _ref_catalog(base, q) for q in quads}
-        _download_epochs(dc, todo, base, fc, a)
+        deferred = _download_epochs(dc, todo, base, fc, a)
 
         # 3. old epochs -> per-epoch catalogs
         all_ep = dc.filter_epochs(epochs).astype({"field": int, "ccdid": int, "qid": int})
@@ -513,15 +537,21 @@ def update_target(paths: list[Path], a, auth) -> bool:
                             all_sources=a.all_sources or not catalog_changed)
             out_dir = Path(a.outdir) if a.outdir else path.parent
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / f"{path.stem}{a.suffix}.parquet"
+            # re-running on an updated file (--retry-deferred) refreshes it in place
+            stem = path.stem if path.stem.endswith(a.suffix) else f"{path.stem}{a.suffix}"
+            out_path = out_dir / f"{stem}.parquet"
             new_meta[b"ztfphot_update"] = json.dumps({
                 "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "source": str(path), "cuts": cuts, "cuts_recorded": recorded,
-                "epochs_added": int(len(todo)), "rows": int(len(out)),
+                "epochs_added": int(len(todo) - len(deferred)),
+                "epochs_deferred": int(len(deferred)), "deferred_filefracdays": deferred,
+                "rows": int(len(out)),
             }, default=str).encode()
             table = pa.Table.from_pandas(out, preserve_index=False)
             table = table.replace_schema_metadata({**new_meta, **(table.schema.metadata or {})})
-            pq.write_table(table, out_path)
+            tmp = out_path.with_name(out_path.name + ".tmp")
+            pq.write_table(table, tmp)
+            os.replace(tmp, out_path)
             logger.info(f"  → {out_path} ({len(out):,} rows, {out['OBSMJD'].nunique()} epochs)")
         return True
     finally:
@@ -562,11 +592,43 @@ def _plan_directory(d: Path, a) -> list[list[Path]]:
     for gkey, members in groups.items():
         outs = [(Path(a.outdir) if a.outdir else m.parent) / f"{m.stem}{a.suffix}.parquet"
                 for m in members]
-        if not a.redo and all(o.exists() for o in outs):
+        done = all(o.exists() for o in outs)
+        if a.retry_deferred:
+            # only targets whose update left deferred epochs; their _updated files are the
+            # input (all other epochs already in them) and are refreshed in place
+            if done and any(_n_deferred(o) for o in outs):
+                out.append(outs)
+            continue
+        if not a.redo and done:
             logger.info(f"  skip {Path(gkey).name}: already updated ({', '.join(o.name for o in outs)})")
             continue
         out.append(members)
     return out
+
+
+def _clear_deferred(p: Path) -> None:
+    """An updated file whose deferred epochs turn out to need nothing (no longer
+    missing / no longer passing the cuts): reset epochs_deferred so --retry-deferred
+    stops selecting it."""
+    if not _n_deferred(p):
+        return
+    t = pq.read_table(p)
+    md = dict(t.schema.metadata or {})
+    u = json.loads(md[b"ztfphot_update"])
+    u.update(epochs_deferred=0, deferred_filefracdays=[])
+    md[b"ztfphot_update"] = json.dumps(u, default=str).encode()
+    tmp = p.with_name(p.name + ".tmp")
+    pq.write_table(t.replace_schema_metadata(md), tmp)
+    os.replace(tmp, p)
+    logger.info(f"  {p.name}: deferred epochs no longer missing — flag cleared")
+
+
+def _n_deferred(p: Path) -> int:
+    try:
+        meta = pq.read_schema(p).metadata or {}
+        return int(json.loads(meta.get(b"ztfphot_update", b"{}")).get("epochs_deferred", 0))
+    except Exception:
+        return 0
 
 
 def main():
@@ -598,8 +660,14 @@ def main():
     p.add_argument("--target-match-radius", type=float, default=1.0)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--download-workers", type=int, default=16)
-    p.add_argument("--download-retries", type=int, default=4,
-                   help="extra rounds for transient download failures (default 4)")
+    p.add_argument("--download-retries", type=int, default=2,
+                   help="short extra rounds for failed downloads (default 2); epochs still "
+                        "failing are deferred, not waited for")
+    p.add_argument("--retry-wait", type=float, default=15.0, metavar="S",
+                   help="wait before retry round n is n x S seconds (default 15)")
+    p.add_argument("--retry-deferred", action="store_true",
+                   help="directory mode: only targets whose earlier update deferred epochs; "
+                        "re-run on their _updated files (downloads just those epochs)")
     p.add_argument("--tmpdir", default=None, help="parent dir for the temporary base dir")
     p.add_argument("--keep-temp", action="store_true")
     a = p.parse_args()
