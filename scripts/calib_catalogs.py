@@ -62,7 +62,14 @@ def _apply_flatfield(ra, dec, ff):
 # ── LDAC reader ───────────────────────────────────────────────────────────────
 
 _HDR_KEYS = ['OBSMJD', 'AIRMASS', 'NMATCHES', 'MAGZP_DIF', 'MAGZPRMS_DIF',
-             'CLRCOEFF', 'SATURATE', 'INFOBITS_DIF', 'SEEING', 'MAGLIM']
+             'CLRCOEFF', 'SATURATE', 'INFOBITS_DIF', 'SEEING', 'MAGLIM', 'PHOTCODE']
+
+# Aperture-photometry catalogs (PHOTCODE = 'ztfphot-aper') carry real per-epoch flags of
+# the difference image: calibrator measurements with an aperture off the image edge (8) or
+# on masked pixels (16) are rejected. Legacy SExtractor flags describe the simulated
+# detection image and are zeroed (img_kind 'sim'), as before.
+_AP_PHOTCODE = 'ztfphot-aper'
+_AP_CAL_REJECT_BITS = 8 | 16
 
 
 def _read_ldac(catalog_path):
@@ -152,9 +159,11 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     mjd         = data['OBSMJD']
 
     flags = table['FLAGS']
-    if img_kind.casefold() == 'sim':
+    is_aper = _AP_PHOTCODE in str(data.get('PHOTCODE', ''))
+    if img_kind.casefold() == 'sim' and not is_aper:
         for i in range(len(flags)):
             flags[i] = 0
+    cal_reject = _AP_CAL_REJECT_BITS if is_aper else ~0
 
     clas = table_ref['CLASS_STAR'].values
 
@@ -279,7 +288,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         good_ref_mask = is_good_calib[n_safe]
         good_ref_mask[_is_tgt] = False  # target excluded from calibrator selection
         fn = np.where(
-            (class_star >= 0.7) & (flags_tmp == 0) &
+            (class_star >= 0.7) & ((np.asarray(flags_tmp).astype(int) & cal_reject) == 0) &
             (q_mag > 14.) & (q_mag < 19.0) & (q_err < 0.3) &
             (maginst < 19.0) & (maginst > 14.) & (errinst < 0.3) &
             good_ref_mask

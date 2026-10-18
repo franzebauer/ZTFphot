@@ -33,10 +33,13 @@ background-only error SExtractor gave with GAIN=inf.
 
 With ref + sci requested, both position sets are measured in one pass per image.
 
-FLAGS (own bit mask; informational, carried as FLAG_SE_DIF):
-  1 — another catalog source within the largest aperture radius (blend)
-  2 — an aperture contains masked (NaN) pixels
-  4 — an aperture extends beyond the image edge
+FLAGS (bit values aligned with SExtractor's meanings; carried to the parquet as FLAG_AP):
+   1 — another catalog source within the largest aperture radius (≈ SExtractor 1, neighbour)
+   8 — an aperture extends beyond the image edge                 (≈ SExtractor 8, truncated)
+  16 — an aperture contains masked (NaN) pixels                  (≈ SExtractor 16, incomplete
+       aperture data)
+Calibration rejects calibrator measurements with bits 8|16 (CAL_REJECT_BITS); blends are
+already handled at reference level (FLAG_SE_REF == 0 in vetting).
 
 Output: one LDAC catalog per epoch with the same name, layout and columns as the
 SExtractor *_sexout.fits (LDAC_IMHEAD = the difference-image header; LDAC_OBJECTS with
@@ -60,6 +63,10 @@ BKG_ANNULUS_THICK = 35.0      # px, = SExtractor BACKPHOTO_THICK in clean.sex
 BKG_MESH = 64                 # px, = SExtractor BACK_SIZE
 BKG_FILTER = 3                # = SExtractor BACK_FILTERSIZE
 ISO_FACTOR = 1.58             # r_iso / FWHM of the old simulated source (amp 1000, thresh 1)
+
+FLAG_NEIGHBOUR, FLAG_EDGE, FLAG_MASKED = 1, 8, 16
+CAL_REJECT_BITS = FLAG_EDGE | FLAG_MASKED     # calib_catalogs rejects calibrators with these
+PHOTCODE = "ztfphot-aper"                     # LDAC header tag identifying these catalogs
 
 
 def _ffd_from_path(p: Path) -> str:
@@ -273,18 +280,18 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
             a_eff = np.asarray(aperture_photometry(ep.fin, ap, method="exact")["aperture_sum"], float)
             flux[:, k] = s - bkg_loc * a_eff
             ferr[:, k] = rms * np.sqrt(a_eff)
-            flags |= np.where(a_eff < ap.area - 1e-6, 2, 0).astype(np.int16)
+            flags |= np.where(a_eff < ap.area - 1e-6, FLAG_MASKED, 0).astype(np.int16)
         rmax = max(radii)
         edge = (x - rmax < -0.5) | (x + rmax > ncols - 0.5) | (y - rmax < -0.5) | (y + rmax > nrows - 0.5)
-        flags |= np.where(edge, 4, 0).astype(np.int16)
-        flags[edge] &= ~np.int16(2)                           # off-edge pixels aren't "masked"
+        flags |= np.where(edge, FLAG_EDGE, 0).astype(np.int16)
+        flags[edge] &= ~np.int16(FLAG_MASKED)                 # off-edge pixels aren't "masked"
         if n > 1:
             from scipy.spatial import cKDTree
             d, _ = cKDTree(pos).query(pos, k=2)
-            flags |= np.where(d[:, 1] < rmax, 1, 0).astype(np.int16)
+            flags |= np.where(d[:, 1] < rmax, FLAG_NEIGHBOUR, 0).astype(np.int16)
 
     header = ep.header.copy()
-    header["PHOTCODE"] = ("ztfphot-aper", "forced aperture photometry (photutils)")
+    header["PHOTCODE"] = (PHOTCODE, "forced aperture photometry (photutils)")
     header["APBKG"] = (bkg, "aperture background mode")
     if bkg == "mesh":
         header["APBKGBOX"] = (ep.bkg_mesh, "background mesh box [px]")

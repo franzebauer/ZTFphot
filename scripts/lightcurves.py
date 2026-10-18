@@ -49,7 +49,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     ]
     int32_cols = [
         'NMATCHES', 'INFOBITS_DIF', 'INFOBITS_REF',
-        'FLAG_SE_REF', 'object_index',
+        'FLAG_SE_REF', 'FLAG_AP', 'object_index',
     ]
     for col in float64_cols:
         if col in df.columns:
@@ -74,7 +74,6 @@ _EPOCH_KEYS = [
 # Columns to drop before writing (redundant, derivable, or replaced by metadata)
 _DROP_COLS = {
     'ALPHAWIN_J2000', 'DELTAWIN_J2000',   # dropped in ref-pos; renamed to ALPHA_SCI/DELTA_SCI in sci-pos
-    'FLAGS',                               # = FLAG_SE_DIF; dropped
     'FLUX_3_TOT_AB', 'FERR_3_TOT_AB',
     # FLUX_4_TOT_AB / FERR_4_TOT_AB / FLUX_6_TOT_AB are KEPT — bipolar μJy flux
     # (sign-preserving; the negative-flux epochs the magnitude drops to NaN). 6px
@@ -250,7 +249,9 @@ def step_lightcurves(
             # Sci-pos: keep epoch positions as ALPHA_SCI/DELTA_SCI.
             # Ref-pos: drop them (meaningless centroid on simulated PSF); _DROP_COLS handles removal.
             pos_rename = {'ALPHAWIN_J2000': 'ALPHA_SCI', 'DELTAWIN_J2000': 'DELTA_SCI'} if suffix == "_sci" else {}
-            rename = {'CLASS_STAR': 'CLASS_STAR_OBJ', **pos_rename}
+            # FLAGS -> FLAG_AP: per-epoch aperture flags (1 neighbour, 8 edge, 16 masked;
+            # always 0 for legacy SExtractor catalogs, whose flags calibration zeroes)
+            rename = {'CLASS_STAR': 'CLASS_STAR_OBJ', 'FLAGS': 'FLAG_AP', **pos_rename}
             ep_rows = ep_rows.rename(columns={k: v for k, v in rename.items() if k in ep_rows.columns})
 
             frames.append(ep_rows)
