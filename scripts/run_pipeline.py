@@ -276,6 +276,26 @@ def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
             logger.info(f"  {tag}: nearest ref source {sep:.2f}\" from target — OK")
 
 
+def _photometry_steps(args):
+    """(simulate, sex, simulate_sci, sex_sci) step functions for --photometry.
+    'aper' keeps the step names (and their on-disk catalogs) but runs forced photutils
+    photometry; the simulate steps become no-ops."""
+    if args.photometry == "sex":
+        from photometry import step_simulate, step_sextractor
+        from photometry_scipos import step_simulate_scipos, step_sex_scipos
+        return step_simulate, step_sextractor, step_simulate_scipos, step_sex_scipos
+    from functools import partial
+    from aperture_photometry import step_aperture, step_aperture_scipos, step_noop
+    kw = dict(bkg=args.aper_bkg, bkg_mesh=args.aper_bkg_mesh)
+    # ref + sci requested: measure both position sets in one pass over each image (the
+    # ref step writes the sci catalogs too), so the separate sci step is not needed.
+    both = "sex" in args.steps and (args.both or "sex_sci" in args.steps)
+    ref_step = partial(step_aperture, also_sci=both,
+                       assoc_radius_sci=args.assoc_radius_sci, **kw)
+    sci_step = step_noop if both else partial(step_aperture_scipos, **kw)
+    return step_noop, ref_step, step_noop, sci_step
+
+
 def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> None:
     """
     Run funpack → (catalog once) → simulate → sex in batches of --purge-batch N,
@@ -285,8 +305,10 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
     import math
     import pandas as pd
     from download_coordinator import download_all, purge_images, filter_epochs
-    from photometry import step_make_catalog, step_simulate, step_sextractor
-    from photometry_scipos import step_simulate_scipos, step_sex_scipos
+    from photometry import step_make_catalog
+    from aperture_photometry import catalog_ok
+    step_simulate, step_sextractor, step_simulate_scipos, step_sex_scipos = \
+        _photometry_steps(args)
 
     N = args.purge_batch
     steps = set(args.steps)
@@ -404,11 +426,13 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
         def _epoch_done(ffd):
             needle = f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"
             perm404 = any(needle in url for url in _perm404_urls)
-            ref_done = _sexcat_path(ffd).exists() or perm404
+            # catalog_ok, not exists(): a header-only/truncated catalog left by a failed
+            # SExtractor run must not mark the epoch done (it would never be redone)
+            ref_done = catalog_ok(_sexcat_path(ffd)) or perm404
             if not ref_done:
                 return False
             if "simulate_sci" in steps or "sex_sci" in steps:
-                return _sci_sexcat_path(ffd).exists() or perm404
+                return catalog_ok(_sci_sexcat_path(ffd)) or perm404
             return True
 
         import re as _re
@@ -575,6 +599,21 @@ def main() -> None:
     p.add_argument("--assoc-radius-sci",     type=float, default=1.5, metavar="ARCSEC",
                    help="SExtractor ASSOC radius for sci-pos photometry (default 1.5; "
                         "wider to allow epoch-to-epoch science-centroid shifts)")
+    p.add_argument("--photometry", choices=["aper", "sex"], default="aper",
+                   help="Difference-image photometry: 'aper' (default) = forced photutils "
+                        "apertures at the reference (or science-catalog) positions, no "
+                        "simulated image — the simulate/simulate_sci steps become no-ops; "
+                        "'sex' = legacy simulated-image + SExtractor dual-image mode. Both "
+                        "write the same SExCatalogs*/…_sexout.fits catalogs.")
+    p.add_argument("--aper-bkg", choices=["box", "local", "mesh", "none"], default="box",
+                   help="Background for --photometry aper: 'box' (default) = 3σ-clipped mean "
+                        "in a square annulus (1.58×SEEING .. +35 px) via integral images; "
+                        "'local' = clipped median in the circular annulus (≈ SExtractor "
+                        "BACKPHOTO LOCAL; same precision, ~2.5x slower photometry), "
+                        "'mesh' = 64 px "
+                        "Background2D level, 'none' = no subtraction")
+    p.add_argument("--aper-bkg-mesh", type=int, default=64, metavar="PX",
+                   help="Mesh box size (px) for --aper-bkg mesh (default 64)")
     p.add_argument("--merge-match-radius",   type=float, default=1.5, metavar="ARCSEC",
                    help="Cross-match radius (arcsec) for common sources between "
                         "overlapping quadrants in the merge step (default 1.5)")
@@ -799,8 +838,9 @@ def main() -> None:
         logger.info(f"  {q['field']:06d} {q['filtercode']} ccd{q['ccdid']:02d} q{q['qid']}")
 
     # ── Import step modules ───────────────────────────────────────────────────
-    from photometry  import step_make_catalog, step_simulate, step_sextractor
-    from photometry_scipos import step_simulate_scipos, step_sex_scipos
+    from photometry  import step_make_catalog
+    step_simulate, step_sextractor, step_simulate_scipos, step_sex_scipos = \
+        _photometry_steps(args)
     from calibrate   import step_vet, step_calibrate, step_build_flatfield
     from lightcurves import step_lightcurves, step_merge
 

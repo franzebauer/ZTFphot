@@ -1,6 +1,6 @@
 # ZTFphot
 
-Difference-image aperture photometry pipeline for ZTF data. Given a sky position, it queries IRSA for field coverage, downloads science and reference images, runs SExtractor in dual-image mode, calibrates light curves per epoch, and assembles per-object light curves across multiple field/CCD/quadrant combinations.
+Difference-image aperture photometry pipeline for ZTF data. Given a sky position, it queries IRSA for field coverage, downloads science and reference images, runs forced aperture photometry (photutils) on the difference images, calibrates light curves per epoch, and assembles per-object light curves across multiple field/CCD/quadrant combinations.
 
 ---
 
@@ -29,9 +29,9 @@ conda env create -f environment.yml
 conda activate ztf
 ```
 
-This installs Python, numpy, astropy, scipy, matplotlib, pandas, ztfquery, and SExtractor.
+This installs Python, numpy, astropy, scipy, matplotlib, pandas, photutils, and ztfquery.
 
-> **Note:** The `sex` step requires SExtractor. On most systems: `conda install -n ztf -c conda-forge source-extractor`. On HPC clusters it is often available via `module load sextractor` (or `module avail sex` to check).
+> **Note:** SExtractor is only needed for the legacy `--photometry sex` mode (the default `aper` mode uses photutils). An existing env gets photutils with `conda install -n ztf -c conda-forge photutils`. For SExtractor: On most systems: `conda install -n ztf -c conda-forge source-extractor`. On HPC clusters it is often available via `module load sextractor` (or `module avail sex` to check).
 
 ### 3. Configure IRSA credentials
 
@@ -226,10 +226,10 @@ data/                       ← created in your working directory on first run
 | Field lookup | `lookup` | Query IRSA for ZTF field/CCD/quadrant coverage at the target position |
 | Download | `download` | Fetch science and reference images from IRSA. With `--ra/--dec`, the small reference products are fetched first and any quadrant whose target falls outside the reference detector area is **dropped before the costly science download** (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
 | Reference catalog | `catalog` | Build reference CSV from `refsexcat.fits`; checks target coverage (see [Target coverage diagnostics](#target-coverage-diagnostics)) |
-| Simulate (ref-pos) | `simulate` | Build simulated detection images (PSF at reference positions; injects target if absent from reference catalog) |
-| SExtractor (ref-pos) | `sex` | Dual-image aperture photometry on difference images using reference positions |
-| Simulate (sci-pos) | `simulate_sci` | Build simulated detection images from per-epoch science sexcat positions |
-| SExtractor (sci-pos) | `sex_sci` | Dual-image aperture photometry using science-image positions (1.5 arcsec ASSOC radius) |
+| Simulate (ref-pos) | `simulate` | No-op with `--photometry aper` (default). Legacy `sex` mode: build simulated detection images (PSF at reference positions; injects target if absent from reference catalog) |
+| Photometry (ref-pos) | `sex` | Forced aperture photometry on the difference images at the reference positions (`--photometry aper`, default), or legacy SExtractor dual-image mode (`--photometry sex`). Writes `SExCatalogs/…_sexout.fits` either way |
+| Simulate (sci-pos) | `simulate_sci` | No-op with `--photometry aper`. Legacy: simulated images from per-epoch science sexcat positions |
+| Photometry (sci-pos) | `sex_sci` | Forced aperture photometry at the per-epoch science-catalog (`*_sexcat.fits`) positions, tied to the reference within `--assoc-radius-sci`; or legacy SExtractor (`--photometry sex`) |
 | Vet | `vet` | Flag variable/bad calibration stars by multi-epoch RMS |
 | Calibrate | `calibrate` | Linear ZP → 3σ clip → faint correction → 2D polynomial → flatfield |
 | Flatfield | `flatfield` | Rebuild spatial flatfield from post-polynomial residuals |
@@ -286,6 +286,8 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--faint-err-max E` | Max magnitude error for sources that define the per-bin faint correction (default 0.5). Near MAGLIM a tight cut keeps only high-SNR sources — a different population from the one the correction is applied to, which under-corrects those bins. Loosen (e.g. 1.0) so the correction is built from the population it corrects |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
 | `--target-match-radius ARCSEC` | Target association radius (default: 1.0 arcsec). One radius for two coupled operations: the target is **injected** as a new source if no catalog source lies within it, and the input RA/Dec is **matched** to a source in the calibrated catalog within it. Because a target with no nearby reference source is injected (at the input position) and then recovered by the match, this radius never causes a spurious "target not found". |
+| `--photometry {aper,sex}` | Difference-image photometry: `aper` (default) = forced photutils apertures, no simulated image; `sex` = legacy simulated-image + SExtractor dual-image mode. Same output catalogs |
+| `--aper-bkg {box,local,mesh,none}` | Background for `aper`: `box` (default) = 3σ-clipped mean in a square annulus (1.58×SEEING to +35 px) computed with integral images; `local` = clipped median in the equivalent circular annulus (≈ SExtractor `BACKPHOTO LOCAL`, same precision, ~2.5× slower photometry); `mesh` = Background2D level (`--aper-bkg-mesh`, default 64 px; degrades i band — fringing); `none` |
 | `--assoc-radius ARCSEC` | SExtractor ASSOC radius for **ref-pos** photometry (default: 0.5; tight because PSFs are painted at exact reference positions) |
 | `--assoc-radius-sci ARCSEC` | SExtractor ASSOC radius for **sci-pos** photometry (default: 1.5; wider to allow epoch-to-epoch science-centroid shifts) |
 | `--merge-match-radius ARCSEC` | Cross-match radius for common sources between overlapping quadrants in the merge step (default: 1.5) |
@@ -457,7 +459,21 @@ File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each
 
 ---
 
-## SExtractor configuration
+## Aperture photometry (`--photometry aper`, default)
+
+`aperture_photometry.py` measures forced circular apertures with photutils directly on each difference image; there is no simulated detection image and no detection step.
+
+- **Positions**: ref-pos = every reference-catalog source (plus the `--ra/--dec` target as index N+1 when no reference source lies within `--target-match-radius`); sci-pos = every source of the epoch's ZTF `*_sexcat.fits`, tied to the nearest reference entry within `--assoc-radius-sci` (unmatched dropped). `VECTOR_ASSOC`/`object_index` is the same 1-based reference index as before.
+- **Which sources**: centre on the frame and > 50% finite pixels within 0.75×SEEING (the criterion the simulated image used to decide what to paint), so the same sources are measured.
+- **Apertures**: diameters 3, 4, 6, 10 px (radii 1.5, 2, 3, 5), exact pixel overlap; masked (NaN) pixels excluded.
+- **Background** (`--aper-bkg`): `box` (default) = 3σ-clipped mean in a square annulus from 1.58×SEEING to +35 px, for all sources at once via integral images (pixels clipped against the 64 px background level/RMS first); `local` = clipped median in the circular annulus. Tested on J1025 (642 epochs, g/r/i): per-star σ identical to `local` in g/r (ratio 1.000) and within 0–1.2% in i; photometry 2.5× faster. A 64 px `mesh` matches in g/r but degrades i (fringes: +6% faint σ, +20 mmag faint bias).
+- **Errors**: background RMS (64 px `Background2D` mesh, evaluated at the source positions) × √(unmasked aperture area), the background-only error SExtractor gave with `GAIN=inf`.
+- **FLAGS** (own bits, carried as `FLAG_SE_DIF`): 1 = another catalog source within 5 px, 2 = masked pixels in an aperture, 4 = aperture crosses the image edge.
+- **Output**: identical LDAC layout/name to SExtractor (`LDAC_IMHEAD` = difference-image header, `LDAC_OBJECTS` with `FLUX_APER(4)`, `FLUXERR_APER(4)`, `VECTOR_ASSOC`, …), written to a temp file and renamed, so a crash cannot leave a partial catalog. Calibration and all later steps are unchanged.
+
+**Validation** (`compare_aperture_sex.py`, 61 epochs / 3 quadrants of `est_084892`, ~91k source-epochs): per-source flux differences vs SExtractor have median −0.01 to −0.03σ and MAD 0.07–0.17σ (3–10 px), error ratio 0.999; after full calibration, bright-star (<18 mag) `MAG_4` agrees to <0.1 mmag median / 0.6 mmag MAD and per-star scatter is unchanged. SExtractor's detection on the simulated image shifted 12% of aperture centres by >0.5 px (blends), which forced positions avoid.
+
+## SExtractor configuration (legacy, `--photometry sex`)
 
 - **Aperture diameters**: 3, 4, 6, 10 pixels (radii 1.5, 2, 3, 5 px) — these are diameters, matching the original pipeline
 - **Primary aperture**: k=1 (4 px diameter) → stored as `MAG_4_TOT_AB` / `FLUX_4_TOT_AB`
@@ -516,14 +532,14 @@ This makes the failure **visible in the plots directory** rather than requiring 
 
 ### 4. Per-target reason codes (`target_status.csv` / `sources_status.csv`)
 
-For a `--ra/--dec` run the pipeline records **why** the target did or did not get photometry. The `simulate` step writes each epoch's target fate under `TargetStatus/` (a directory `--purge-batch` never deletes), and at the end of the run `<base-dir>/target_status.csv` is written as one line `ra,dec,reason` with the coarse, best-across-quadrants reason:
+For a `--ra/--dec` run the pipeline records **why** the target did or did not get photometry. The photometry step (`sex`; `simulate` in legacy mode) writes each epoch's target fate under `TargetStatus/` (a directory `--purge-batch` never deletes), and at the end of the run `<base-dir>/target_status.csv` is written as one line `ra,dec,reason` with the coarse, best-across-quadrants reason:
 
 | Reason | Meaning |
 |--------|---------|
 | `OK` | target has a light curve — ≥1 finite **flux** measurement, **positive or negative** (a fainter-than-reference detection is still a detection; difference photometry is bipolar) — *and* has a reference detection |
 | `LACKS_REFIMG_DETECTION` | has a flux light curve but **no reference source** (`target_ref_mag` = NaN) — `FLUX_4_TOT_AB` is bipolar *difference* flux, not total; check for blends (see [§2](#2-target_sep_arcsec--target_ref_mag-metadata-in-the-parquet)) |
 | `MATCHED_NEIGHBOR` | within `--target-match-radius` of a catalog source (photometered as that source) |
-| `NOT_RECOVERED` | painted into ≥1 simulated image but SExtractor/ASSOC never produced any row |
+| `NOT_RECOVERED` | measurable ("painted") in ≥1 epoch but no row reached the light curve |
 | `ON_MASK` | in-frame but never painted — `_valid_frac ≤ 0.5` every epoch (target pixel persistently masked) |
 | `OUTSIDE_FOOTPRINT` | never in-frame in any epoch |
 | `NO_EPOCHS` | no epochs were simulated |

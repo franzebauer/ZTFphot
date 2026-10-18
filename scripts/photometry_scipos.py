@@ -131,10 +131,12 @@ def _sex_scipos_one(args: tuple) -> tuple[str, bool, str]:
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=120)
         if result.returncode != 0:
+            out_cat.unlink(missing_ok=True)      # don't leave a partial catalog behind
             return (str(out_cat), False,
                     result.stderr.decode(errors="replace").strip()[-300:])
         return (str(out_cat), True, "ok")
     except subprocess.TimeoutExpired:
+        out_cat.unlink(missing_ok=True)
         return (str(out_cat), False, "SExtractor timed out after 120s")
     except FileNotFoundError:
         return (str(out_cat), False,
@@ -156,6 +158,7 @@ def step_sex_scipos(
     if str(_scripts) not in sys.path:
         sys.path.insert(0, str(_scripts))
     from photometry import _write_assoc_catalog
+    from aperture_photometry import catalog_ok
 
     def _ffd(p: Path) -> str:
         return p.name.split("_")[1]
@@ -196,7 +199,7 @@ def step_sex_scipos(
             if not diff_path.exists():
                 continue
             out_cat = cat_subdir / sim_path.name.replace("_simulated_sci.fits", "_sexout.fits")
-            if out_cat.exists() and not force:
+            if not force and catalog_ok(out_cat):     # header-only/truncated -> redo
                 continue
             tasks.append((sim_path, diff_path, out_cat,
                           sex_conf, sex_param, sex_nnw, verbose, assoc_path, assoc_radius))

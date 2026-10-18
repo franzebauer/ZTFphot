@@ -14,6 +14,9 @@ dependencies:
   - astropy
   - matplotlib
 
+  # Forced aperture photometry on the difference images
+  - photutils
+
   # Parquet I/O (used by pandas for .parquet files)
   - pyarrow
 

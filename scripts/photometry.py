@@ -258,10 +258,12 @@ def _sex_one(args: tuple) -> tuple[str, bool, str]:
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=120)
         if result.returncode != 0:
+            out_cat.unlink(missing_ok=True)      # don't leave a partial catalog behind
             return (str(out_cat), False,
                     result.stderr.decode(errors="replace").strip()[-300:])
         return (str(out_cat), True, "ok")
     except subprocess.TimeoutExpired:
+        out_cat.unlink(missing_ok=True)
         return (str(out_cat), False, "SExtractor timed out after 120s")
     except FileNotFoundError:
         return (str(out_cat), False,
@@ -279,6 +281,7 @@ def step_sextractor(
 ) -> int:
     """Run SExtractor dual-image mode for every epoch.
     filefracdays: if given, only process files matching those epoch IDs."""
+    from aperture_photometry import catalog_ok
     sex_conf  = _SEX_DIR / "clean.sex"
     sex_param = _SEX_DIR / "default.param"
     sex_nnw   = _SEX_DIR / "default.nnw"
@@ -320,7 +323,7 @@ def step_sextractor(
             if not diff_path.exists():
                 continue
             out_cat = cat_subdir / sim_path.name.replace("_simulated.fits", "_sexout.fits")
-            if out_cat.exists() and not force:
+            if not force and catalog_ok(out_cat):     # header-only/truncated -> redo
                 continue
             tasks.append((sim_path, diff_path, out_cat,
                           sex_conf, sex_param, sex_nnw, verbose, assoc_path, assoc_radius))
