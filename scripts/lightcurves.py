@@ -44,6 +44,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org',
         'MAG_4_REF',
         'FLUX_4_TOT_AB', 'FERR_4_TOT_AB', 'FLUX_6_TOT_AB',   # bipolar μJy flux
+        'FLUX_4_DIF', 'FERR_4_DIF',                          # raw 4 px diff flux, counts
         'DRA_SCI', 'DDEC_SCI',                               # sci-pos offsets, arcsec
         'APCORR46',
     ]
@@ -82,7 +83,6 @@ _DROP_COLS = {
     'FLUX_10_TOT_AB', 'FERR_10_TOT_AB',
     'FLUX_AUTO_TOT_AB', 'FERR_AUTO_TOT_AB',
     'FLUX_3_DIF', 'FERR_3_DIF',
-    'FLUX_4_DIF', 'FERR_4_DIF',
     'FLUX_6_DIF', 'FERR_6_DIF',
     'FLUX_10_DIF', 'FERR_10_DIF',
     'FLUX_AUTO_DIF', 'FERR_AUTO_DIF',
