@@ -543,6 +543,78 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             carry = _update_carry(carry, failed, fail_count)
 
 
+RUN_LOG = Path("Epochs") / "ztfphot_runs.jsonl"
+
+
+def _git_info() -> dict:
+    """Commit of the ZTFphot checkout running this script (None outside git)."""
+    import subprocess
+    repo = _SCRIPTS.parent
+    def git(*a):
+        r = subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+    commit = git("rev-parse", "HEAD")
+    if commit is None:
+        return {"commit": None}
+    return {"commit": commit, "commit_date": git("show", "-s", "--format=%cI", "HEAD"),
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
+
+
+def _record_run(base_dir: Path, args) -> dict:
+    """Describe this invocation (code version, time, full command line and options,
+    package versions) and append it to <base>/Epochs/ztfphot_runs.jsonl. The log keeps
+    the settings of earlier invocations — notably the download-time epoch cuts, which a
+    later calibrate/lightcurves-only run does not repeat on its command line."""
+    import json, platform
+    from datetime import datetime, timezone
+    from importlib import metadata as _md
+    vers = {}
+    for pkg in ("numpy", "astropy", "photutils", "scipy", "pandas", "pyarrow", "ztfquery"):
+        try:
+            vers[pkg] = _md.version(pkg)
+        except Exception:
+            pass
+    rec = {
+        "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ztfphot": _git_info(),
+        "argv": sys.argv,
+        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "python": platform.python_version(),
+        "packages": vers,
+        "host": platform.node(),
+    }
+    log = base_dir / RUN_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "a") as f:
+        f.write(json.dumps(rec, default=str) + "\n")
+    return rec
+
+
+def _latest_download_run(base_dir: Path, args) -> dict | None:
+    """Most recent logged invocation that downloaded for this target (same --ra/--dec,
+    or the same --field/--ccd/--qid in quadrant mode) — its epoch cuts define which
+    epochs are in the light curves."""
+    import json
+    log = base_dir / RUN_LOG
+    if not log.exists():
+        return None
+    def same_target(a):
+        if args.ra is not None and args.dec is not None:
+            return (a.get("ra") is not None and a.get("dec") is not None
+                    and abs(a["ra"] - args.ra) < 1e-5 and abs(a["dec"] - args.dec) < 1e-5)
+        return all(a.get(k) == getattr(args, k, None) for k in ("field", "ccdid", "qid"))
+    best = None
+    for line in log.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        a = rec.get("args", {})
+        if ("download" in (a.get("steps") or []) or a.get("purge_batch")) and same_target(a):
+            best = rec
+    return best
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="ZTF difference-image photometry pipeline.",
@@ -701,6 +773,12 @@ def main() -> None:
     steps = args.steps
     bands = args.bands or ["g", "r", "i"]
     epochs = None
+
+    # Provenance: log this invocation; light-curve parquets embed it, the latest
+    # download-time invocation for this target (its epoch cuts), and per-quadrant
+    # epoch summaries computed from the data.
+    import json as _json
+    _run_rec = _record_run(base_dir, args)
 
     # ── Step: lookup ──────────────────────────────────────────────────────────
     if "lookup" in steps:
@@ -958,7 +1036,12 @@ def main() -> None:
             step_lightcurves(base_dir, quadrants, force=args.force,
                              use_calibrated=("calibrate" in steps or "recalibrate" in steps),
                              suffix=suffix, target_ra=args.ra, target_dec=args.dec,
-                             target_match_radius=args.target_match_radius)
+                             target_match_radius=args.target_match_radius,
+                             run_meta={
+                                 "ztfphot_run": _json.dumps(_run_rec, default=str),
+                                 "ztfphot_download": _json.dumps(
+                                     _latest_download_run(base_dir, args), default=str),
+                             })
 
         if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
                                               target_ra=args.ra, target_dec=args.dec,

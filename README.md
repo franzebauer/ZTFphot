@@ -435,6 +435,16 @@ Quadrant discovery (`find_quadrants`) is primarily driven by `Reference/*_refsex
 
 File-level metadata includes `MAGZP_REF_{tag}` and `MAGZPRMS_REF_{tag}` for each contributing quadrant, plus `dominant_quadrant` (e.g. `000521_zg_c15_q3`) identifying the photometric reference quadrant.
 
+**Run provenance** (JSON strings in the file metadata, per-quadrant and merged files):
+
+| Key | Content |
+|-----|---------|
+| `ztfphot_run` | The invocation that built the light curves: ZTFphot git commit (+ `dirty` if uncommitted changes), UTC time, full `argv`, every CLI option, Python/package versions, host |
+| `ztfphot_download` | The most recent logged invocation that ran `download` (or `--purge-batch`) for the same target — its options are the epoch selection cuts (`min_maglim`, `max_seeing`, `skip_flagged`, MJD range, …), which a later calibrate/lightcurves-only run does not repeat. `null` if no such run was logged |
+| `epoch_summary_{tag}` | From the data, per quadrant: `n_epochs`, `mjd_min`/`mjd_max`, `maglim_min` and `seeing_max` (difference-image header values), `n_infobits_set` |
+
+Every `run_pipeline` invocation is appended to `<base-dir>/Epochs/ztfphot_runs.jsonl`, which is where `ztfphot_download` is looked up. Read them with e.g. `json.loads(pq.read_schema(path).metadata[b"ztfphot_download"])["args"]["min_maglim"]`. `check_missing_epochs.py` (LC tools) uses `ztfphot_download` automatically; for parquets made before this was recorded, `--infer-cuts` derives the cuts from the IRSA maglimit/seeing range of the epochs present.
+
 ---
 
 ## Calibrated FITS header keywords

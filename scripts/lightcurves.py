@@ -104,6 +104,7 @@ def step_lightcurves(
     target_ra: float | None = None,
     target_dec: float | None = None,
     target_match_radius: float = 1.0,
+    run_meta: dict | None = None,
 ) -> int:
     """
     Assemble light curves from calibrated per-epoch FITS for each quadrant.
@@ -117,6 +118,12 @@ def step_lightcurves(
       target_sep_arcsec  (nearest ref source to target; NaN if target not given)
       target_ref_mag     (reference AB mag of the target's matched source, or NaN if
                           reference-less — then FLUX_4_TOT_AB is difference flux)
+      epoch_summary_{field}_{fc}_c{ccd}_q{qid}
+                         JSON, from the data: n_epochs, MJD range, min MAGLIM, max
+                         SEEING, epochs with INFOBITS set — the effective epoch cuts
+      + every key of run_meta (run_pipeline passes ztfphot_run = this invocation and
+        ztfphot_download = the latest download-time invocation for the target, both
+        JSON). merge_fields carries all of these into the merged parquet.
     """
     import numpy as np
     from astropy.io import fits as pyfits
@@ -299,6 +306,21 @@ def step_lightcurves(
             b'target_sep_arcsec':           str(target_sep_val).encode(),
             b'target_ref_mag':              str(target_ref_mag).encode(),
         }
+        # Effective epoch selection, measured from the epochs actually present
+        _ep = all_lcs.drop_duplicates('OBSMJD')
+        _num = lambda c: pd.to_numeric(_ep[c], errors='coerce') if c in _ep.columns else pd.Series(dtype=float)
+        _summary = {
+            "n_epochs": int(len(_ep)),
+            "mjd_min": round(float(_num('OBSMJD').min()), 5),
+            "mjd_max": round(float(_num('OBSMJD').max()), 5),
+            "maglim_min": round(float(_num('MAGLIM').min()), 3),
+            "seeing_max": round(float(_num('SEEING').max()), 3),
+            "n_infobits_set": int((_num('INFOBITS_DIF').fillna(0) != 0).sum()),
+        }
+        import json as _json
+        extra_meta[f'epoch_summary_{tag}'.encode()] = _json.dumps(_summary).encode()
+        for _k, _v in (run_meta or {}).items():
+            extra_meta[_k.encode()] = str(_v).encode()
         table = table.replace_schema_metadata({**existing_meta, **extra_meta})
         pq.write_table(table, lc_out)
 
