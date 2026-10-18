@@ -49,9 +49,12 @@ Usage:
 
 Notes:
     - Files already present on disk are skipped (idempotent).
-    - Permanent 404s (files that will never exist on IRSA) are recorded in
-      {base_dir}/Epochs/permanent_404s.log and silently skipped on future runs.
-      Common case: i-band reference files for quadrants with no i-band coverage.
+    - HTTP 404s are recorded in {base_dir}/Epochs/permanent_404s.log ("url<TAB>UTC time")
+      and skipped on later runs until the entry is older than --perm404-max-age days
+      (default 30; --retry-404 ignores the log). Common case: i-band reference files for
+      quadrants with no i-band coverage. An HTML response (IRSA error/maintenance page)
+      is a retriable failure, never a 404. Legacy entries without a time are treated as
+      expired, so anything blacklisted under the old HTML rule is retried once.
     - Retriable failures (timeouts, incomplete reads) are logged to
       {base_dir}/Epochs/failed_downloads.log. Re-running the script will retry these.
     - Missing science epochs (404 on diff image) are logged to
@@ -66,6 +69,7 @@ import os
 import logging
 import subprocess
 import netrc
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -135,6 +139,35 @@ CAUTIONARY_MASK = (
 # Connect timeout is generous because IRSA can be slow to accept connections
 # under load. Read timeout is long because diff images can be ~100 MB.
 REQUEST_TIMEOUT = (30, 300)
+
+# Age (days) after which a recorded 404 is retried; 0 = never expire
+PERM404_MAX_AGE_DAYS = 30.0
+
+
+def load_permanent_404s(base_dir: str | Path, max_age_days: float = PERM404_MAX_AGE_DAYS,
+                        ignore: bool = False) -> set[str]:
+    """URLs currently treated as permanent 404s (skipped by downloads and by the
+    purge-batch "epoch done" check). Log lines are "url<TAB>ISO UTC time"; an entry
+    expires max_age_days after it was recorded (0 = never). Legacy lines without a
+    time count as expired: they date from when HTML error pages were also logged as
+    404s, so they are retried and re-recorded only if IRSA still answers 404."""
+    log = Path(base_dir) / "Epochs" / "permanent_404s.log"
+    if ignore or not log.exists():
+        return set()
+    now = datetime.now(timezone.utc)
+    keep: set[str] = set()
+    for line in log.read_text().splitlines():
+        url, _, ts = line.strip().partition("\t")
+        if not url or not ts:
+            continue
+        try:
+            t = datetime.fromisoformat(ts)
+        except ValueError:
+            continue
+        if max_age_days <= 0 or (now - t).total_seconds() < max_age_days * 86400:
+            keep.add(url)
+    return keep
+
 
 # Retry config for transient failures
 RETRY_CONFIG = Retry(
@@ -281,8 +314,9 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
     Returns (url, status, message) where status is one of:
         "ok"          — downloaded successfully
         "skipped"     — already exists on disk
-        "404"         — permanent not-found (file will never exist on IRSA)
-        "failed"      — retriable error (timeout, incomplete read, server error)
+        "404"         — HTTP 404 (recorded; skipped until the entry expires)
+        "failed"      — retriable error (timeout, incomplete read, server error,
+                        HTML error/maintenance page)
     """
     if skip_if_exists and dest.exists() and dest.stat().st_size > 0:
         return (url, "skipped", "exists")
@@ -299,10 +333,12 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
 
             resp.raise_for_status()
 
-            # IRSA occasionally returns HTML for missing files instead of 404 status
+            # An HTML body instead of FITS is an IRSA error/maintenance/login page —
+            # transient, so retriable. (It used to be logged as a permanent 404, which
+            # blacklisted whole date ranges downloaded during IRSA outages.)
             content_type = resp.headers.get("Content-Type", "")
             if "text/html" in content_type:
-                return (url, "404", "404 (HTML response — file not found on IRSA)")
+                return (url, "failed", "HTML response instead of FITS (IRSA error page)")
 
             with open(tmp, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB chunks
@@ -563,6 +599,8 @@ def download_all(
     mjd_max: float | None = None,
     min_epochs_per_quad: int | None = None,
     products: str = "all",
+    retry_404: bool = False,
+    perm404_max_age_days: float = PERM404_MAX_AGE_DAYS,
 ) -> dict:
     """
     Download all science and reference products for the given epochs.
@@ -597,6 +635,10 @@ def download_all(
         Restrict to epochs in this MJD range (inclusive).
     min_epochs_per_quad : int, optional
         Skip entire quadrants with fewer than this many passing epochs.
+    retry_404 : bool
+        Ignore the 404 log and request every file again.
+    perm404_max_age_days : float
+        Recorded 404s older than this are retried (0 = never expire).
 
     Returns
     -------
@@ -635,9 +677,7 @@ def download_all(
     missing_log     = base_dir / "Epochs" / "missing_epochs.log"
     failed_log      = base_dir / "Epochs" / "failed_downloads.log"
 
-    known_404s: set[str] = set()
-    if perm404_log.exists():
-        known_404s = {line.strip() for line in perm404_log.read_text().splitlines() if line.strip()}
+    known_404s = load_permanent_404s(base_dir, perm404_max_age_days, ignore=retry_404)
 
     # Filter out tasks whose URL is a known permanent 404
     filtered_tasks = [(url, dest) for url, dest in all_tasks if url not in known_404s]
@@ -687,7 +727,7 @@ def download_all(
                 # Permanent absence — record and never retry
                 n_404 += 1
                 with open(perm404_log, "a") as f:
-                    f.write(f"{url}\n")
+                    f.write(f"{url}\t{datetime.now(timezone.utc).isoformat(timespec='seconds')}\n")
 
                 # Distinguish reference products (no coverage) from missing science epochs
                 is_ref = "/products/ref/" in url

@@ -304,7 +304,8 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
     """
     import math
     import pandas as pd
-    from download_coordinator import download_all, purge_images, filter_epochs
+    from download_coordinator import (download_all, purge_images, filter_epochs,
+                                      load_permanent_404s)
     from photometry import step_make_catalog
     from aperture_photometry import catalog_ok
     step_simulate, step_sextractor, step_simulate_scipos, step_sex_scipos = \
@@ -388,7 +389,9 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
         if (args.ra is not None and args.dec is not None
                 and ("download" in steps or args.purge_batch)):
             download_all(q_epochs, base_dir=base_dir, bands=[fc[1:]],
-                         max_workers=args.download_workers, products="ref")
+                         max_workers=args.download_workers, products="ref",
+                         retry_404=args.retry_404,
+                         perm404_max_age_days=args.perm404_max_age)
             if not _filter_quadrants_by_wcs(base_dir, [q], args.ra, args.dec,
                                             margin=args.footprint_margin_px):
                 logger.info(f"{tag}: target outside reference footprint — skipping quadrant")
@@ -418,10 +421,9 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             return sci_sex_dir / fname
 
         # Load permanent 404s so epochs with no IRSA diff image are treated as done
-        _perm404_log = base_dir / "Epochs" / "permanent_404s.log"
-        _perm404_urls = set()
-        if _perm404_log.exists():
-            _perm404_urls = set(_perm404_log.read_text().splitlines())
+        # Recorded 404s still within --perm404-max-age (none with --retry-404)
+        _perm404_urls = load_permanent_404s(base_dir, args.perm404_max_age,
+                                            ignore=args.retry_404)
 
         def _epoch_done(ffd):
             needle = f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"
@@ -457,7 +459,9 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             if "download" in steps or args.purge_batch:
                 band = fc[1:]   # zg→g, zr→r, zi→i
                 res = download_all(this_batch, base_dir=base_dir, bands=[band],
-                                   max_workers=args.download_workers)
+                                   max_workers=args.download_workers,
+                                   retry_404=args.retry_404,
+                                   perm404_max_age_days=args.perm404_max_age)
                 for url in res.get("failed_urls", []):     # transient failures only
                     m = _re.search(r"ztf_(\d+)_", url)
                     if m:
@@ -561,6 +565,11 @@ def main() -> None:
                    help="Parallel workers for simulate/sex/calibrate (default: 4)")
     p.add_argument("--download-workers", type=int, default=50,
                    help="Parallel threads for image downloads (default: 50)")
+    p.add_argument("--retry-404", action="store_true",
+                   help="Ignore Epochs/permanent_404s.log and request every file again")
+    p.add_argument("--perm404-max-age", type=float, default=30.0, metavar="DAYS",
+                   help="Recorded 404s older than this are retried (default 30; 0 = never "
+                        "expire). Entries without a timestamp (old logs) count as expired.")
     p.add_argument("--force",     action="store_true")
     p.add_argument("--verbose",   action="store_true")
     p.add_argument("--status",    action="store_true", help="Print file-existence summary and exit")
@@ -734,6 +743,8 @@ def main() -> None:
                 mjd_min=args.mjd_min,
                 mjd_max=args.mjd_max,
                 min_epochs_per_quad=args.min_epochs_per_quad,
+                retry_404=args.retry_404,
+                perm404_max_age_days=args.perm404_max_age,
             )
             logger.info("─── download: reference products ───")
             download_all(epochs, products="ref", **_dl_kw)

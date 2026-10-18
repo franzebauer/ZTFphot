@@ -255,7 +255,9 @@ data/                       ← created in your working directory on first run
 | `--steps STEP ...` | Run only named steps (default: all) |
 | `--workers N` | Parallel workers for simulate/sex/calibrate (default: 4) |
 | `--download-workers N` | Parallel threads for image downloads (default: 50) |
-| `--force` | Re-run even if output files already exist |
+| `--retry-404` | Ignore `Epochs/permanent_404s.log` and request every file again |
+| `--perm404-max-age DAYS` | A recorded HTTP 404 is skipped for this many days, then retried (default 30; 0 = never expire). Only real 404s are recorded — an HTML response (IRSA error/maintenance page) is a retriable failure. Log entries without a timestamp (written by older versions, which also logged HTML pages as 404s) count as expired, so those epochs are retried once automatically |
+| `--force` | Re-run even if output files already exist (does **not** bypass the 404 log — use `--retry-404`) |
 | `--verbose` | Increase log verbosity |
 | `--status` | Print file-existence summary and exit |
 | `--no-target` | Suppress target-source plots (`make_lightcurves`, target marker in precision plot). Use when processing a whole quadrant without a specific target of interest. |
