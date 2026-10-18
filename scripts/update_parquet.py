@@ -37,6 +37,9 @@ when both exist):
 Usage (ztf env, IRSA credentials in ~/.netrc):
     python update_parquet.py TARGET_zg_merged.parquet [more.parquet ...]
            [--infer-cuts] [--no-new] [--dry-run] [--outdir DIR] [--keep-temp]
+    python update_parquet.py RESULTS_DIR --infer-cuts [--plan] [--recursive] [--redo]
+      (directory: per target/band/variant uses X_recal.parquet if present, else X.parquet;
+       skips targets already updated)
 """
 from __future__ import annotations
 
@@ -75,18 +78,21 @@ _HDR_FROM_PARQUET = {            # LDAC header card <- parquet column (per epoch
 # ── inputs ────────────────────────────────────────────────────────────────────
 
 def _sibling(path: Path) -> Path | None:
-    """The other variant (ref-pos <-> sci-pos) of a light-curve parquet, if present."""
+    """The other variant (ref-pos <-> sci-pos) of a light-curve parquet, if present.
+    Derived names keep their suffix: X_zg_merged_recal <-> X_zg_sci_merged_recal."""
     s, cands = path.stem, []
+    tail = next((t for t in ("_recal", "_updated") if s.endswith(t)), "")
+    s = s[:len(s) - len(tail)]
     if path.name == "lightcurves_merged.parquet":            # pipeline tree: .../{band}{_sci}/
         b = path.parent.name
         other = b[:-4] if b.endswith("_sci") else b + "_sci"
         cands.append(path.parent.parent / other / path.name)
     elif "_sci" in s:
-        cands.append(path.with_name(s.replace("_sci", "") + ".parquet"))
+        cands.append(path.with_name(s.replace("_sci", "") + tail + ".parquet"))
     elif s.endswith("_merged"):
-        cands.append(path.with_name(s[:-len("_merged")] + "_sci_merged.parquet"))
+        cands.append(path.with_name(s[:-len("_merged")] + "_sci_merged" + tail + ".parquet"))
     else:
-        cands.append(path.with_name(s + "_sci.parquet"))
+        cands.append(path.with_name(s + "_sci" + tail + ".parquet"))
     return next((c for c in cands if c.exists()), None)
 
 
@@ -329,6 +335,15 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
         f6 = (m["FLUX_6_TOT_AB_old"] * 10 ** (-0.4 * dm)) if "FLUX_6_TOT_AB_old" in m else np.nan
         new.loc[m["index"].to_numpy(), "FLUX_6_TOT_AB"] = np.asarray(f6, float)
     # old rows not represented in the new output -> carried over unchanged
+    # Quadrants the current pipeline no longer processes (e.g. the footprint check drops
+    # them because the target is off-chip) cannot be recalibrated consistently: drop them
+    qnew = pd.MultiIndex.from_frame(new[QKEY].drop_duplicates())
+    gone = ~pd.MultiIndex.from_frame(old[QKEY]).isin(qnew)
+    if gone.any():
+        logger.info(f"    dropping {int(gone.sum()):,} rows of quadrant(s) "
+                    f"{sorted(map(tuple, old.loc[gone, QKEY].drop_duplicates().to_numpy().tolist()))} "
+                    f"that the current pipeline does not process (e.g. target off the reference footprint)")
+        old = old[~gone]
     have = pd.MultiIndex.from_frame(new[k])
     carry = old[~pd.MultiIndex.from_frame(old[k]).isin(have)].copy()
     # carried rows take the object_index the new output uses for the same quadrant +
@@ -516,9 +531,54 @@ def update_target(paths: list[Path], a, auth) -> bool:
             shutil.rmtree(base, ignore_errors=True)
 
 
+def _plan_directory(d: Path, a) -> list[list[Path]]:
+    """Target groups from a directory of light-curve parquets. Per target, band and
+    variant (ref-pos / _sci) the input is X_recal.parquet if it exists, else X.parquet
+    (*_updated outputs are never inputs); ref + sci of the same target form one group,
+    whichever version each one is. Groups whose outputs all exist are skipped (--redo)."""
+    files = sorted(d.rglob("*.parquet") if a.recursive else d.glob("*.parquet"))
+    pick: dict[tuple, dict] = {}
+    for f in files:
+        if f.name == "lightcurves_merged.parquet":            # pipeline tree .../{band}{_sci}/
+            band = f.parent.name
+            sci, tail = band.endswith("_sci"), ""
+            gkey = str(f.parent.parent / band.removesuffix("_sci"))
+        else:
+            stem = f.stem
+            tail = next((t for t in ("_recal", "_updated") if stem.endswith(t)), "")
+            canon = stem[:len(stem) - len(tail)]
+            if tail == "_updated" or canon.endswith(a.suffix):
+                continue
+            sci = "_sci" in canon
+            gkey = str(f.parent / canon.replace("_sci", ""))
+        slot = pick.setdefault((gkey, sci), {})
+        slot[tail] = f
+    groups: dict[str, list[Path]] = {}
+    for (gkey, sci), versions in sorted(pick.items()):
+        chosen = versions.get("_recal", versions.get(""))
+        if chosen is not None:
+            groups.setdefault(gkey, []).append(chosen)
+    out = []
+    for gkey, members in groups.items():
+        outs = [(Path(a.outdir) if a.outdir else m.parent) / f"{m.stem}{a.suffix}.parquet"
+                for m in members]
+        if not a.redo and all(o.exists() for o in outs):
+            logger.info(f"  skip {Path(gkey).name}: already updated ({', '.join(o.name for o in outs)})")
+            continue
+        out.append(members)
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("parquet", nargs="+", type=Path)
+    p.add_argument("parquet", nargs="+", type=Path,
+                   help="parquet files, or directories: per target/band/variant the "
+                        "*_recal.parquet is used if present, else the plain one")
+    p.add_argument("--recursive", action="store_true", help="search directories recursively")
+    p.add_argument("--plan", action="store_true",
+                   help="print which files would be used (no IRSA queries), then stop")
+    p.add_argument("--redo", action="store_true",
+                   help="directory mode: also process targets that already have an output")
     p.add_argument("--infer-cuts", action="store_true",
                    help="older parquets without recorded cuts: use the IRSA maglimit/seeing "
                         "range of the epochs present as the epoch cuts")
@@ -545,22 +605,40 @@ def main():
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
                         datefmt="%H:%M:%S")
-    from download_coordinator import get_auth
-    auth = get_auth()
-
-    done, ok, n_groups = set(), 0, 0
+    # Build the list of target groups: directories via the recal-else-plain selection,
+    # explicit files paired with their sibling as given.
+    groups, done = [], set()
     for path in a.parquet:
         path = path.resolve()
-        if path in done:
-            continue
-        group = [path] + ([s.resolve()] if (s := _sibling(path)) else [])
-        done |= set(group)
-        n_groups += 1
+        if path.is_dir():
+            for g in _plan_directory(path, a):
+                g = [m.resolve() for m in g]
+                if not done & set(g):
+                    groups.append(g)
+                    done |= set(g)
+        elif path not in done:
+            g = [path] + ([s.resolve()] if (s := _sibling(path)) else [])
+            groups.append(g)
+            done |= set(g)
+    logger.info(f"{len(groups)} target group(s) to process:")
+    for g in groups:
+        logger.info("  " + "  +  ".join(m.name for m in g))
+    if a.plan or not groups:
+        return
+
+    from download_coordinator import get_auth
+    auth = get_auth()
+    results = []
+    for g in groups:
         try:
-            ok += update_target(group, a, auth)
+            ok = update_target(g, a, auth)
         except Exception as exc:
-            logger.exception(f"FAIL {path.name}: {exc}")
-    logger.info(f"{ok}/{n_groups} target groups done")
+            logger.exception(f"FAIL {g[0].name}: {exc}")
+            ok = False
+        results.append((g[0].name, ok))
+    failed = [n for n, ok in results if not ok]
+    logger.info(f"done: {len(results) - len(failed)}/{len(results)} target groups"
+                + (f"; FAILED: {', '.join(failed)}" if failed else ""))
 
 
 if __name__ == "__main__":
