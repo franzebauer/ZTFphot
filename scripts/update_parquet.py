@@ -158,13 +158,21 @@ def _download_epochs(dc, todo: pd.DataFrame, base: Path, fc: str, a) -> list[str
             logger.warning(f"  {len(res['failed_urls'])} downloads failed — retry "
                            f"{attempt + 1}/{a.download_retries} in {wait:.0f} s")
             time.sleep(wait)
-    deferred = []
+    # Epochs without a difference image now: an HTTP 404 means IRSA has no such product
+    # (never retried — it would never succeed); anything else is transient -> deferred.
+    gone = dc.load_permanent_404s(base, max_age_days=0)
+    deferred, unavailable = [], []
     for r in todo.itertuples():
         ffd = str(int(float(r.filefracday)))
         diff = dc.sci_local_path(base, int(r.field), r.filtercode, int(r.ccdid), int(r.qid),
                                  ffd, "scimrefdiffimg.fits")
-        if not diff.exists():
-            deferred.append(ffd)
+        if diff.exists():
+            continue
+        url = dc.sci_url(ffd, int(r.field), r.filtercode, int(r.ccdid), int(r.qid),
+                         "scimrefdiffimg.fits.fz")
+        (unavailable if url in gone else deferred).append(ffd)
+    if unavailable:
+        logger.info(f"  {len(unavailable)} epoch(s) unavailable on IRSA (HTTP 404) — skipped")
     if deferred:
         logger.warning(f"  {len(deferred)} epoch(s) deferred (download still failing) — "
                        f"processed without them; add later with --retry-deferred")
@@ -459,6 +467,24 @@ def update_target(paths: list[Path], a, auth) -> bool:
             logger.warning(f"FAIL {first.name}: reference products unavailable for "
                            f"{sorted(set(quads_in) - set(quads))} — target skipped, rerun later")
             return False
+        # Same reference-footprint check run_pipeline applies: quadrants whose reference
+        # image does not contain the target are dropped by the pipeline anyway, so don't
+        # download their epochs (science exposures dither and can cover the target while
+        # the reference image — which defines what is measured — does not).
+        from run_pipeline import _filter_quadrants_by_wcs
+        qd = [dict(field=q[0], filtercode=q[1], ccdid=q[2], qid=q[3],
+                   ref_dir=base / "Reference" / f"{q[0]:06d}" / q[1] / f"ccd{q[2]:02d}" / f"q{q[3]}")
+              for q in quads]
+        on_ref = {(d["field"], d["filtercode"], d["ccdid"], d["qid"])
+                  for d in _filter_quadrants_by_wcs(base, qd, ra, dec, margin=a.footprint_margin_px)}
+        if len(on_ref) < len(quads):
+            off = sorted(set(quads) - on_ref)
+            n_skip = sum((int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in off
+                         for r in todo.itertuples())
+            logger.info(f"  target outside the reference footprint of {off} — those quadrants "
+                        f"are dropped by the pipeline; not downloading their {n_skip} epoch(s)")
+            todo = todo[[(int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in on_ref
+                         for r in todo.itertuples()]]
         (base / "Catalogs").mkdir(exist_ok=True)
         make_catalog(str(base / "Catalogs"), str(base / "Reference"))
         refs = {q: _ref_catalog(base, q) for q in quads}
@@ -517,7 +543,8 @@ def update_target(paths: list[Path], a, auth) -> bool:
         cmd = [sys.executable, str(_SCRIPTS / "run_pipeline.py"), "--base-dir", str(base),
                "--ra", str(ra), "--dec", str(dec), "--bands", fc[1:],
                "--steps", *phot, "vet", "calibrate", "flatfield", "recalibrate", "lightcurves", "merge",
-               "--workers", str(a.workers), "--target-match-radius", str(a.target_match_radius)]
+               "--workers", str(a.workers), "--target-match-radius", str(a.target_match_radius),
+               "--footprint-margin-px", str(a.footprint_margin_px)]
         cmd += ["--both"] if both else (["--scipos"] if "" not in variants else [])
         logger.info("  running: " + " ".join(cmd[1:]))
         log = base / "run_pipeline.log"
@@ -658,6 +685,8 @@ def main():
     p.add_argument("--suffix", default="_updated")
     p.add_argument("--tol", type=float, default=1e-4, help="OBSMJD match tolerance [d]")
     p.add_argument("--target-match-radius", type=float, default=1.0)
+    p.add_argument("--footprint-margin-px", type=int, default=3,
+                   help="as run_pipeline: reference-image edge margin for the target")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--download-workers", type=int, default=16)
     p.add_argument("--download-retries", type=int, default=2,
