@@ -442,8 +442,8 @@ def update_target(paths: list[Path], a, auth) -> bool:
                            in pd.concat([d[QKEY] for d in frames.values()]).drop_duplicates().to_numpy()})
         t_end = have["OBSMJD"].max()
         todo = possible[~possible["in_parquet"]]
-        todo = todo[[(int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in quads_in
-                     for r in todo.itertuples()]]
+        todo = todo[np.array([(int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in quads_in
+                              for r in todo.itertuples()], dtype=bool)]
         n_new = int((todo["obsmjd"] > t_end + a.tol).sum())
         if a.no_new:
             todo = todo[todo["obsmjd"] <= t_end + a.tol]
@@ -483,8 +483,8 @@ def update_target(paths: list[Path], a, auth) -> bool:
                          for r in todo.itertuples())
             logger.info(f"  target outside the reference footprint of {off} — those quadrants "
                         f"are dropped by the pipeline; not downloading their {n_skip} epoch(s)")
-            todo = todo[[(int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in on_ref
-                         for r in todo.itertuples()]]
+            todo = todo[np.array([(int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in on_ref
+                                  for r in todo.itertuples()], dtype=bool)]
         (base / "Catalogs").mkdir(exist_ok=True)
         make_catalog(str(base / "Catalogs"), str(base / "Reference"))
         refs = {q: _ref_catalog(base, q) for q in quads}
