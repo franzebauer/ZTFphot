@@ -276,6 +276,14 @@ def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
             logger.info(f"  {tag}: nearest ref source {sep:.2f}\" from target — OK")
 
 
+def _refs_ok(ref_dir: Path, field, fc, ccd, qid) -> bool:
+    """Both reference products (refimg, refsexcat) present and non-empty."""
+    tag = f"ztf_{int(field):06d}_{fc}_c{int(ccd):02d}_q{int(qid)}"
+    return all((Path(ref_dir) / f"{tag}_{s}").exists()
+               and (Path(ref_dir) / f"{tag}_{s}").stat().st_size > 0
+               for s in ("refimg.fits", "refsexcat.fits"))
+
+
 def _photometry_steps(args):
     """(simulate, sex, simulate_sci, sex_sci) step functions for --photometry.
     'aper' keeps the step names (and their on-disk catalogs) but runs forced photutils
@@ -396,6 +404,14 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                                             margin=args.footprint_margin_px):
                 logger.info(f"{tag}: target outside reference footprint — skipping quadrant")
                 continue
+
+        # (references are fetched up front only in target mode; otherwise with batch 1)
+        if (args.ra is not None and args.dec is not None
+                and ("download" in steps or args.purge_batch)
+                and not _refs_ok(q["ref_dir"], field, fc, ccd, qid_)):
+            logger.warning(f"{tag}: reference products unavailable (download failed) — "
+                           f"quadrant skipped this run; it is retried on the next run")
+            continue
 
         n_batches = math.ceil(len(q_epochs) / N)
         logger.info(f"─── purge-batch {tag}: {len(q_epochs)} epochs → "
@@ -849,6 +865,22 @@ def main() -> None:
                     epochs = epochs[_mask]
                     logger.info(f"footprint filter: dropped {len(_quads) - len(_kept)} "
                                 f"out-of-footprint quadrant(s) before science download")
+
+            # Quadrants whose reference products could not be fetched cannot be
+            # calibrated: skip their science download this run (retried next run).
+            _qk = epochs[["field", "filtercode", "ccdid", "qid"]].drop_duplicates()
+            _noref = {(int(r.field), str(r.filtercode), int(r.ccdid), int(r.qid))
+                      for r in _qk.itertuples(index=False)
+                      if not _refs_ok(base_dir / "Reference" / f"{int(r.field):06d}" / str(r.filtercode)
+                                      / f"ccd{int(r.ccdid):02d}" / f"q{int(r.qid)}",
+                                      int(r.field), str(r.filtercode), int(r.ccdid), int(r.qid))}
+            if _noref:
+                logger.warning(f"reference products unavailable for {sorted(_noref)} — "
+                               f"skipping their science download this run (retried next run)")
+                epochs = epochs[np.array([(int(f), str(fc), int(c), int(qd)) not in _noref
+                                          for f, fc, c, qd in zip(epochs["field"], epochs["filtercode"],
+                                                                  epochs["ccdid"], epochs["qid"])],
+                                         dtype=bool)]
 
             logger.info("─── download: science products ───")
             download_all(epochs, products="sci", **_dl_kw)

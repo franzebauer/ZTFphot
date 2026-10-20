@@ -41,6 +41,18 @@ _SEX_DIR = Path(__file__).parent / "SExtractor"
 
 # ── Step 1: reference CSV catalogs ───────────────────────────────────────────
 
+def _catalog_zp_ok(csv: Path) -> bool:
+    """False for a reference CSV whose MAGZP_REF is all NaN (written by older versions
+    when the reference image was missing) — such a catalog must be rebuilt."""
+    import pandas as pd
+    try:
+        zp = pd.to_numeric(pd.read_csv(csv, usecols=["MAGZP_REF"], nrows=5)["MAGZP_REF"],
+                           errors="coerce")
+        return bool(zp.notna().any())
+    except Exception:
+        return True
+
+
 def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False) -> int:
     """Build a reference CSV catalog for each quadrant from its refsexcat.fits."""
     import sys
@@ -59,8 +71,11 @@ def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False
         cat_name = f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}"
         out_csv  = cat_dir / f"{cat_name}(REFERENCE)[OBJECTS].csv"
         if out_csv.exists() and not force:
-            n_skip += 1
-            continue
+            if _catalog_zp_ok(out_csv):
+                n_skip += 1
+                continue
+            logger.warning(f"{out_csv.name}: no reference zero-point (built without the "
+                           f"reference image) — rebuilding")
         logger.info(f"Building reference catalog for {cat_name}")
         try:
             make_catalog(save_path=str(cat_dir), refcats=str(q["ref_dir"]))

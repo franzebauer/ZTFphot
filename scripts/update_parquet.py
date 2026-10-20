@@ -400,7 +400,9 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
 
 # ── driver ───────────────────────────────────────────────────────────────────
 
-def update_target(paths: list[Path], a, auth) -> bool:
+def update_target(paths: list[Path], a, auth) -> str:
+    """Returns "ok", "refs" (reference products unavailable — worth retrying later in
+    the same run) or "fail"."""
     import download_coordinator as dc
     import ztf_field_lookup as zl
     from make_catalog import make_catalog
@@ -413,7 +415,7 @@ def update_target(paths: list[Path], a, auth) -> bool:
     fcs = sorted(have["filtercode"].unique())
     if len(fcs) != 1:
         logger.warning(f"SKIP {first.name}: expected one band, found {fcs}")
-        return False
+        return "fail"
     fc = fcs[0]
     logger.info(f"═══ {', '.join(p.name for p in variants.values())}: RA={ra} Dec={dec} {fc} ═══")
 
@@ -456,7 +458,7 @@ def update_target(paths: list[Path], a, auth) -> bool:
                 if not a.dry_run:
                     for path in variants.values():
                         _clear_deferred(path)
-            return True
+            return "ok"
 
         # 2. references + catalogs, then only the missing/new epochs
         # References are essential: a quadrant missing them would lose its rows, so a
@@ -465,8 +467,8 @@ def update_target(paths: list[Path], a, auth) -> bool:
         quads = _fetch_references(base, quads_in, auth, max(a.download_retries, 3), a.retry_wait)
         if len(quads) < len(quads_in):
             logger.warning(f"FAIL {first.name}: reference products unavailable for "
-                           f"{sorted(set(quads_in) - set(quads))} — target skipped, rerun later")
-            return False
+                           f"{sorted(set(quads_in) - set(quads))} — target re-queued for later")
+            return "refs"
         # Same reference-footprint check run_pipeline applies: quadrants whose reference
         # image does not contain the target are dropped by the pipeline anyway, so don't
         # download their epochs (science exposures dither and can cover the target while
@@ -552,14 +554,14 @@ def update_target(paths: list[Path], a, auth) -> bool:
             if subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT).returncode != 0:
                 logger.warning(f"FAIL: run_pipeline failed — see {log}")
                 a.keep_temp = True
-                return False
+                return "fail"
 
         # 5. assemble + write
         for s, path in variants.items():
             new, new_meta = _collect(base, ra, dec, fc, s)
             if new is None:
                 logger.warning(f"FAIL {path.name}: no light curve produced")
-                return False
+                return "fail"
             out = _assemble(frames[s], new, refs, target, a.target_match_radius, old_epochs,
                             all_sources=a.all_sources or not catalog_changed)
             out_dir = Path(a.outdir) if a.outdir else path.parent
@@ -580,7 +582,7 @@ def update_target(paths: list[Path], a, auth) -> bool:
             pq.write_table(table, tmp)
             os.replace(tmp, out_path)
             logger.info(f"  → {out_path} ({len(out):,} rows, {out['OBSMJD'].nunique()} epochs)")
-        return True
+        return "ok"
     finally:
         if a.keep_temp:
             logger.info(f"  (kept temp dir {base})")
@@ -697,6 +699,11 @@ def main():
     p.add_argument("--retry-deferred", action="store_true",
                    help="directory mode: only targets whose earlier update deferred epochs; "
                         "re-run on their _updated files (downloads just those epochs)")
+    p.add_argument("--ref-passes", type=int, default=2,
+                   help="extra passes at the end of the batch for targets whose reference "
+                        "products were unavailable (default 2)")
+    p.add_argument("--ref-pass-wait", type=float, default=120.0, metavar="S",
+                   help="pause before each extra pass (default 120 s; once per pass, not per target)")
     p.add_argument("--tmpdir", default=None, help="parent dir for the temporary base dir")
     p.add_argument("--keep-temp", action="store_true")
     a = p.parse_args()
@@ -724,18 +731,32 @@ def main():
         return
 
     from download_coordinator import get_auth
+    import time
     auth = get_auth()
-    results = []
-    for g in groups:
-        try:
-            ok = update_target(g, a, auth)
-        except Exception as exc:
-            logger.exception(f"FAIL {g[0].name}: {exc}")
-            ok = False
-        results.append((g[0].name, ok))
-    failed = [n for n, ok in results if not ok]
-    logger.info(f"done: {len(results) - len(failed)}/{len(results)} target groups"
-                + (f"; FAILED: {', '.join(failed)}" if failed else ""))
+    status = {}
+    queue = list(groups)
+    for npass in range(a.ref_passes + 1):
+        if npass:
+            logger.info(f"── pass {npass + 1}: retrying {len(queue)} target(s) whose reference "
+                        f"products were unavailable (after {a.ref_pass_wait:.0f} s) ──")
+            time.sleep(a.ref_pass_wait)
+        requeue = []
+        for g in queue:
+            try:
+                st = update_target(g, a, auth)
+            except Exception as exc:
+                logger.exception(f"FAIL {g[0].name}: {exc}")
+                st = "fail"
+            status[g[0].name] = st
+            if st == "refs":
+                requeue.append(g)
+        queue = requeue
+        if not queue:
+            break
+    bad = {n: st for n, st in status.items() if st != "ok"}
+    logger.info(f"done: {len(status) - len(bad)}/{len(status)} target groups"
+                + (f"; FAILED: {', '.join(f'{n} ({st})' for n, st in bad.items())}" if bad else "")
+                + (" — reference failures are retried on the next run" if "refs" in bad.values() else ""))
 
 
 if __name__ == "__main__":

@@ -47,6 +47,13 @@ def make_catalog(save_path, refcats):
         tmp = (catalog.replace("_refsexcat_augmented.fits", "_refimg.fits")
                if catalog.endswith("_refsexcat_augmented.fits")
                else catalog.replace("_refsexcat.fits", "_refimg.fits"))
+        if not os.path.exists(tmp):
+            # Without the reference image there is no zero-point: a catalog written now
+            # (MAGZP_REF = NaN) would be cached and break calibration of every epoch of
+            # this quadrant for good. Skip it; it is built once the refimg is downloaded.
+            print(f"make_catalog: {os.path.basename(tmp)} missing — skipping "
+                  f"{os.path.basename(catalog)} (retried once the reference image exists)")
+            continue
         if os.path.exists(tmp):
             hdul = fits.open(tmp)
             for i, line in enumerate(hdul[0].header):
@@ -60,8 +67,8 @@ def make_catalog(save_path, refcats):
             hdul.close()
         else:
             infobits_ref = int(np.iinfo(np.uint32).max)
-            magzp_ref = np.NAN
-            magzprms_ref = np.NAN
+            magzp_ref = np.nan
+            magzprms_ref = np.nan
 
         catname = catalog[catalog.rfind("ztf_")+4:catalog.rfind("_refsexcat")]
         hdul = fits.open(catalog)

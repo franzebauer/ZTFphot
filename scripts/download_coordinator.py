@@ -140,6 +140,10 @@ CAUTIONARY_MASK = (
 # under load. Read timeout is long because diff images can be ~100 MB.
 REQUEST_TIMEOUT = (30, 300)
 
+# Short retry rounds for failed reference downloads inside download_all (wait n x s)
+REF_RETRY_ROUNDS = 4
+REF_RETRY_WAIT = 15.0
+
 # Age (days) after which a recorded 404 is retried; 0 = never expire
 PERM404_MAX_AGE_DAYS = 30.0
 
@@ -751,6 +755,28 @@ def download_all(
                 logger.info(f"Progress: {i}/{n_total} — "
                             f"{n_downloaded} downloaded, {n_skipped} skipped, "
                             f"{n_404} permanent-404, {n_failed} failed")
+
+    # Reference products are few but essential (a quadrant without them cannot be
+    # calibrated): retry their transient failures in a few short rounds right away.
+    import time as _time
+    for _round in range(1, REF_RETRY_ROUNDS + 1):
+        ref_failed = [u for u in failed_urls if "/products/ref/" in u]
+        if not ref_failed:
+            break
+        _time.sleep(REF_RETRY_WAIT * _round)
+        dest_of = dict(filtered_tasks)
+        for url in ref_failed:
+            _, status, msg = download_file(url, dest_of[url], auth)
+            if status in ("ok", "404"):
+                failed_urls.remove(url)
+                n_failed -= 1
+                if status == "ok":
+                    n_downloaded += 1
+                else:
+                    n_404 += 1
+                    with open(perm404_log, "a") as f:
+                        f.write(f"{url}\t{datetime.now(timezone.utc).isoformat(timespec='seconds')}\n")
+        logger.info(f"reference retry round {_round}: {len([u for u in failed_urls if '/products/ref/' in u])} still failing")
 
     result = {
         "n_downloaded":    n_downloaded,
