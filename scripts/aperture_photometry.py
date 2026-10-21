@@ -33,13 +33,13 @@ background-only error SExtractor gave with GAIN=inf.
 
 With ref + sci requested, both position sets are measured in one pass per image.
 
-FLAGS (bit values aligned with SExtractor's meanings; carried to the parquet as FLAG_AP):
+FLAGS (per-epoch bits of the parquet FLAGS bitmask — see ztfphot_flags.py):
    1 — another catalog source within the largest aperture radius (≈ SExtractor 1, neighbour)
-   8 — an aperture extends beyond the image edge                 (≈ SExtractor 8, truncated)
-  16 — an aperture contains masked (NaN) pixels                  (≈ SExtractor 16, incomplete
-       aperture data)
-Calibration rejects calibrator measurements with bits 8|16 (CAL_REJECT_BITS); blends are
-already handled at reference level (FLAG_SE_REF == 0 in vetting).
+   8 — the primary 4 px aperture extends beyond the image edge     (≈ SExtractor 8, truncated)
+  16 — masked (NaN) pixels in the primary 4 px aperture             (≈ SExtractor 16)
+  32 — edge or masked pixels only in the larger 6 / 10 px apertures
+8 and 16 corrupt the 4 px measurement (default rejection); calibration rejects
+calibrator measurements with 8 | 16 | 32 (all apertures are calibrated).
 
 Output: one LDAC catalog per epoch with the same name, layout and columns as the
 SExtractor *_sexout.fits (LDAC_IMHEAD = the difference-image header; LDAC_OBJECTS with
@@ -64,8 +64,11 @@ BKG_MESH = 64                 # px, = SExtractor BACK_SIZE
 BKG_FILTER = 3                # = SExtractor BACK_FILTERSIZE
 ISO_FACTOR = 1.58             # r_iso / FWHM of the old simulated source (amp 1000, thresh 1)
 
-FLAG_NEIGHBOUR, FLAG_EDGE, FLAG_MASKED = 1, 8, 16
-CAL_REJECT_BITS = FLAG_EDGE | FLAG_MASKED     # calib_catalogs rejects calibrators with these
+from ztfphot_flags import F as _F
+FLAG_NEIGHBOUR, FLAG_EDGE, FLAG_MASKED, FLAG_OUTER = (_F.NEIGHBOUR, _F.EDGE, _F.MASKED,
+                                                      _F.OUTER_APERTURES)
+CAL_REJECT_BITS = _F.CAL_REJECT               # calib_catalogs rejects calibrators with these
+PRIMARY_APERTURE = 1                          # index of the 4 px aperture in PHOT_APERTURES
 PHOTCODE = "ztfphot-aper"                     # LDAC header tag identifying these catalogs
 
 
@@ -274,17 +277,24 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
         elif bkg == "mesh":
             bkg_loc = ep.level_at(x, y).astype(np.float32)
 
+        outer = np.zeros(n, bool)
         for k, r in enumerate(radii):
             ap = CircularAperture(pos, r=r)
             s = np.asarray(aperture_photometry(ep.data0, ap, method="exact")["aperture_sum"], float)
             a_eff = np.asarray(aperture_photometry(ep.fin, ap, method="exact")["aperture_sum"], float)
             flux[:, k] = s - bkg_loc * a_eff
             ferr[:, k] = rms * np.sqrt(a_eff)
-            flags |= np.where(a_eff < ap.area - 1e-6, FLAG_MASKED, 0).astype(np.int16)
+            edge_k = (x - r < -0.5) | (x + r > ncols - 0.5) | (y - r < -0.5) | (y + r > nrows - 0.5)
+            masked_k = (a_eff < ap.area - 1e-6) & ~edge_k     # off-edge pixels aren't "masked"
+            if k == PRIMARY_APERTURE:       # the 4 px measurement itself is affected
+                flags |= np.where(edge_k, FLAG_EDGE, 0).astype(np.int16)
+                flags |= np.where(masked_k, FLAG_MASKED, 0).astype(np.int16)
+            elif r > radii[PRIMARY_APERTURE]:
+                outer |= edge_k | masked_k
+        # only the larger apertures affected (the 3 px one lies inside the 4 px one)
+        flags |= np.where(outer & ((flags & (FLAG_EDGE | FLAG_MASKED)) == 0),
+                          FLAG_OUTER, 0).astype(np.int16)
         rmax = max(radii)
-        edge = (x - rmax < -0.5) | (x + rmax > ncols - 0.5) | (y - rmax < -0.5) | (y + rmax > nrows - 0.5)
-        flags |= np.where(edge, FLAG_EDGE, 0).astype(np.int16)
-        flags[edge] &= ~np.int16(FLAG_MASKED)                 # off-edge pixels aren't "masked"
         if n > 1:
             from scipy.spatial import cKDTree
             d, _ = cKDTree(pos).query(pos, k=2)

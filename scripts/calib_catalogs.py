@@ -69,7 +69,7 @@ _HDR_KEYS = ['OBSMJD', 'AIRMASS', 'NMATCHES', 'MAGZP_DIF', 'MAGZPRMS_DIF',
 # on masked pixels (16) are rejected. Legacy SExtractor flags describe the simulated
 # detection image and are zeroed (img_kind 'sim'), as before.
 _AP_PHOTCODE = 'ztfphot-aper'
-_AP_CAL_REJECT_BITS = 8 | 16
+_AP_CAL_REJECT_BITS = 8 | 16 | 32     # ztfphot_flags.F.CAL_REJECT: all apertures clean
 
 
 def _read_ldac(catalog_path):
@@ -166,6 +166,11 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     cal_reject = _AP_CAL_REJECT_BITS if is_aper else ~0
 
     clas = table_ref['CLASS_STAR'].values
+    # Calibrators must be clean in the reference image (FLAG_SE_REF == 0: no bright
+    # neighbour / blend), as vet_calibration_stars documents. The cut was never applied
+    # before 2026-10-20: the parquet lacked FLAG_SE_REF, so vetting treated all as 0.
+    ref_clean = (pd.to_numeric(table_ref['FLAG_SE_REF'], errors='coerce').fillna(0).values == 0
+                 if 'FLAG_SE_REF' in table_ref.columns else np.ones(len(table_ref), dtype=bool))
 
     flux_dif     = table['FLUX_APER']
     flux_dif_err = table['FLUXERR_APER']
@@ -285,7 +290,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         q_mag_all    = q_mag.copy()
 
         # ── Calibrator selection ────────────────────────────────────────────
-        good_ref_mask = is_good_calib[n_safe]
+        good_ref_mask = is_good_calib[n_safe] & ref_clean[n_safe]
         good_ref_mask[_is_tgt] = False  # target excluded from calibrator selection
         fn = np.where(
             (class_star >= 0.7) & ((np.asarray(flags_tmp).astype(int) & cal_reject) == 0) &

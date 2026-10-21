@@ -13,7 +13,7 @@ variables that dip faint, which the magnitude-based test used to miss.
 
 Sources must pass all calibration eligibility criteria to be considered:
   CLASS_STAR_REF >= 0.7  (stellar morphology)
-  FLAG_SE_REF == 0       (no SExtractor flags — same cut used in calib_catalog)
+  FLAGS & REF_BLEND == 0 (clean in the reference image — same cut as calib_catalog)
   14 < q_mag < 19        (calibration magnitude range)
   N >= min_epochs        (enough epochs for a reliable std estimate)
 
@@ -104,12 +104,13 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
         std_flux  = ('flux', 'std'),
     ).reset_index()
 
-    # FLAG_SE_REF still stored per-source in the parquet
-    if 'FLAG_SE_REF' in clean.columns:
-        stats = stats.join(clean.groupby('object_index')['FLAG_SE_REF'].first()
-                           .rename('flag_se'), on='object_index')
-    else:
-        stats['flag_se'] = 0
+    # Reference-image neighbour/blend flag: FLAGS bit REF_BLEND (older parquets:
+    # FLAG_SE_REF; flags_of handles both)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from ztfphot_flags import flags_of, F
+    clean = clean.assign(_ref_blend=((flags_of(clean) & F.REF_BLEND) != 0).astype(int))
+    stats = stats.join(clean.groupby('object_index')['_ref_blend'].max()
+                       .rename('flag_se'), on='object_index')
 
     # ── Match to reference catalog to get q_mag ───────────────────────────────
     ref = pd.read_csv(ref_csv_path)

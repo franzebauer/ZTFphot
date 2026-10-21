@@ -267,8 +267,16 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
                           ref["ALPHAWIN_J2000"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
             dec = np.where(ci == len(ref), target[1] if target else np.nan,
                            ref["DELTAWIN_J2000"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
-        flags = (pd.to_numeric(rows["FLAG_AP"], errors="coerce").fillna(0).to_numpy(int)
-                 if "FLAG_AP" in rows else np.zeros(len(rows), int))
+        # per-epoch aperture bits of the old epochs: FLAGS (current schema), FLAG_AP
+        # (older), or unknown -> AP_UNKNOWN, carried into the rebuilt FLAGS
+        from ztfphot_flags import F
+        if "FLAGS" in rows:
+            flags = (pd.to_numeric(rows["FLAGS"], errors="coerce").fillna(0).astype("int64")
+                     .to_numpy() & (F.EPOCH_BITS | F.AP_UNKNOWN))
+        elif "FLAG_AP" in rows:
+            flags = pd.to_numeric(rows["FLAG_AP"], errors="coerce").fillna(0).to_numpy(int)
+        else:
+            flags = np.full(len(rows), F.AP_UNKNOWN, int)
         cat_dir = base / sub / f"{q[0]:06d}" / q[1] / f"{q[2]:02d}" / str(q[3])
         for mjd, idx in rows.groupby("OBSMJD").indices.items():
             r0 = rows.iloc[idx[0]]
@@ -389,7 +397,13 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
         logger.info(f"    {int(clash.sum()):,} carried rows would duplicate an existing "
                     f"(quadrant, object_index, epoch) — dropped")
     carry = carry[~clash]
+    # carried rows from older files: express their flags in the FLAGS schema too
+    from ztfphot_flags import flags_of
+    carry["FLAGS"] = flags_of(carry).to_numpy()
+    carry = carry.drop(columns=[c for c in ("FLAG_AP", "FLAG_SE_REF", "INFOBITS_REF")
+                                if c in carry.columns])
     out = pd.concat([new, carry], ignore_index=True, sort=False)
+    out["FLAGS"] = pd.to_numeric(out["FLAGS"]).astype("Int32")
     out = out.drop(columns=["_csv", "_mjd"]).sort_values("OBSMJD", ignore_index=True)
     out["object_index"] = pd.to_numeric(out["object_index"]).astype("Int32")
     logger.info(f"    old-epoch rows recalibrated {len(m):,} (median dMAG_4 "
@@ -452,13 +466,15 @@ def update_target(paths: list[Path], a, auth) -> str:
         logger.info(f"  {len(have)} epochs in parquet; to add: {len(todo)} "
                     f"({len(todo) - (0 if a.no_new else n_new)} missing, "
                     f"{0 if a.no_new else n_new} newer than the parquet)")
-        if a.dry_run or len(todo) == 0:
+        if a.dry_run or (len(todo) == 0 and not a.recalibrate):
             if len(todo) == 0:
                 logger.info("  nothing to add")
                 if not a.dry_run:
                     for path in variants.values():
                         _clear_deferred(path)
             return "ok"
+        if len(todo) == 0:
+            logger.info("  nothing to add — recalibrating with the current pipeline (--recalibrate)")
 
         # 2. references + catalogs, then only the missing/new epochs
         # References are essential: a quadrant missing them would lose its rows, so a
@@ -622,6 +638,10 @@ def _plan_directory(d: Path, a) -> list[list[Path]]:
         outs = [(Path(a.outdir) if a.outdir else m.parent) / f"{m.stem}{a.suffix}.parquet"
                 for m in members]
         done = all(o.exists() for o in outs)
+        if a.from_updated and done:
+            # refresh the existing outputs in place (they already hold every epoch)
+            out.append(outs)
+            continue
         if a.retry_deferred:
             # only targets whose update left deferred epochs; their _updated files are the
             # input (all other epochs already in them) and are refreshed in place
@@ -696,6 +716,13 @@ def main():
                         "failing are deferred, not waited for")
     p.add_argument("--retry-wait", type=float, default=15.0, metavar="S",
                    help="wait before retry round n is n x S seconds (default 15)")
+    p.add_argument("--recalibrate", action="store_true",
+                   help="also process targets with nothing to add, i.e. recalibrate them with "
+                        "the current pipeline (only reference products are downloaded)")
+    p.add_argument("--from-updated", action="store_true",
+                   help="directory mode: where an _updated output exists, use it as the input "
+                        "and refresh it in place (combine with --recalibrate to re-calibrate "
+                        "outputs made by an older pipeline version without re-downloading)")
     p.add_argument("--retry-deferred", action="store_true",
                    help="directory mode: only targets whose earlier update deferred epochs; "
                         "re-run on their _updated files (downloads just those epochs)")

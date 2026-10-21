@@ -49,8 +49,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         'APCORR46',
     ]
     int32_cols = [
-        'NMATCHES', 'INFOBITS_DIF', 'INFOBITS_REF',
-        'FLAG_SE_REF', 'FLAG_AP', 'object_index',
+        'NMATCHES', 'INFOBITS_DIF', 'FLAGS', 'object_index',
     ]
     for col in float64_cols:
         if col in df.columns:
@@ -163,9 +162,12 @@ def step_lightcurves(
         ref = pd.read_csv(ref_csv)
         # Per-source reference columns to carry into LC (MAGZP_REF/MAGZPRMS_REF → metadata)
         ref_cols = {}
+        # make_catalog writes the reference flags as FLAG_SE_REF / INFOBITS_REF (the
+        # FLAGS / INFOBITS names never existed in the CSV, so these columns were silently
+        # missing from every parquet until 2026-10-20 — found by Ernesto)
         for src, dst in [('ALPHAWIN_J2000', 'ALPHAWIN_REF'), ('DELTAWIN_J2000', 'DELTAWIN_REF'),
-                         ('FLAGS', 'FLAG_SE_REF'),
-                         ('INFOBITS', 'INFOBITS_REF')]:
+                         ('FLAG_SE_REF', 'FLAG_SE_REF'),
+                         ('INFOBITS_REF', 'INFOBITS_REF')]:
             if src in ref.columns:
                 ref_cols[dst] = pd.to_numeric(ref[src], errors='coerce').values
         # 4px reference AB magnitude per source (aperture mag + reference ZP). Enables
@@ -256,9 +258,9 @@ def step_lightcurves(
             # Sci-pos: keep epoch positions as ALPHA_SCI/DELTA_SCI.
             # Ref-pos: drop them (meaningless centroid on simulated PSF); _DROP_COLS handles removal.
             pos_rename = {'ALPHAWIN_J2000': 'ALPHA_SCI', 'DELTAWIN_J2000': 'DELTA_SCI'} if suffix == "_sci" else {}
-            # FLAGS -> FLAG_AP: per-epoch aperture flags (1 neighbour, 8 edge, 16 masked;
-            # always 0 for legacy SExtractor catalogs, whose flags calibration zeroes)
-            rename = {'CLASS_STAR': 'CLASS_STAR_OBJ', 'FLAGS': 'FLAG_AP', **pos_rename}
+            # per-epoch aperture flags (ztfphot_flags bits 0-7; always 0 for legacy
+            # SExtractor catalogs, whose flags calibration zeroes) -> composed into FLAGS
+            rename = {'CLASS_STAR': 'CLASS_STAR_OBJ', 'FLAGS': '_EPOCH_FLAGS', **pos_rename}
             ep_rows = ep_rows.rename(columns={k: v for k, v in rename.items() if k in ep_rows.columns})
 
             frames.append(ep_rows)
@@ -268,6 +270,19 @@ def step_lightcurves(
             continue
 
         all_lcs = pd.concat(frames, ignore_index=True)
+
+        # One quality bitmask, FLAGS (ztfphot_flags.py): per-epoch aperture bits +
+        # reference-source flag + no-reference marker + cautionary INFOBITS summaries.
+        # FLAG_SE_REF / INFOBITS_REF are folded in; INFOBITS_REF (constant per quadrant)
+        # goes to the file metadata. INFOBITS_DIF stays as ZTF's raw per-epoch bits.
+        from ztfphot_flags import compose as _compose_flags
+        _ep_flags = (pd.to_numeric(all_lcs['_EPOCH_FLAGS'], errors='coerce').fillna(0)
+                     .astype('int64').to_numpy() if '_EPOCH_FLAGS' in all_lcs else None)
+        all_lcs['FLAGS'] = _compose_flags(all_lcs, epoch_flags=_ep_flags)
+        _infobits_ref = (int(pd.to_numeric(all_lcs['INFOBITS_REF'], errors='coerce').fillna(0).max())
+                         if 'INFOBITS_REF' in all_lcs else None)
+        all_lcs = all_lcs.drop(columns=[c for c in ('_EPOCH_FLAGS', 'FLAG_SE_REF', 'INFOBITS_REF')
+                                        if c in all_lcs.columns])
 
         # Drop redundant / removed columns
         drop = [c for c in _DROP_COLS if c in all_lcs.columns]
@@ -306,6 +321,8 @@ def step_lightcurves(
             b'target_sep_arcsec':           str(target_sep_val).encode(),
             b'target_ref_mag':              str(target_ref_mag).encode(),
         }
+        if _infobits_ref is not None:
+            extra_meta[f'INFOBITS_REF_{tag}'.encode()] = str(_infobits_ref).encode()
         # Effective epoch selection, measured from the epochs actually present
         _ep = all_lcs.drop_duplicates('OBSMJD')
         _num = lambda c: pd.to_numeric(_ep[c], errors='coerce') if c in _ep.columns else pd.Series(dtype=float)

@@ -1024,7 +1024,45 @@ def main() -> None:
                                                   target_ra=args.ra, target_dec=args.dec,
                                                   match_radius=args.target_match_radius,
                                                   assoc_radius=args.assoc_radius_sci)
-    if "vet"        in steps: step_vet(base_dir, quadrants)
+    # Two-pass calibration in ONE invocation (the documented strategy, as in
+    # recalibrate_parquet.py): pass 1 calibrates without a flatfield, its light curves
+    # feed the calibration-star vetting, its residuals feed the flatfield; pass 2 (the
+    # loop below: flatfield -> recalibrate) then applies both. Previously a fresh run
+    # built the flatfield BEFORE any residuals existed and vetted before any light
+    # curves existed, so neither was applied unless the pipeline was run twice.
+    two_pass = "calibrate" in steps and ("recalibrate" in steps or "flatfield" in steps)
+    if two_pass:
+        logger.info("─── calibration pass 1 (no flatfield) → light curves → vetting ───")
+        for suffix in suffixes:
+            for q in quadrants:
+                step_calibrate(base_dir, [q], workers=args.workers, force=True,
+                               vet_catalog=args.vet_catalog, poly_degree=args.poly_degree,
+                               flatfield=None, target_ra=args.ra, target_dec=args.dec,
+                               target_match_radius=args.target_match_radius,
+                               save_residuals=True, faint_err_max=args.faint_err_max,
+                               suffix=suffix)
+        if "vet" in steps:
+            # vetting reads the ref-pos light curves; a sci-only run vets from its sci
+            # light curves, seeded under the ref name for the duration of the vet step
+            vsuf = "" if "" in suffixes else "_sci"
+            step_lightcurves(base_dir, quadrants, force=True, use_calibrated=True,
+                             suffix=vsuf, target_ra=args.ra, target_dec=args.dec,
+                             target_match_radius=args.target_match_radius)
+            seeded = []
+            if vsuf:
+                import shutil as _sh
+                for q in quadrants:
+                    d = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
+                         / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}")
+                    if (d / "lightcurves_sci.parquet").exists() and not (d / "lightcurves.parquet").exists():
+                        _sh.copy2(d / "lightcurves_sci.parquet", d / "lightcurves.parquet")
+                        seeded.append(d / "lightcurves.parquet")
+            step_vet(base_dir, quadrants)
+            for f in seeded:
+                f.unlink(missing_ok=True)
+        logger.info("─── calibration pass 2 (flatfield + vetting) ───")
+    elif "vet" in steps:
+        step_vet(base_dir, quadrants)
 
     for suffix in suffixes:
         logger.info(f"─── suffix='{suffix}' pass ───" if len(suffixes) > 1 else "")
@@ -1052,7 +1090,7 @@ def main() -> None:
         # with calibrate, so it must overwrite that first pass regardless of --force.
         # Otherwise step_calibrate skips the existing *_cal.fits and the flatfield is
         # built but never applied (dm_5 == dm_4, "flatfield does nothing").
-        _cal_force = args.force or ("recalibrate" in steps)
+        _cal_force = args.force or ("recalibrate" in steps) or two_pass
         if "calibrate" in steps or "recalibrate" in steps:
             for q in quadrants:
                 key = (q['field'], q['filtercode'], q['ccdid'], q['qid'])
@@ -1065,7 +1103,9 @@ def main() -> None:
                                suffix=suffix)
 
         if "lightcurves" in steps:
-            step_lightcurves(base_dir, quadrants, force=args.force,
+            # after a two-pass calibration the pass-1 light curves (written for vetting)
+            # must be replaced by the final, flatfield-applied ones
+            step_lightcurves(base_dir, quadrants, force=args.force or two_pass,
                              use_calibrated=("calibrate" in steps or "recalibrate" in steps),
                              suffix=suffix, target_ra=args.ra, target_dec=args.dec,
                              target_match_radius=args.target_match_radius,
@@ -1075,7 +1115,7 @@ def main() -> None:
                                      _latest_download_run(base_dir, args), default=str),
                              })
 
-        if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force,
+        if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force or two_pass,
                                               target_ra=args.ra, target_dec=args.dec,
                                               suffix=suffix,
                                               mag_bin=args.merge_mag_bin,
