@@ -1,26 +1,25 @@
 """
 aperture_photometry.py
 ----------------------
-Forced circular-aperture photometry on ZTF difference images (photutils), replacing
-the simulated-image + SExtractor dual-image route.
+Forced circular-aperture photometry on ZTF difference images (photutils) — the
+pipeline's photometry step (`phot` / `phot_sci`).
 
 Positions are forced, not detected:
   ref-pos  — every reference-catalog source (Catalogs/*(REFERENCE)[OBJECTS].csv), plus
              the --ra/--dec target appended as index N+1 when no reference source lies
-             within the target match radius (same rule as photometry._write_assoc_catalog).
+             within the target match radius (it is then "injected": no reference flux).
   sci-pos  — every source of the epoch's ZTF science catalog (*_sexcat.fits), tied to
              the nearest reference entry within --assoc-radius-sci (unmatched dropped).
 
 A source is measured when its centre is on the frame and > 50% of the pixels within
-0.75*SEEING of it are finite (the rule the simulated image used to decide what to paint).
+0.75*SEEING of it are finite.
 
 Apertures: PHOT_APERTURES DIAMETERS (3,4,6,10 px -> radii 1.5,2,3,5), exact overlap.
 Masked (NaN) pixels are excluded from the sums.
 
 Background (--aper-bkg):
   local           — sigma-clipped median in a circular annulus [r_in, r_in + 35 px],
-                    r_in = 1.58*SEEING (the detection isophote of the old simulated
-                    source); mimics SExtractor BACKPHOTO_TYPE LOCAL / THICK 35.
+                    r_in = 1.58*SEEING.
   box (default)   — 3-sigma-clipped mean in a SQUARE annulus (half-sizes 1.58*SEEING ..
                     +35 px) via integral images: same pixel-level local estimate, ~5x
                     cheaper (pixels clipped against the 64 px background level/RMS boxes).
@@ -29,23 +28,23 @@ Background (--aper-bkg):
   none            — no subtraction (difference images are already background-subtracted).
 Errors: FLUXERR = sigma_rms(x, y) * sqrt(unmasked aperture area), sigma_rms from a
 64 px Background2D RMS mesh evaluated at the source positions (cubic spline) — the
-background-only error SExtractor gave with GAIN=inf.
+background-only error.
 
 With ref + sci requested, both position sets are measured in one pass per image.
 
 FLAGS (per-epoch bits of the parquet FLAGS bitmask — see ztfphot_flags.py):
-   1 — another catalog source within the largest aperture radius (≈ SExtractor 1, neighbour)
-   8 — the primary 4 px aperture extends beyond the image edge     (≈ SExtractor 8, truncated)
-  16 — masked (NaN) pixels in the primary 4 px aperture             (≈ SExtractor 16)
+   1 — another catalog source within the largest aperture radius
+   8 — the primary 4 px aperture extends beyond the image edge
+  16 — masked (NaN) pixels in the primary 4 px aperture
   32 — edge or masked pixels only in the larger 6 / 10 px apertures
 8 and 16 corrupt the 4 px measurement (default rejection); calibration rejects
 calibrator measurements with 8 | 16 | 32 (all apertures are calibrated).
 
-Output: one LDAC catalog per epoch with the same name, layout and columns as the
-SExtractor *_sexout.fits (LDAC_IMHEAD = the difference-image header; LDAC_OBJECTS with
-FLUX_APER(4), FLUXERR_APER(4), VECTOR_ASSOC, positions, FLAGS), so calibration and
-everything downstream is unchanged. Written to a temporary file and renamed, so a
-crash never leaves a partial catalog.
+Output: one LDAC catalog per epoch, PhotCatalogs{,_sci}/{field}/{fc}/{ccd}/{qid}/
+*_phot.fits (LDAC_IMHEAD = the difference-image header; LDAC_OBJECTS with FLUX_APER(4),
+FLUXERR_APER(4), VECTOR_ASSOC = 1-based reference index, positions, FLAGS), written to a
+temporary file and renamed, so a crash never leaves a partial catalog.
+migrate_legacy_layout() renames SExCatalogs{,_sci}/ *_sexout.fits trees to this layout.
 """
 from __future__ import annotations
 
@@ -59,10 +58,20 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-BKG_ANNULUS_THICK = 35.0      # px, = SExtractor BACKPHOTO_THICK in clean.sex
-BKG_MESH = 64                 # px, = SExtractor BACK_SIZE
-BKG_FILTER = 3                # = SExtractor BACK_FILTERSIZE
-ISO_FACTOR = 1.58             # r_iso / FWHM of the old simulated source (amp 1000, thresh 1)
+# Aperture DIAMETERS in pixels — do not change (match the original Rust pipeline;
+# k=0 3 px, k=1 4 px = primary -> FLUX_4_TOT_AB / MAG_4_TOT_AB, k=2 6 px, k=3 10 px)
+PHOT_APERTURES = "3,4,6,10"
+
+BKG_ANNULUS_THICK = 35.0      # px, local-background annulus thickness
+BKG_MESH = 64                 # px, Background2D mesh (RMS map, mesh background)
+BKG_FILTER = 3                # Background2D median-filter size (meshes)
+ISO_FACTOR = 1.58             # annulus inner radius / SEEING
+
+# On-disk layout of the per-epoch photometry catalogs, and the names migrated to it
+CATALOG_DIRS = {"": "PhotCatalogs", "_sci": "PhotCatalogs_sci"}
+CATALOG_SUFFIX = "_phot.fits"
+_LEGACY_DIRS = {"": "SExCatalogs", "_sci": "SExCatalogs_sci"}
+_LEGACY_SUFFIX = "_sexout.fits"
 
 from ztfphot_flags import F as _F
 FLAG_NEIGHBOUR, FLAG_EDGE, FLAG_MASKED, FLAG_OUTER = (_F.NEIGHBOUR, _F.EDGE, _F.MASKED,
@@ -77,13 +86,54 @@ def _ffd_from_path(p: Path) -> str:
 
 
 def _aperture_radii() -> list[float]:
-    from photometry import PHOT_APERTURES
     return [float(d) / 2.0 for d in PHOT_APERTURES.split(",")]
+
+
+def catalog_dir(base_dir: Path, suffix: str, field: int, fc: str, ccd: int, qid: int) -> Path:
+    """PhotCatalogs{suffix}/{field:06d}/{fc}/{ccd:02d}/{qid} under base_dir."""
+    return (Path(base_dir) / CATALOG_DIRS[suffix] / f"{int(field):06d}" / fc
+            / f"{int(ccd):02d}" / str(int(qid)))
+
+
+def catalog_name(diff_or_stem: str) -> str:
+    """Catalog file name for a difference image name (ztf_..._scimrefdiffimg.fits) or
+    for an epoch stem (ztf_..._scimrefdiffimg)."""
+    stem = diff_or_stem[:-5] if diff_or_stem.endswith(".fits") else diff_or_stem
+    return stem + CATALOG_SUFFIX
+
+
+def migrate_legacy_layout(base_dir: Path) -> int:
+    """Rename a tree in place: SExCatalogs{,_sci}/ -> PhotCatalogs{,_sci}/ and
+    *_sexout.fits -> *_phot.fits (merging into an existing new-style directory). The
+    catalog contents are unchanged (the LDAC format is the same). Returns files renamed."""
+    import shutil
+    n = 0
+    for suffix, old in _LEGACY_DIRS.items():
+        src = Path(base_dir) / old
+        if not src.is_dir():
+            continue
+        dst = Path(base_dir) / CATALOG_DIRS[suffix]
+        n0 = n
+        if not dst.exists():
+            src.rename(dst)
+        for f in sorted((dst if not src.exists() else src).rglob(f"*{_LEGACY_SUFFIX}")):
+            rel = f.relative_to(dst if not src.exists() else src)
+            target = (dst / rel).with_name(f.name[:-len(_LEGACY_SUFFIX)] + CATALOG_SUFFIX)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                f.unlink()                     # a new-style catalog already exists: keep it
+            else:
+                f.rename(target)
+                n += 1
+        if src.exists():
+            shutil.rmtree(src, ignore_errors=True)
+        logger.info(f"migrated {old}/ -> {CATALOG_DIRS[suffix]}/ ({n - n0} catalogs renamed to *{CATALOG_SUFFIX})")
+    return n
 
 
 def catalog_ok(path: Path) -> bool:
     """True if `path` is a complete LDAC catalog (guards against the header-only /
-    empty / truncated files a failed SExtractor run leaves behind)."""
+    empty / truncated catalog files)."""
     try:
         if path.stat().st_size <= 2880:
             return False
@@ -249,7 +299,7 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
         n_all = aperture_photometry(np.ones_like(ep.fin), ap_v, method="center")["aperture_sum"]
         good[on] = np.asarray(n_fin) > 0.5 * np.asarray(n_all)
 
-    # Target fate (same keys the simulate step wrote): matched = has a reference source
+    # Target fate (read by run_pipeline's target status): matched = has a reference source
     fate = None
     if target_ra is not None and target_dec is not None and sexcat_path is None:
         fate = {"matched": not injected, "in_frame": bool(injected and on[-1]),
@@ -352,8 +402,8 @@ def _aper_one(args: tuple) -> tuple[str, bool, str]:
         fate = measure_jobs(diff_path, ref_csv, jobs, target_ra=target_ra,
                             target_dec=target_dec, match_radius=match_radius,
                             bkg=bkg, bkg_mesh=bkg_mesh)
-        # Persist the target fate under TargetStatus/ (survives --purge-batch), as the
-        # simulate step did, so run_pipeline can classify missing target photometry.
+        # Persist the target fate under TargetStatus/ (survives --purge-batch), so
+        # run_pipeline can classify missing target photometry.
         if fate is not None and status_dir is not None:
             Path(status_dir).mkdir(parents=True, exist_ok=True)
             (Path(status_dir) / f"{_ffd_from_path(diff_path)}.json").write_text(json.dumps(fate))
@@ -381,14 +431,14 @@ def _run(base_dir: Path, quadrants: list[dict], *, ref: bool, sci: bool, workers
         for diff_path in sorted(q["sci_dir"].glob("*_scimrefdiffimg.fits")):
             if filefracdays is not None and _ffd_from_path(diff_path) not in filefracdays:
                 continue
-            name = diff_path.name.replace(".fits", "_sexout.fits")
+            name = catalog_name(diff_path.name)
             jobs = []
             if ref:
-                out = base_dir / "SExCatalogs" / sub / name
+                out = base_dir / CATALOG_DIRS[""] / sub / name
                 if force or not catalog_ok(out):
                     jobs.append((out, None, None))
             if sci:
-                out = base_dir / "SExCatalogs_sci" / sub / name
+                out = base_dir / CATALOG_DIRS["_sci"] / sub / name
                 sexcat = diff_path.with_name(diff_path.name.replace("_scimrefdiffimg.fits",
                                                                     "_sexcat.fits"))
                 if not sexcat.exists():
@@ -425,8 +475,8 @@ def step_aperture(base_dir: Path, quadrants: list[dict], workers: int = 4,
                   match_radius: float = 1.0, assoc_radius: float = 0.5,
                   bkg: str = "box", bkg_mesh: int = BKG_MESH,
                   also_sci: bool = False, assoc_radius_sci: float = 1.5) -> int:
-    """Ref-pos forced photometry; drop-in for photometry.step_sextractor (assoc_radius
-    is unused: positions are the reference positions themselves). also_sci=True also
+    """Ref-pos forced photometry (step `phot`); assoc_radius is unused (positions are
+    the reference positions themselves). also_sci=True also
     writes the sci-pos catalogs from the same image pass (the later sci step then finds
     them complete and skips)."""
     return _run(base_dir, quadrants, ref=True, sci=also_sci, workers=workers, force=force,
@@ -441,13 +491,8 @@ def step_aperture_scipos(base_dir: Path, quadrants: list[dict], workers: int = 4
                          target_ra: float | None = None, target_dec: float | None = None,
                          match_radius: float = 1.0, assoc_radius: float = 1.5,
                          bkg: str = "box", bkg_mesh: int = BKG_MESH) -> int:
-    """Sci-pos forced photometry; drop-in for photometry_scipos.step_sex_scipos."""
+    """Sci-pos forced photometry (step `phot_sci`)."""
     return _run(base_dir, quadrants, ref=False, sci=True, workers=workers, force=force,
                 filefracdays=filefracdays, target_ra=target_ra, target_dec=target_dec,
                 match_radius=match_radius, assoc_radius_sci=assoc_radius,
                 bkg=bkg, bkg_mesh=bkg_mesh)
-
-
-def step_noop(*args, **kwargs) -> int:
-    """Stands in for the simulate steps: forced photometry needs no detection image."""
-    return 0

@@ -9,7 +9,7 @@ UNBIASED bipolar-flux scatter (σ of FLUX_4_TOT_AB in μJy, which keeps the
 fainter-than-reference epochs the magnitude drops to NaN) across clean epochs
 exceeds threshold × the running-median locus at that magnitude are flagged as
 unreliable calibrators. Using flux σ (not the censored magnitude std) catches
-variables that dip faint, which the magnitude-based test used to miss.
+variables that dip fainter than the reference.
 
 Sources must pass all calibration eligibility criteria to be considered:
   CLASS_STAR_REF >= 0.7  (stellar morphology)
@@ -91,7 +91,7 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
     clean = df[df['INFOBITS_DIF'] == 0].copy()
     # Vet on the UNBIASED bipolar flux scatter (μJy), not the censored magnitude std:
     # keeping every clean epoch — including the fainter-than-reference (negative-flux)
-    # ones the magnitude drops to NaN — so a source that dips faint is no longer hidden.
+    # ones the magnitude drops to NaN — so a source that dips faint is not hidden.
     clean['flux'] = pd.to_numeric(clean['FLUX_4_TOT_AB'], errors='coerce')
     clean = clean[clean['flux'].notna()]
 

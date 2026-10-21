@@ -162,9 +162,7 @@ def step_lightcurves(
         ref = pd.read_csv(ref_csv)
         # Per-source reference columns to carry into LC (MAGZP_REF/MAGZPRMS_REF → metadata)
         ref_cols = {}
-        # make_catalog writes the reference flags as FLAG_SE_REF / INFOBITS_REF (the
-        # FLAGS / INFOBITS names never existed in the CSV, so these columns were silently
-        # missing from every parquet until 2026-10-20 — found by Ernesto)
+        # reference flags as written by make_catalog
         for src, dst in [('ALPHAWIN_J2000', 'ALPHAWIN_REF'), ('DELTAWIN_J2000', 'DELTAWIN_REF'),
                          ('FLAG_SE_REF', 'FLAG_SE_REF'),
                          ('INFOBITS_REF', 'INFOBITS_REF')]:
@@ -256,10 +254,9 @@ def step_lightcurves(
 
             # Rename cal.fits measurement columns to LC schema.
             # Sci-pos: keep epoch positions as ALPHA_SCI/DELTA_SCI.
-            # Ref-pos: drop them (meaningless centroid on simulated PSF); _DROP_COLS handles removal.
+            # Ref-pos: drop them (they equal the reference positions); _DROP_COLS handles removal.
             pos_rename = {'ALPHAWIN_J2000': 'ALPHA_SCI', 'DELTAWIN_J2000': 'DELTA_SCI'} if suffix == "_sci" else {}
-            # per-epoch aperture flags (ztfphot_flags bits 0-7; always 0 for legacy
-            # SExtractor catalogs, whose flags calibration zeroes) -> composed into FLAGS
+            # per-epoch aperture flags (ztfphot_flags bits 0-7) -> composed into FLAGS
             rename = {'CLASS_STAR': 'CLASS_STAR_OBJ', 'FLAGS': '_EPOCH_FLAGS', **pos_rename}
             ep_rows = ep_rows.rename(columns={k: v for k, v in rename.items() if k in ep_rows.columns})
 

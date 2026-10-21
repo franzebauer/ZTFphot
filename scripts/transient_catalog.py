@@ -2,34 +2,27 @@
 transient_catalog.py
 --------------------
 Inject additional sources (transients not present in the ZTF reference image)
-into the reference SExtractor catalog before the simulation step, so that
-simulate_science.py will paint them into the simulated detection image and
-SExtractor will recover their positions in the difference image.
+into the quadrant's reference catalog, so that the forced aperture photometry
+measures them at their positions in every difference image.
 
 Background
 ----------
 The ZTF reference image is a deep stack of historical science images.  Any
 object that brightened *after* the reference epoch (supernovae, TDEs, novae,
-AGN flares, etc.) will be absent from the reference SExtractor catalog
-(refsexcat.fits).  Because simulate_science.py uses the reference catalog to
-build the simulated detection image, SExtractor running in dual-image mode
-will never attempt to measure flux at the transient's position, resulting in
-missing epochs for that object.
+AGN flares, etc.) is absent from the reference catalog (refsexcat.fits), which
+defines the positions the photometry measures.
 
-This module solves the problem by:
-  1. Loading a list of additional positions (from a user CSV or TNS API query).
-  2. Converting them into synthetic rows compatible with the refsexcat.fits
-     FITS binary table format.
-  3. Writing an augmented catalog file that simulate_science.py can accept
-     alongside (or instead of) the original refsexcat.fits.
+This module:
+  1. Loads a list of additional positions (from a user CSV or TNS API query).
+  2. Converts them into rows compatible with the refsexcat.fits binary table.
+  3. Writes an augmented catalog (*_refsexcat_augmented.fits), which make_catalog
+     prefers over refsexcat.fits when building the reference CSV.
 
 Injected sources are marked with:
-  - MAG_AUTO / MAG_APER = 99  (physically impossible sentinel; they have no real
-    reference-image flux). This surfaces as MAG_4_REF > 90 in the light curves,
-    so injected sources are distinguishable in the output with no extra column,
-    and it also selects the boosted detection amplitude in simulate_science.py.
-  - FLAGS = 1 if a reference neighbour lies within 3 arcsec (SExtractor "close
-    neighbour" bit, so blends are flagged like real crowded sources), else 0.
+  - MAG_AUTO / MAG_APER = 99  (they have no reference-image flux). This surfaces as
+    MAG_4_REF > 90 and FLAGS bit NO_REFERENCE in the light curves.
+  - FLAGS = 1 if a reference neighbour lies within 3 arcsec (neighbour bit), else 0;
+    this surfaces as FLAGS bit REF_BLEND in the light curves.
 
 Modes
 -----
@@ -420,8 +413,8 @@ def _filter_already_in_catalog(
 ) -> list[TransientSource]:
     """
     Remove transients that already appear in the reference catalog within
-    match_radius_arcsec.  These sources don't need injection — SExtractor
-    will already recover them.
+    match_radius_arcsec.  These sources don't need injection — they are
+    already measured as reference sources.
     """
     if not transients:
         return transients
@@ -504,7 +497,7 @@ def augment_sexcat(
     footprint_filter: bool = True,
 ) -> Path:
     """
-    Append injected transient sources to a ZTF reference SExtractor catalog.
+    Append injected transient sources to a ZTF reference catalog (refsexcat).
 
     The output is a FITS binary table that is a drop-in replacement for the
     original refsexcat.fits.  It contains:
@@ -570,11 +563,10 @@ def augment_sexcat(
         return refsexcat_path
 
     # ---- Reference positions, for the neighbour-blend flag ----
-    # The simulated detection image paints every source at a fixed amplitude (only
-    # positions matter), so no per-source injection flux is computed. If an injected
-    # source has a reference neighbour within _BLEND_ARCSEC, we set SExtractor FLAGS
-    # bit 0 (value 1, "close neighbour biasing photometry") so it is flagged exactly
-    # like a real crowded source (carried to the light curves as FLAG_SE_REF).
+    # Only positions matter, so no per-source injection flux is computed. If an
+    # injected source has a reference neighbour within _BLEND_ARCSEC, FLAGS bit 0
+    # (value 1, close neighbour) is set, so it is flagged like a real crowded source
+    # (FLAGS bit REF_BLEND in the light curves).
     from astropy.coordinates import SkyCoord
     import astropy.units as u
     _ref_coords = SkyCoord(ra=np.asarray(orig_table["ALPHAWIN_J2000"], float) * u.deg,
@@ -605,9 +597,9 @@ def augment_sexcat(
         row["ALPHAWIN_J2000"] = src.ra
         row["DELTAWIN_J2000"] = src.dec
 
-        # Magnitude sentinel (99) is the sole injected-source marker: it drives the
-        # brighter detection-image amplitude in simulate_science and surfaces as
-        # MAG_4_REF > 90 in the light curves. No injection flux is stored.
+        # Magnitude sentinel (99) is the injected-source marker: it surfaces as
+        # MAG_4_REF > 90 (FLAGS bit NO_REFERENCE) in the light curves. No injection
+        # flux is stored.
         for mc in ["MAG_BEST", "MAG_AUTO", "MAG_APER"]:
             if mc in orig_table.colnames:
                 if orig_table[mc].shape[1:]:
@@ -621,7 +613,7 @@ def augment_sexcat(
                 else:
                     row[ec] = 99.0
 
-        # SExtractor quality flags: co-opt bit 0 (close neighbour) if a reference
+        # Reference flags: bit 0 (close neighbour) if a reference
         # source lies within _BLEND_ARCSEC, so injected sources are blend-flagged
         # like real crowded sources; 0 (clean) otherwise.
         _nn = SkyCoord(ra=src.ra * u.deg, dec=src.dec * u.deg).separation(_ref_coords).arcsec.min() \
@@ -743,8 +735,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         description=(
-            "Inject additional sources into a ZTF reference SExtractor catalog "
-            "so that simulate_science.py can detect them in difference images."
+            "Inject additional sources into a ZTF reference catalog so that the "
+            "forced aperture photometry measures them in the difference images."
         )
     )
     parser.add_argument(

@@ -29,7 +29,7 @@ dependencies:
   # try (and fail) to build it from source when installing ztfquery
   - pyproj
 
-  # funpack (from conda-forge); SExtractor installed separately — see README
+  # funpack (from conda-forge)
   - cfitsio
 
   # pip-only packages

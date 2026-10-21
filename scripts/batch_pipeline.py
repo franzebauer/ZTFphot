@@ -216,7 +216,7 @@ def _quadrant_center(field: int, ccdid: int, qid: int) -> tuple:
 
 
 _QUAD_STEPS = [
-    "lookup", "download", "catalog", "simulate", "sex",
+    "lookup", "download", "catalog", "phot",
     "vet", "calibrate", "flatfield", "recalibrate", "lightcurves", "plots",
 ]
 
@@ -307,7 +307,7 @@ def main():
     parser.add_argument("--bands", nargs="+", default=["zg"],
                         metavar="BAND", help="Bands to process (default: zg)")
     parser.add_argument("--workers",          type=int, default=4,
-                        help="Parallel workers for simulate/sex/calibrate (default: 4)")
+                        help="Parallel workers for photometry/calibrate (default: 4)")
     parser.add_argument("--download-workers", type=int, default=50,
                         help="Parallel threads for image downloads (default: 50)")
     parser.add_argument("--purge-batch", type=int,   default=20)

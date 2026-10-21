@@ -4,7 +4,7 @@ recalibrate_parquet.py
 ----------------------
 Re-derive the photometric calibration of existing *merged* light-curve parquet
 files using the CURRENT pipeline calibration, without any of the original
-intermediate products (SExtractor catalogs, calibrated FITS, downloads).
+intermediate products (photometry catalogs, calibrated FITS, downloads).
 
 Why this is possible
 --------------------
@@ -86,7 +86,7 @@ from download_coordinator import ref_url, ref_local_path, get_auth, download_fil
 logger = logging.getLogger("recalibrate_parquet")
 
 # Reference products needed to rebuild q_mag: image stack (carries MAGZP_REF in
-# its header) and the SExtractor reference catalog (aperture magnitudes).
+# its header) and IRSA's reference source catalog (aperture magnitudes).
 _REF_PRODUCTS = ["refimg.fits", "refsexcat.fits"]
 
 _fit_fun = lambda x, n, m: m * x + n

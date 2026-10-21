@@ -5,8 +5,9 @@ Steps (run in order, or select with --steps):
     lookup       — query IRSA for field/epoch coverage and cache results
     download     — fetch science and reference images from IRSA
     catalog      — build reference CSV catalogs from refsexcat.fits
-    simulate     — build simulated detection images (PSF at reference positions)
-    sex          — SExtractor dual-image aperture photometry
+    phot         — forced aperture photometry at the reference positions (photutils)
+    phot_sci     — forced aperture photometry at the epoch's science-catalog positions
+                   (runs with --both / --scipos)
     vet          — flag variable/bad calibration stars by multi-epoch RMS
     calibrate    — linear ZP → 3σ clip → faint correction → polynomial → flatfield
     flatfield    — rebuild spatial flatfield from post-polynomial residuals
@@ -40,8 +41,7 @@ if str(_SCRIPTS) not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-ALL_STEPS = ["lookup", "download", "catalog", "simulate", "sex",
-             "simulate_sci", "sex_sci",
+ALL_STEPS = ["lookup", "download", "catalog", "phot", "phot_sci",
              "vet", "calibrate", "flatfield", "recalibrate", "lightcurves", "merge", "plots"]
 
 
@@ -49,14 +49,15 @@ def _print_status(base_dir: Path, quadrants: list[dict]) -> None:
     from shutil import get_terminal_size
     w = min(get_terminal_size().columns, 100)
     print("=" * w)
-    print(f"{'Quadrant':<32} {'Diff imgs*':>10} {'SExCats':>10} {'Calibrated':>12} {'LC':>4}")
+    print(f"{'Quadrant':<32} {'Diff imgs*':>10} {'PhotCats':>10} {'Calibrated':>12} {'LC':>4}")
     print("-" * w)
     for q in quadrants:
         f, fc, ccd, qid = q["field"], q["filtercode"], q["ccdid"], q["qid"]
         sci = q["sci_dir"]
         n_diff = len(list(sci.glob("*_scimrefdiffimg.fits")))
-        sex_d  = base_dir / "SExCatalogs" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid)
-        n_sex  = len(list(sex_d.glob("*_sexout.fits"))) if sex_d.exists() else 0
+        from aperture_photometry import catalog_dir, CATALOG_SUFFIX
+        sex_d  = catalog_dir(base_dir, "", f, fc, ccd, qid)
+        n_sex  = len(list(sex_d.glob(f"*{CATALOG_SUFFIX}"))) if sex_d.exists() else 0
         cal_d  = base_dir / "Calibrated" / f"{f:06d}" / fc / f"{ccd:02d}" / str(qid)
         n_cal  = len(list(cal_d.glob("*_cal.fits"))) if cal_d.exists() else 0
         lc     = base_dir / "LightCurves" / f"{f:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid}" / "lightcurves.parquet"
@@ -75,8 +76,9 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
     positive OR negative (a fainter-than-reference detection is still a detection).
     LACKS_REFIMG_DETECTION is OK but with no reference source (MAG_4_REF NaN), so its
     FLUX_4_TOT_AB is bipolar *difference* flux, not total — treat with care (blends).
-    NOT_RECOVERED means it was painted but SExtractor/ASSOC never produced any row.
-    Aggregates the per-epoch target fate written under TargetStatus/ by the simulate
+    NOT_RECOVERED means it was measurable ("painted": in frame, unmasked) in >= 1 epoch
+    but no row reached the light curve.
+    Aggregates the per-epoch target fate written under TargetStatus/ by the photometry
     step (survives --purge-batch), then upgrades to OK from the final light curve."""
     import json, numpy as np, pandas as pd
 
@@ -207,7 +209,7 @@ def _inject_targets_into_quadrants(base_dir: Path, quadrants: list[dict],
     """Augment each quadrant's reference catalog with the given transient sources
     that (a) lie inside the quadrant footprint and (b) are not already within
     match_radius of a reference source. Writes non-destructive *_refsexcat_augmented.fits;
-    make_catalog and simulate prefer it automatically. Injected sources carry the
+    make_catalog prefers it automatically. Injected sources carry the
     reference-mag sentinel (MAG_APER=99 → MAG_4_REF > 90 in the light curves)."""
     import sys as _sys
     _scripts = Path(__file__).parent
@@ -284,30 +286,61 @@ def _refs_ok(ref_dir: Path, field, fc, ccd, qid) -> bool:
                for s in ("refimg.fits", "refsexcat.fits"))
 
 
+# Deprecated step names, mapped to the current ones (None = ignored)
+_DEPRECATED_STEPS = {"sex": "phot", "sex_sci": "phot_sci", "simulate": None, "simulate_sci": None}
+
+
+def _normalise_steps(args) -> None:
+    """Map deprecated step names (sex/sex_sci -> phot/phot_sci; simulate/simulate_sci
+    dropped) with a warning, and run phot_sci only when a sci-pos variant is requested
+    (--both / --scipos) unless it was listed explicitly."""
+    explicit = any(a == "--steps" or a.startswith("--steps=") for a in sys.argv)
+    steps = []
+    for s in args.steps:
+        if s in _DEPRECATED_STEPS:
+            new = _DEPRECATED_STEPS[s]
+            logger.warning(f"step '{s}' is deprecated" + (f" — use '{new}'" if new else
+                           " — ignored"))
+            s = new
+        if s and s not in steps:
+            steps.append(s)
+    if not explicit:
+        if not (args.both or args.scipos):
+            steps = [s for s in steps if s != "phot_sci"]
+        elif args.scipos and not args.both:
+            steps = [s for s in steps if s != "phot"]
+    args.steps = steps
+
+
 def _photometry_steps(args):
-    """(simulate, sex, simulate_sci, sex_sci) step functions for --photometry.
-    'aper' keeps the step names (and their on-disk catalogs) but runs forced photutils
-    photometry; the simulate steps become no-ops."""
-    if args.photometry == "sex":
-        from photometry import step_simulate, step_sextractor
-        from photometry_scipos import step_simulate_scipos, step_sex_scipos
-        return step_simulate, step_sextractor, step_simulate_scipos, step_sex_scipos
+    """(phot, phot_sci) step functions. With ref + sci requested, both position sets are
+    measured in one pass over each image (the phot step writes the sci catalogs too) and
+    the separate sci step is None."""
     from functools import partial
-    from aperture_photometry import step_aperture, step_aperture_scipos, step_noop
+    from aperture_photometry import step_aperture, step_aperture_scipos
     kw = dict(bkg=args.aper_bkg, bkg_mesh=args.aper_bkg_mesh)
-    # ref + sci requested: measure both position sets in one pass over each image (the
-    # ref step writes the sci catalogs too), so the separate sci step is not needed.
-    both = "sex" in args.steps and (args.both or "sex_sci" in args.steps)
+    both = "phot" in args.steps and "phot_sci" in args.steps
     ref_step = partial(step_aperture, also_sci=both,
                        assoc_radius_sci=args.assoc_radius_sci, **kw)
-    sci_step = step_noop if both else partial(step_aperture_scipos, **kw)
-    return step_noop, ref_step, step_noop, sci_step
+    sci_step = None if both else partial(step_aperture_scipos, **kw)
+    return ref_step, sci_step
+
+
+def _run_phot(steps, step_phot, step_phot_sci, base_dir, quads, args, filefracdays=None):
+    """Run the requested photometry steps (phot / phot_sci) on `quads`."""
+    common = dict(workers=args.workers, force=args.force, filefracdays=filefracdays,
+                  target_ra=args.ra, target_dec=args.dec,
+                  match_radius=args.target_match_radius)
+    if "phot" in steps:
+        step_phot(base_dir, quads, **common)
+    if "phot_sci" in steps and step_phot_sci is not None:
+        step_phot_sci(base_dir, quads, assoc_radius=args.assoc_radius_sci, **common)
 
 
 def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> None:
     """
-    Run funpack → (catalog once) → simulate → sex in batches of --purge-batch N,
-    deleting all imaging products after each batch's sex step.
+    Run funpack → (catalog once) → photometry in batches of --purge-batch N,
+    deleting all imaging products after each batch's photometry step.
     Reference products are deleted after the first batch (catalog no longer needs them).
     """
     import math
@@ -315,9 +348,8 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
     from download_coordinator import (download_all, purge_images, filter_epochs,
                                       load_permanent_404s)
     from photometry import step_make_catalog
-    from aperture_photometry import catalog_ok
-    step_simulate, step_sextractor, step_simulate_scipos, step_sex_scipos = \
-        _photometry_steps(args)
+    from aperture_photometry import catalog_ok, catalog_dir, catalog_name
+    step_phot, step_phot_sci = _photometry_steps(args)
 
     N = args.purge_batch
     steps = set(args.steps)
@@ -367,27 +399,10 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
         if q_epochs.empty:
             logger.warning(f"{tag}: no epochs in cache — skipping download, "
                            "processing existing files only")
-            # Still run catalog/simulate/sex on whatever is already on disk
+            # Still run catalog + photometry on whatever is already on disk
             if "catalog" in steps:
                 step_make_catalog(base_dir, [q], force=args.force)
-            if "simulate" in steps:
-                step_simulate(base_dir, [q], workers=args.workers, force=args.force,
-                              target_ra=args.ra, target_dec=args.dec,
-                              match_radius=args.target_match_radius)
-            if "sex" in steps:
-                step_sextractor(base_dir, [q], workers=args.workers,
-                                force=args.force, verbose=args.verbose,
-                                target_ra=args.ra, target_dec=args.dec,
-                                match_radius=args.target_match_radius,
-                                assoc_radius=args.assoc_radius)
-            if "simulate_sci" in steps:
-                step_simulate_scipos(base_dir, [q], workers=args.workers, force=args.force)
-            if "sex_sci" in steps:
-                step_sex_scipos(base_dir, [q], workers=args.workers,
-                                force=args.force, verbose=args.verbose,
-                                target_ra=args.ra, target_dec=args.dec,
-                                match_radius=args.target_match_radius,
-                                assoc_radius=args.assoc_radius_sci)
+            _run_phot(steps, step_phot, step_phot_sci, base_dir, [q], args)
             continue
 
         # Footprint gate: fetch only the (small) reference products first, then skip
@@ -421,20 +436,9 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                    f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(REFERENCE)[OBJECTS].csv")
         catalog_done = cat_csv.exists() and not args.force
 
-        sex_dir = (base_dir / "SExCatalogs" / f"{field:06d}" / fc
-                   / f"{ccd:02d}" / str(qid_))
-        sci_sex_dir = (base_dir / "SExCatalogs_sci" / f"{field:06d}" / fc
-                       / f"{ccd:02d}" / str(qid_))
-
-        def _sexcat_path(ffd):
-            fname = (f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}"
-                     f"_scimrefdiffimg_sexout.fits")
-            return sex_dir / fname
-
-        def _sci_sexcat_path(ffd):
-            fname = (f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}"
-                     f"_scimrefdiffimg_sexout.fits")
-            return sci_sex_dir / fname
+        def _cat_path(ffd, suffix):
+            stem = f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"
+            return catalog_dir(base_dir, suffix, field, fc, ccd, qid_) / catalog_name(stem)
 
         # Load permanent 404s so epochs with no IRSA diff image are treated as done
         # Recorded 404s still within --perm404-max-age (none with --retry-404)
@@ -444,20 +448,19 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
         def _epoch_done(ffd):
             needle = f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"
             perm404 = any(needle in url for url in _perm404_urls)
-            # catalog_ok, not exists(): a header-only/truncated catalog left by a failed
-            # SExtractor run must not mark the epoch done (it would never be redone)
-            ref_done = catalog_ok(_sexcat_path(ffd)) or perm404
-            if not ref_done:
+            # catalog_ok, not exists(): a header-only/truncated catalog must not mark the
+            # epoch done (it would never be redone)
+            if "phot" in steps and not (catalog_ok(_cat_path(ffd, "")) or perm404):
                 return False
-            if "simulate_sci" in steps or "sex_sci" in steps:
-                return catalog_ok(_sci_sexcat_path(ffd)) or perm404
+            if "phot_sci" in steps:
+                return catalog_ok(_cat_path(ffd, "_sci")) or perm404
             return True
 
         import re as _re
         _MAX_DL_RETRIES = 3          # discard an epoch after this many consecutive download-fail cycles
 
         def _process_batch(this_batch, is_first, label):
-            """Download + simulate/sex + purge one batch. Returns the set of ffds whose
+            """Download + photometry + purge one batch. Returns the set of ffds whose
             science download failed transiently (503/timeout), so the caller can carry
             them into the next cycle. Permanent 404s are NOT returned (never retried)."""
             nonlocal catalog_done
@@ -487,30 +490,8 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 step_make_catalog(base_dir, [q], force=args.force)
                 catalog_done = True
 
-            if "simulate" in steps:
-                step_simulate(base_dir, [q], workers=args.workers,
-                              force=args.force, filefracdays=ffds_set,
-                              target_ra=args.ra, target_dec=args.dec,
-                              match_radius=args.target_match_radius)
-
-            if "sex" in steps:
-                step_sextractor(base_dir, [q], workers=args.workers,
-                                force=args.force, verbose=args.verbose,
-                                filefracdays=ffds_set,
-                                target_ra=args.ra, target_dec=args.dec,
-                                match_radius=args.target_match_radius,
-                                assoc_radius=args.assoc_radius)
-
-            if "simulate_sci" in steps:
-                step_simulate_scipos(base_dir, [q], workers=args.workers,
-                                     force=args.force, filefracdays=ffds_set)
-            if "sex_sci" in steps:
-                step_sex_scipos(base_dir, [q], workers=args.workers,
-                                force=args.force, verbose=args.verbose,
-                                filefracdays=ffds_set,
-                                target_ra=args.ra, target_dec=args.dec,
-                                match_radius=args.target_match_radius,
-                                assoc_radius=args.assoc_radius_sci)
+            _run_phot(steps, step_phot, step_phot_sci, base_dir, [q], args,
+                      filefracdays=ffds_set)
 
             # Purge: always remove sci products; ref only after first batch. Failed
             # epochs were never downloaded, so there is nothing of theirs to purge.
@@ -647,10 +628,10 @@ def main() -> None:
     p.add_argument("--field",     type=int,   default=None)
     p.add_argument("--ccdid",     type=int,   default=None)
     p.add_argument("--qid",       type=int,   default=None)
-    p.add_argument("--steps",     nargs="+",  default=ALL_STEPS, choices=ALL_STEPS,
+    p.add_argument("--steps",     nargs="+",  default=ALL_STEPS, choices=ALL_STEPS + list(_DEPRECATED_STEPS),
                    metavar="STEP")
     p.add_argument("--workers",          type=int, default=4,
-                   help="Parallel workers for simulate/sex/calibrate (default: 4)")
+                   help="Parallel workers for photometry/calibrate (default: 4)")
     p.add_argument("--download-workers", type=int, default=50,
                    help="Parallel threads for image downloads (default: 50)")
     p.add_argument("--retry-404", action="store_true",
@@ -688,25 +669,15 @@ def main() -> None:
                         "aperture radius): a quadrant is dropped before science download "
                         "if the target lands within this many pixels of the refimg edge "
                         "(or outside it). Larger = more conservative against edge artefacts.")
-    p.add_argument("--assoc-radius",         type=float, default=1.0, metavar="ARCSEC",
-                   help="SExtractor ASSOC radius for ref-pos photometry (default 1.0). Wide "
-                        "enough that a blend-shifted detection centroid (injected target near "
-                        "a reference source) still matches the target; safe because real ZTF "
-                        "sources are typically >5 arcsec apart.")
     p.add_argument("--assoc-radius-sci",     type=float, default=1.5, metavar="ARCSEC",
-                   help="SExtractor ASSOC radius for sci-pos photometry (default 1.5; "
-                        "wider to allow epoch-to-epoch science-centroid shifts)")
-    p.add_argument("--photometry", choices=["aper", "sex"], default="aper",
-                   help="Difference-image photometry: 'aper' (default) = forced photutils "
-                        "apertures at the reference (or science-catalog) positions, no "
-                        "simulated image — the simulate/simulate_sci steps become no-ops; "
-                        "'sex' = legacy simulated-image + SExtractor dual-image mode. Both "
-                        "write the same SExCatalogs*/…_sexout.fits catalogs.")
+                   help="sci-pos photometry: radius tying each science-catalog source to its "
+                        "nearest reference source (default 1.5; allows epoch-to-epoch "
+                        "science-centroid shifts)")
     p.add_argument("--aper-bkg", choices=["box", "local", "mesh", "none"], default="box",
-                   help="Background for --photometry aper: 'box' (default) = 3σ-clipped mean "
+                   help="Photometry background: 'box' (default) = 3σ-clipped mean "
                         "in a square annulus (1.58×SEEING .. +35 px) via integral images; "
-                        "'local' = clipped median in the circular annulus (≈ SExtractor "
-                        "BACKPHOTO LOCAL; same precision, ~2.5x slower photometry), "
+                        "'local' = clipped median in the equivalent circular annulus "
+                        "(same precision, ~2.5x slower photometry), "
                         "'mesh' = 64 px "
                         "Background2D level, 'none' = no subtraction")
     p.add_argument("--aper-bkg-mesh", type=int, default=64, metavar="PX",
@@ -719,7 +690,7 @@ def main() -> None:
                         "from the reference catalog. During the catalog step, targets "
                         "inside each quadrant footprint and farther than "
                         "--target-match-radius from any reference source are added to a "
-                        "non-destructive augmented catalog that simulate/sex then use. "
+                        "non-destructive augmented catalog that the photometry then uses. "
                         "Injected sources carry MAG_4_REF > 90 in the light curves.")
     p.add_argument("--grabTNSobjs",          action="store_true",
                    help="Inject real transients from the TNS public bulk catalog that "
@@ -748,14 +719,15 @@ def main() -> None:
     # Low-disk mode
     p.add_argument("--purge-batch",  type=int, default=None, metavar="N",
                    help="Process N epochs at a time, deleting imaging products after each "
-                        "batch's sex step. Keeps only SEx catalogs on disk. "
+                        "batch's photometry. Keeps only the photometry catalogs on disk. "
                         "Use --dry-run to preview what would be deleted.")
     p.add_argument("--scipos",        action="store_true",
-                   help="Use science-image sexcat positions instead of reference catalog positions. "
-                        "Reads from SExCatalogs_sci/, writes to Calibrated_sci/, LightCurves_sci/.")
+                   help="Use the epoch's science-catalog (sexcat) positions instead of the "
+                        "reference positions. Writes PhotCatalogs_sci/, Calibrated_sci/, "
+                        "lightcurves_sci.parquet.")
     p.add_argument("--both",          action="store_true",
                    help="Run calibrate/lightcurves/merge/plots for both ref-pos and sci-pos. "
-                        "Also runs simulate_sci/sex_sci inside the purge-batch loop.")
+                        "Both position sets are measured in one pass over each image.")
     p.add_argument("--clean-up",     action="store_true",
                    help="Delete all imaging products (Science/, Reference/) for discovered "
                         "quadrants and exit. Safe once the sex step is complete.")
@@ -776,6 +748,16 @@ def main() -> None:
 
     base_dir = args.base_dir.resolve()
     base_dir.mkdir(parents=True, exist_ok=True)
+
+    # Deprecated step names; phot_sci only with a sci-pos variant; --both with an explicit
+    # 'phot' also measures sci-pos (same images, one pass)
+    _normalise_steps(args)
+    if args.both and "phot" in args.steps and "phot_sci" not in args.steps:
+        args.steps.insert(args.steps.index("phot") + 1, "phot_sci")
+
+    # Rename SExCatalogs*/ *_sexout.fits trees to PhotCatalogs*/ *_phot.fits
+    from aperture_photometry import migrate_legacy_layout
+    migrate_legacy_layout(base_dir)
 
     from download_coordinator import find_quadrants, download_all, purge_hard_reject
 
@@ -960,19 +942,11 @@ def main() -> None:
 
     # ── Import step modules ───────────────────────────────────────────────────
     from photometry  import step_make_catalog
-    step_simulate, step_sextractor, step_simulate_scipos, step_sex_scipos = \
-        _photometry_steps(args)
+    step_phot, step_phot_sci = _photometry_steps(args)
     from calibrate   import step_vet, step_calibrate, step_build_flatfield
     from lightcurves import step_lightcurves, step_merge
 
     t0 = time.time()
-
-    # --both: inject sci steps alongside ref steps so they share the same diff images
-    if args.both:
-        if "simulate" in steps and "simulate_sci" not in steps:
-            steps = steps + ["simulate_sci"]
-        if "sex" in steps and "sex_sci" not in steps:
-            steps = steps + ["sex_sci"]
 
     # --both → both suffixes; --scipos → sci only; neither → ref only
     if args.both:
@@ -982,7 +956,7 @@ def main() -> None:
     else:
         suffixes = [""]
 
-    if args.purge_batch and any(s in steps for s in ("catalog", "simulate", "sex", "simulate_sci", "sex_sci")):
+    if args.purge_batch and any(s in steps for s in ("catalog", "phot", "phot_sci")):
         _run_purge_batch(base_dir, epochs, quadrants, args)
     else:
         if "catalog"    in steps:
@@ -1009,27 +983,10 @@ def main() -> None:
             step_make_catalog(base_dir, quadrants, force=args.force or _injected)
             if args.ra is not None and args.dec is not None:
                 _warn_target_coverage(base_dir, quadrants, args.ra, args.dec)
-        if "simulate"   in steps: step_simulate(base_dir, quadrants, workers=args.workers, force=args.force,
-                                                  target_ra=args.ra, target_dec=args.dec,
-                                                  match_radius=args.target_match_radius)
-        if "sex"        in steps: step_sextractor(base_dir, quadrants, workers=args.workers,
-                                                  force=args.force, verbose=args.verbose,
-                                                  target_ra=args.ra, target_dec=args.dec,
-                                                  match_radius=args.target_match_radius,
-                                                  assoc_radius=args.assoc_radius)
-        if "simulate_sci" in steps: step_simulate_scipos(base_dir, quadrants, workers=args.workers,
-                                                         force=args.force)
-        if "sex_sci"    in steps: step_sex_scipos(base_dir, quadrants, workers=args.workers,
-                                                  force=args.force, verbose=args.verbose,
-                                                  target_ra=args.ra, target_dec=args.dec,
-                                                  match_radius=args.target_match_radius,
-                                                  assoc_radius=args.assoc_radius_sci)
-    # Two-pass calibration in ONE invocation (the documented strategy, as in
-    # recalibrate_parquet.py): pass 1 calibrates without a flatfield, its light curves
-    # feed the calibration-star vetting, its residuals feed the flatfield; pass 2 (the
-    # loop below: flatfield -> recalibrate) then applies both. Previously a fresh run
-    # built the flatfield BEFORE any residuals existed and vetted before any light
-    # curves existed, so neither was applied unless the pipeline was run twice.
+        _run_phot(steps, step_phot, step_phot_sci, base_dir, quadrants, args)
+    # Two-pass calibration in one invocation: pass 1 calibrates without a flatfield, its
+    # light curves feed the calibration-star vetting and its residuals feed the
+    # flatfield; pass 2 (the loop below: flatfield -> recalibrate) applies both.
     two_pass = "calibrate" in steps and ("recalibrate" in steps or "flatfield" in steps)
     if two_pass:
         logger.info("─── calibration pass 1 (no flatfield) → light curves → vetting ───")

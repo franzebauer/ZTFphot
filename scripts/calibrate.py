@@ -113,13 +113,14 @@ def step_calibrate(
 ) -> int:
     """
     Apply per-epoch photometric calibration (linear ZP → 3σ clip → faint
-    correction → 2D polynomial → flatfield) to every SExtractor LDAC catalog.
+    correction → 2D polynomial → flatfield) to every per-epoch photometry catalog.
 
-    Reads from  SExCatalogs{suffix}/{field}/{fc}/{ccd}/{qid}/*_sexout.fits
+    Reads from  PhotCatalogs{suffix}/{field}/{fc}/{ccd}/{qid}/*_phot.fits
     Writes to   Calibrated{suffix}/{field}/{fc}/{ccd}/{qid}/*_cal.fits
     """
+    from aperture_photometry import CATALOG_DIRS, CATALOG_SUFFIX
     cat_dir  = base_dir / "Catalogs"
-    sex_root = base_dir / f"SExCatalogs{suffix}"
+    sex_root = base_dir / CATALOG_DIRS[suffix]
     cal_root = base_dir / f"Calibrated{suffix}"
 
     tasks = []
@@ -136,13 +137,13 @@ def step_calibrate(
         sex_subdir = sex_root / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid_)
         cal_subdir = cal_root / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid_)
 
-        ldac_files = sorted(sex_subdir.glob("*_sexout.fits"))
+        ldac_files = sorted(sex_subdir.glob(f"*{CATALOG_SUFFIX}"))
         if not ldac_files:
             logger.debug(f"calibrate: no LDAC catalogs in {sex_subdir}")
             continue
 
         for ldac in ldac_files:
-            out_cal = cal_subdir / ldac.name.replace("_sexout.fits", "_cal.fits")
+            out_cal = cal_subdir / ldac.name.replace(CATALOG_SUFFIX, "_cal.fits")
             if out_cal.exists() and not force:
                 continue
 
@@ -161,7 +162,7 @@ def step_calibrate(
                 resid_dir = (base_dir / f"FlatfieldResiduals{suffix}"
                              / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid_))
                 resid_dir.mkdir(parents=True, exist_ok=True)
-                resid_out = resid_dir / ldac.name.replace("_sexout.fits", "_resid.npz")
+                resid_out = resid_dir / ldac.name.replace(CATALOG_SUFFIX, "_resid.npz")
 
             extra_kw = dict(
                 poly_degree=poly_degree, flatfield=flatfield,

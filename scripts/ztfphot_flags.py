@@ -4,7 +4,8 @@ ztfphot_flags.py
 The single quality-flag bitmask carried in every light-curve parquet as FLAGS (Int32),
 next to ZTF's own raw per-epoch image bits (INFOBITS_DIF, kept verbatim).
 
-Bits 0-7: per epoch, from the aperture photometry (SExtractor-like meanings)
+Bits 0-7: per epoch, from the aperture photometry (bit values follow the SExtractor
+flag convention: 1 neighbour, 8 truncated, 16 incomplete aperture data)
      1  NEIGHBOUR         another catalog source within the largest aperture radius
      8  EDGE              the primary 4 px aperture extends beyond the image edge   [corrupts]
     16  MASKED            masked / saturated (NaN) pixels in the 4 px aperture      [corrupts]

@@ -64,16 +64,15 @@ def _apply_flatfield(ra, dec, ff):
 _HDR_KEYS = ['OBSMJD', 'AIRMASS', 'NMATCHES', 'MAGZP_DIF', 'MAGZPRMS_DIF',
              'CLRCOEFF', 'SATURATE', 'INFOBITS_DIF', 'SEEING', 'MAGLIM', 'PHOTCODE']
 
-# Aperture-photometry catalogs (PHOTCODE = 'ztfphot-aper') carry real per-epoch flags of
-# the difference image: calibrator measurements with an aperture off the image edge (8) or
-# on masked pixels (16) are rejected. Legacy SExtractor flags describe the simulated
-# detection image and are zeroed (img_kind 'sim'), as before.
+# Photometry catalogs (PHOTCODE = 'ztfphot-aper') carry per-epoch flags of the difference
+# image: calibrator measurements with an aperture off the image edge or on masked pixels
+# (8 | 16 | 32) are rejected. Catalogs without that PHOTCODE have their FLAGS zeroed.
 _AP_PHOTCODE = 'ztfphot-aper'
 _AP_CAL_REJECT_BITS = 8 | 16 | 32     # ztfphot_flags.F.CAL_REJECT: all apertures clean
 
 
 def _read_ldac(catalog_path):
-    """Read SExtractor LDAC FITS file. Returns (header_dict, astropy Table)."""
+    """Read an LDAC FITS catalog. Returns (header_dict, astropy Table)."""
     hdul = pf.open(catalog_path)
     data = {}
     for line in hdul[1].data[0][0]:
@@ -167,8 +166,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
 
     clas = table_ref['CLASS_STAR'].values
     # Calibrators must be clean in the reference image (FLAG_SE_REF == 0: no bright
-    # neighbour / blend), as vet_calibration_stars documents. The cut was never applied
-    # before 2026-10-20: the parquet lacked FLAG_SE_REF, so vetting treated all as 0.
+    # neighbour / blend), the same criterion vet_calibration_stars uses.
     ref_clean = (pd.to_numeric(table_ref['FLAG_SE_REF'], errors='coerce').fillna(0).values == 0
                  if 'FLAG_SE_REF' in table_ref.columns else np.ones(len(table_ref), dtype=bool))
 
@@ -405,9 +403,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
 
             # ── Step 3: 2-D polynomial spatial correction ───────────────────
             # Fit on the linear-ZP calibrator residuals directly. The faint-source
-            # correction now runs after the flatfield (see Step 5), so it no longer
-            # feeds the poly/flatfield fits — those are built from 14–19 mag
-            # calibrators the faint ramp (≥18.5 mag) barely touches anyway.
+            # correction runs after the flatfield (Step 5) and does not feed the
+            # poly/flatfield fits, which use 14–19 mag calibrators.
             _dm_for_poly = (diff - fit)
             if k == 1:
                 _nc_rmsfc_k = float(np.std(_dm_for_poly))

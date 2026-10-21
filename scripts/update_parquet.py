@@ -240,7 +240,8 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
     from astropy.io import fits
     from aperture_photometry import _write_ldac, PHOTCODE
     written, used = 0, []
-    sub = "SExCatalogs_sci" if sci else "SExCatalogs"
+    from aperture_photometry import CATALOG_DIRS, catalog_name
+    sub = CATALOG_DIRS["_sci" if sci else ""]
     for key, rows in df.groupby(QKEY):
         q = (int(key[0]), str(key[1]), int(key[2]), int(key[3]))
         if q not in refs:
@@ -293,8 +294,8 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
             n = len(idx)
             fa = np.repeat(f[idx, None], 4, axis=1).astype(np.float32)
             ea = np.repeat(e[idx, None], 4, axis=1).astype(np.float32)
-            name = (f"ztf_{ffd_of(q, mjd)}_{q[0]:06d}_{q[1]}_c{q[2]:02d}_o_q{q[3]}"
-                    f"_scimrefdiffimg_sexout.fits")
+            name = catalog_name(f"ztf_{ffd_of(q, mjd)}_{q[0]:06d}_{q[1]}_c{q[2]:02d}_o_q{q[3]}"
+                                f"_scimrefdiffimg")
             _write_ldac(cat_dir / name, h, {
                 "NUMBER": np.arange(1, n + 1, dtype=np.int32),
                 "ALPHA_J2000": ra[idx], "DELTA_J2000": dec[idx],
@@ -365,7 +366,7 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
         f6 = (m["FLUX_6_TOT_AB_old"] * 10 ** (-0.4 * dm)) if "FLUX_6_TOT_AB_old" in m else np.nan
         new.loc[m["index"].to_numpy(), "FLUX_6_TOT_AB"] = np.asarray(f6, float)
     # old rows not represented in the new output -> carried over unchanged
-    # Quadrants the current pipeline no longer processes (e.g. the footprint check drops
+    # Quadrants the current pipeline does not process (e.g. the footprint check drops
     # them because the target is off-chip) cannot be recalibrated consistently: drop them
     qnew = pd.MultiIndex.from_frame(new[QKEY].drop_duplicates())
     gone = ~pd.MultiIndex.from_frame(old[QKEY]).isin(qnew)
@@ -557,7 +558,7 @@ def update_target(paths: list[Path], a, auth) -> str:
 
         # 4. current pipeline over old + new epochs
         both = len(variants) == 2
-        phot = ["sex"] if "" in variants else ["sex_sci"]
+        phot = ["phot"] if "" in variants else ["phot_sci"]
         cmd = [sys.executable, str(_SCRIPTS / "run_pipeline.py"), "--base-dir", str(base),
                "--ra", str(ra), "--dec", str(dec), "--bands", fc[1:],
                "--steps", *phot, "vet", "calibrate", "flatfield", "recalibrate", "lightcurves", "merge",

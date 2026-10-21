@@ -6,13 +6,13 @@ needed to run the photometry pipeline.
 
 Downloads per epoch (science products):
     scimrefdiffimg.fits.fz  — difference image (F-packed, needs funpack after)
-    sexcat.fits             — ZTF's own SExtractor catalog for the science image
+    sexcat.fits             — ZTF's science-image source catalog (sci-pos positions)
 
 Downloads per quadrant (reference products, static — only once per field/ccd/quad/band):
     refimg.fits             — reference image stack
-    refsexcat.fits          — SExtractor catalog for the reference image
+    refsexcat.fits          — ZTF's reference-image source catalog (the source list)
 
-URL formats (from previous definition):
+URL formats:
     Science:
         https://irsa.ipac.caltech.edu/ibe/data/ztf/products/sci/
           {YYYY}/{MM}{DD}/{fracday}/
@@ -53,8 +53,8 @@ Notes:
       and skipped on later runs until the entry is older than --perm404-max-age days
       (default 30; --retry-404 ignores the log). Common case: i-band reference files for
       quadrants with no i-band coverage. An HTML response (IRSA error/maintenance page)
-      is a retriable failure, never a 404. Legacy entries without a time are treated as
-      expired, so anything blacklisted under the old HTML rule is retried once.
+      is a retriable failure, never a 404. Entries without a time are treated as
+      expired.
     - Retriable failures (timeouts, incomplete reads) are logged to
       {base_dir}/Epochs/failed_downloads.log. Re-running the script will retry these.
     - Missing science epochs (404 on diff image) are logged to
@@ -90,13 +90,13 @@ IRSA_BASE = "https://irsa.ipac.caltech.edu/ibe/data/ztf/products"
 # Files to fetch per epoch (science / difference image products)
 SCI_SUFFIXES = [
     "scimrefdiffimg.fits.fz",   # difference image — primary photometry input
-    "sexcat.fits",              # ZTF SExtractor catalog (used for position reference)
+    "sexcat.fits",              # ZTF science-image catalog (sci-pos positions)
 ]
 
 # Files to fetch per quadrant (reference products — static, download once)
 REF_SUFFIXES = [
     "refimg.fits",              # reference image stack
-    "refsexcat.fits",           # SExtractor catalog for reference
+    "refsexcat.fits",           # ZTF reference-image catalog (source list)
 ]
 
 # Max parallel download threads. IRSA handles ~40 concurrently without rate-limiting.
@@ -152,9 +152,8 @@ def load_permanent_404s(base_dir: str | Path, max_age_days: float = PERM404_MAX_
                         ignore: bool = False) -> set[str]:
     """URLs currently treated as permanent 404s (skipped by downloads and by the
     purge-batch "epoch done" check). Log lines are "url<TAB>ISO UTC time"; an entry
-    expires max_age_days after it was recorded (0 = never). Legacy lines without a
-    time count as expired: they date from when HTML error pages were also logged as
-    404s, so they are retried and re-recorded only if IRSA still answers 404."""
+    expires max_age_days after it was recorded (0 = never). Lines without a time count
+    as expired: they are retried and re-recorded only if IRSA still answers 404."""
     log = Path(base_dir) / "Epochs" / "permanent_404s.log"
     if ignore or not log.exists():
         return set()
@@ -338,8 +337,7 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
             resp.raise_for_status()
 
             # An HTML body instead of FITS is an IRSA error/maintenance/login page —
-            # transient, so retriable. (It used to be logged as a permanent 404, which
-            # blacklisted whole date ranges downloaded during IRSA outages.)
+            # transient, so retriable (never recorded as a 404).
             content_type = resp.headers.get("Content-Type", "")
             if "text/html" in content_type:
                 return (url, "failed", "HTML response instead of FITS (IRSA error page)")
@@ -892,7 +890,7 @@ def find_quadrants(
     Walk base_dir/Reference/ to find all downloaded (field, filtercode, ccdid, qid)
     combinations that have a refsexcat.fits, then supplement with any quadrant
     that has a LightCurves/.../lightcurves*.parquet, then with any quadrant that
-    still has retained SExtractor catalogs (SExCatalogs/.../*_sexout.fits) — so a
+    still has retained photometry catalogs (PhotCatalogs/.../*_phot.fits) — so a
     quadrant remains discoverable after --purge-batch/--clean-up even if its
     Reference products and light curves are both gone, letting calibration be
     re-run without re-downloading.
@@ -999,18 +997,19 @@ def find_quadrants(
             })
             _log.debug(f"Discovered {key} from LightCurves (no Reference catalog)")
 
-    # ── Fallback: quadrants with retained SExtractor catalogs only ──────────────
-    # SExCatalogs/ is the calibration input and is never purged, so recalibration
+    # ── Fallback: quadrants with retained photometry catalogs only ──────────────
+    # PhotCatalogs/ is the calibration input and is never purged, so recalibration
     # must stay possible even when Reference/*_refsexcat and LightCurves/ are both
-    # absent.  Layout: SExCatalogs{suffix}/{field}/{fc}/{ccd:02d}/{qid}/*_sexout.fits
+    # absent.  Layout: PhotCatalogs{suffix}/{field}/{fc}/{ccd:02d}/{qid}/*_phot.fits
     # — note the ccd/qid dirs are plain digits here, unlike Reference/ (ccdNN/qN),
     # so ref_dir/sci_dir are reconstructed in the conventional form (may not exist).
-    for sex_rootname in ("SExCatalogs", "SExCatalogs_sci"):
+    from aperture_photometry import CATALOG_DIRS, CATALOG_SUFFIX
+    for sex_rootname in CATALOG_DIRS.values():
         sex_root = base_dir / sex_rootname
         if not sex_root.exists():
             continue
         for qdir in sorted(sex_root.glob("*/*/*/*")):
-            if not qdir.is_dir() or not any(qdir.glob("*_sexout.fits")):
+            if not qdir.is_dir() or not any(qdir.glob(f"*{CATALOG_SUFFIX}")):
                 continue
             fld_part, fc_part, c_part, q_part = qdir.parts[-4:]
 
@@ -1042,7 +1041,7 @@ def find_quadrants(
                 "ref_dir":    ref_root / fld_part / fc_part / f"ccd{this_ccd:02d}" / f"q{this_qid}",
                 "sci_dir":    sci_root / fld_part / fc_part / f"ccd{this_ccd:02d}" / f"q{this_qid}",
             })
-            _log.debug(f"Discovered {key} from SExCatalogs (no Reference catalog / light curves)")
+            _log.debug(f"Discovered {key} from PhotCatalogs (no Reference catalog / light curves)")
 
     return quadrants
 
@@ -1057,9 +1056,9 @@ def purge_images(
     dry_run: bool = False,
 ) -> int:
     """
-    Delete large imaging products after SExtractor catalogs are built.
+    Delete large imaging products after the photometry catalogs are built.
 
-    sci=True  — deletes diff.fits.fz, diff.fits, *_simulated.fits
+    sci=True  — deletes diff.fits.fz, diff.fits
     ref=True  — deletes refimg.fits, refpsfcat.fits, refcov.fits
                 (refsexcat.fits is deliberately retained: it is small and is the
                  primary quadrant-discovery key + source for the Catalogs/ CSV, so
@@ -1073,7 +1072,6 @@ def purge_images(
     sci_patterns = [
         "*_scimrefdiffimg.fits.fz",
         "*_scimrefdiffimg.fits",
-        "*_simulated.fits",
     ]
     ref_patterns = [
         "*_refimg.fits",
@@ -1140,13 +1138,14 @@ def purge_hard_reject(base_dir: Path, epochs_parquet: Path, dry_run: bool = True
     for _, row in bad.iterrows():
         ffd = str(row["filefracday"]); field = int(row["field"])
         fc  = str(row["filtercode"]); ccd = int(row["ccdid"]); qid_ = int(row["qid"])
-        for suffix in ["scimrefdiffimg.fits", "scimrefdiffimg.fits.fz",
-                       "sexcat.fits", "scimrefdiffimg_simulated.fits"]:
+        for suffix in ["scimrefdiffimg.fits", "scimrefdiffimg.fits.fz", "sexcat.fits"]:
             p = sci_local_path(base_dir, field, fc, ccd, qid_, ffd, suffix)
             if p.exists(): to_delete.append(p)
-        sex_p = (base_dir / "SExCatalogs" / f"{field:06d}" / fc / f"{ccd:02d}" / str(qid_)
-                 / f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg_sexout.fits")
-        if sex_p.exists(): to_delete.append(sex_p)
+        from aperture_photometry import catalog_dir, catalog_name
+        for _suf in ("", "_sci"):
+            sex_p = (catalog_dir(base_dir, _suf, field, fc, ccd, qid_)
+                     / catalog_name(f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"))
+            if sex_p.exists(): to_delete.append(sex_p)
 
     if dry_run:
         logger.info(f"DRY RUN — would delete {len(to_delete):,} files")

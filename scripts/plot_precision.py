@@ -18,8 +18,8 @@ Astrometry (1×2) — make_position, sci-pos only:
   Left:  nearest-neighbour separation histogram
   Right: Δposition histogram by magnitude bin (13–17, 17–19, 19–21, 21–23)
 
-  Ref-pos has no per-epoch positions (the centroid is measured on the simulated
-  PSF and is meaningless), so this figure is simply not produced in that mode.
+  Ref-pos has no per-epoch positions (sources are measured at their fixed reference
+  positions), so this figure is not produced in that mode.
 
 Key parquet columns used:
     MAG_4_TOT_AB, MERR_4_TOT_AB  — calibrated magnitude and error
@@ -302,8 +302,8 @@ def make_position(lc_path: Path, out_path: Path, tag: str = "",
                   target_dec: float | None = None) -> None:
     """Astrometric diagnostics — sci-pos only (needs DRA_SCI/DDEC_SCI).
 
-    Ref-pos parquets carry no per-epoch positions (the centroid is measured on the
-    simulated PSF), so this returns without writing anything in that mode.
+    Ref-pos parquets carry no per-epoch positions (sources are measured at their fixed
+    reference positions), so this returns without writing anything in that mode.
     """
     df = pd.read_parquet(lc_path)
     if not {"DRA_SCI", "DDEC_SCI"} <= set(df.columns):
