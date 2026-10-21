@@ -111,13 +111,14 @@ def run_pipeline(pipeline: Path, ra: float, dec: float, work_dir: Path,
 
 
 def append_status(work_dir: Path, results_dir: Path, ra: float, dec: float,
-                  ok: bool) -> None:
-    """Append this target's coarse status to results_dir/sources_status.csv.
-    Reads run_pipeline's per-run target_status.csv (ra,dec,reason) when present;
-    falls back to parquet presence (OK / NO_STATUS) if the run died before writing."""
-    reason = None
+                  ok: bool, reason: str | None = None) -> None:
+    """Append this target's coarse status to results_dir/sources_status.csv (a log: a
+    re-run appends a new line, the last one for a target is current). `reason` given
+    (e.g. PIPELINE_FAILED) is written as is; otherwise run_pipeline's per-run
+    target_status.csv (ra,dec,reason) is read, falling back to parquet presence
+    (OK / NO_STATUS)."""
     ts = Path(work_dir) / "target_status.csv"
-    if ts.exists():
+    if reason is None and ts.exists():
         try:
             parts = ts.read_text().strip().split(",")
             reason = parts[2] if len(parts) >= 3 else None
@@ -365,6 +366,7 @@ def main():
 
     base_dir = Path(args.base_dir)
     n_ok = n_fail = n_skip = 0
+    failed: list[str] = []
 
     for i, target in enumerate(targets, 1):
         sep = "=" * 70
@@ -428,10 +430,8 @@ def main():
                 both=args.both,
                 extra_args=extra,
             )
-            if rc != 0:
-                print(f"  WARNING: pipeline exit code {rc} — saving whatever exists")
-            ok = save_results_quad(work_dir, field, fc, ccdid, qid, ra, dec,
-                                   results_dir, both=args.both)
+            ok = rc == 0 and save_results_quad(work_dir, field, fc, ccdid, qid, ra, dec,
+                                               results_dir, both=args.both)
         else:
             rc = run_pipeline(
                 pipeline=args.pipeline,
@@ -446,11 +446,25 @@ def main():
                 both=args.both,
                 extra_args=extra,
             )
-            if rc != 0:
-                print(f"  WARNING: pipeline exit code {rc} — saving whatever exists")
-            ok = save_results(work_dir, ra, dec, args.bands, results_dir, both=args.both)
-            append_status(work_dir, results_dir, ra, dec, ok)
+            ok = rc == 0 and save_results(work_dir, ra, dec, args.bands, results_dir,
+                                          both=args.both)
+            append_status(work_dir, results_dir, ra, dec, ok,
+                          reason="PIPELINE_FAILED" if rc != 0 else None)
 
+        if rc != 0:
+            # A failed run's outputs may be intermediate (e.g. pass-1 light curves
+            # without flatfield): nothing is saved, and the work dir is kept so that
+            # re-running the batch resumes it (all steps skip completed outputs).
+            print(f"  FAILED: pipeline exit code {rc} — nothing saved; work dir kept "
+                  f"for a resumed re-run: {work_dir}")
+            if args.purge_batch:
+                # Keep the photometry catalogs, drop the imaging products (difference
+                # and reference images): the resumed run re-downloads only the epochs
+                # of the batch that was in progress.
+                subprocess.run([sys.executable, str(args.pipeline), "--base-dir",
+                                str(work_dir), "--clean-up"])
+            failed.append(str(work_dir))
+            continue
         if ok:
             n_ok += 1
         else:
@@ -460,7 +474,12 @@ def main():
             cleanup(work_dir)
 
     print(f"\n{'=' * 70}")
-    print(f"Batch complete:  {n_ok} succeeded,  {n_fail} no parquet,  {n_skip} skipped")
+    print(f"Batch complete:  {n_ok} succeeded,  {n_fail} no parquet,  {len(failed)} failed,  "
+          f"{n_skip} skipped")
+    if failed:
+        print("Failed (work dirs kept; re-run the same command to resume them):")
+        for w in failed:
+            print(f"  {w}")
     print(f"Results in:  {results_dir.resolve()}")
     print(f"{'=' * 70}")
 
