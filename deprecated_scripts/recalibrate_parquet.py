@@ -48,8 +48,7 @@ Usage
     python recalibrate_parquet.py --list parquets.txt
     # options: --outdir DIR  --suffix _recal  --keep-temp  --match-tol 0.5
 
-The script imports the pipeline modules from its own directory, so keep it in
-ZTFphot/scripts/.
+The script imports the pipeline modules from ZTFphot/scripts/.
 """
 from __future__ import annotations
 
@@ -71,7 +70,7 @@ import astropy.units as u
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
 
-_SCRIPTS = Path(__file__).resolve().parent
+_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 

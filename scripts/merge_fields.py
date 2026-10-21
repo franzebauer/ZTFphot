@@ -68,8 +68,7 @@ def _per_source_stats(df: pd.DataFrame, min_epochs: int = MIN_EPOCHS) -> pd.Data
     Return one row per object_index with ra, dec, n_clean, median_mag.
     Only sources with n_clean >= min_epochs are returned.
 
-    Uses MAG_4_TOT_AB with the same clean-epoch filter as plot_quad_offsets.py
-    and renorm_merged_parquet.py (INFOBITS_DIF == 0, magnitude in
+    Uses MAG_4_TOT_AB with a clean-epoch filter (INFOBITS_DIF == 0, magnitude in
     [MAG_BRIGHT, MAG_FAINT], error < MAX_ERR), over the full magnitude range so
     the inter-quadrant offset can be measured as a function of magnitude.
     """

@@ -172,15 +172,13 @@ ZTFphot/                    ← this repository
     merge_fields.py
     vet_calibration_stars.py
     transient_catalog.py
-    compare_scipos.py
-    migrate_parquets.py
-    rekey_merged_parquet.py
     lc_viewer.py
     plot_rms.py
     plot_diagnostics.py
     plot_lightcurve.py
     plot_precision.py
     plot_spatial.py
+  deprecated_scripts/       ← unmaintained one-off diagnostics and parquet fix-up tools
 
 data/                       ← created in your working directory on first run
   Epochs/                   ← IRSA epoch cache and download logs
@@ -545,16 +543,12 @@ For a `--ra/--dec` run the pipeline records **why** the target did or did not ge
 
 ## Standalone utilities
 
-These scripts are not wired into `run_pipeline.py` but can be run directly from the `scripts/` directory:
+These scripts are not wired into `run_pipeline.py` but can be run directly from the `scripts/` directory (unmaintained one-off tools are in `deprecated_scripts/`):
 
 | Script | Function |
 |--------|----------|
 | `transient_catalog.py` | Augments the reference catalog with additional sources (e.g. from TNS or a user CSV) before the photometry step. Needed when the target brightened after the ZTF reference epoch and is therefore absent from the reference catalog. Pass `--refsexcat` and `--input` (or `--ra/--dec` for a TNS cone search) to produce an augmented `*_refsexcat_augmented.fits` that the pipeline then prefers. |
 | `update_parquet.py` | Adds missing (and, unless `--no-new`, newer) epochs to existing light-curve parquets **without re-downloading the epochs already in them**, recalibrating all 4 px photometry with the current pipeline. A ref-pos parquet and its `_sci` sibling are updated together. Epoch cuts come from the `ztfphot_download` metadata, or `--infer-cuts` for older files. Only the missing/new epochs (+ reference products) are downloaded; the old epochs are rebuilt as per-epoch catalogs from the parquet (`FLUX_4_DIF`, or the raw flux reconstructed exactly from `MAG_4_TOT_AB_org`), and vet → calibrate → flatfield → recalibrate → lightcurves → merge run over old + new together. Old rows get the new 4 px values with MAG_3/6/10 (and FLUX_6) shifted by the same 4 px change; new epochs have all apertures. Writes `<stem>_updated.parquet` (+ `ztfphot_update` metadata). Validated: dropping epochs from a full run and restoring them reproduces the full run row for row (≤0.2 mmag). Run: `python ZTFphot/scripts/update_parquet.py X_zg_merged.parquet --infer-cuts [--dry-run]`, or on a whole directory: `update_parquet.py RESULTS_DIR --infer-cuts [--plan] [--recursive] [--redo]` — per target/band/variant it uses `X_recal.parquet` if present, else `X.parquet`, pairs ref + `_sci`, skips targets that already have an `_updated` output, continues past failures and prints a summary. Downloads that still fail after short retries (`--download-retries 2`, `--retry-wait 15` s) are **deferred** rather than waited for (recorded as `epochs_deferred` in the output metadata); `update_parquet.py RESULTS_DIR --retry-deferred` later re-runs just those targets from their `_updated` files, downloading only the deferred epochs and refreshing the files in place |
-| `compare_scipos.py` | Compares ref-pos and sci-pos photometry for all quadrants that have both `lightcurves.parquet` and `lightcurves_sci.parquet`. Produces a two-panel plot per quadrant: magnitude offset (sci − ref) and scatter difference (σ_sci − σ_ref) vs magnitude, with binned median curves. Run: `python ZTFphot/scripts/compare_scipos.py --base-dir data --ra RA --dec DEC [--band zg]` |
 | `batch_pipeline.py` | Process a list of targets in sequence, keeping only the final LC parquets and plots for each. Supports two input modes auto-detected by column count: **RA/Dec mode** (2 columns: `ra,dec`) runs the full pipeline including merge; **quadrant mode** (4 columns: `field,ccdid,qid,filtercode`) skips merge, derives the quadrant center from ztfquery field tables for lookup, suppresses target plots (`--no-target`). `--skip-existing` is band-aware in RA/Dec mode (a target is skipped only when a parquet exists for *every* requested band, and the sci variant with `--both`). Writes a coarse good/failed summary to `<results-dir>/sources_status.csv` (see [Target coverage diagnostics](#target-coverage-diagnostics)). Run: `python ZTFphot/scripts/batch_pipeline.py targets.txt [--both] [--bands zg zr] [--workers 20] [--skip-existing]` |
-| `migrate_parquets.py` | Converts old-format merged parquets (containing `mag_calib`, `quadrant_id`, `is_dominant` columns) to the current schema. Accepts files and/or directories as arguments. Use `--dry-run` to preview. |
 | `replot_merged.py` | Regenerate precision and light curve plots from a merged parquet when the original working directory has been deleted (e.g. after `batch_pipeline.py` cleanup). The light-curve plot includes the binned overlay (`--bin-days`, default 50). Run: `python ZTFphot/scripts/replot_merged.py lightcurves_merged.parquet --ra RA --dec DEC --out-dir plots/ [--bin-days 50]` |
-| `recalibrate_parquet.py` | Re-derive the photometric calibration of existing *merged* light-curve parquets using the current calibration, without the original intermediate products (only the parquet plus a small per-quadrant reference fetch from IRSA). Writes non-destructive `*_recal.parquet`. Handles both ref-position and science-position (`_sci`) products. Run: `python ZTFphot/scripts/recalibrate_parquet.py *_merged.parquet` (or `--list files.txt`). |
-| `rekey_merged_parquet.py` | Fix `object_index` collisions in existing merged parquets produced before the current merge step. Offsets each secondary quadrant's indices to be globally unique, then coordinate-matches overlap sources to share the dominant quadrant's index. Accepts one or more parquet paths (or glob patterns). Run: `python ZTFphot/scripts/rekey_merged_parquet.py path/to/lightcurves_merged.parquet` |
 | `lc_viewer.py` | Interactive GUI for browsing merged (or single-quadrant) light curve parquets. Left panel: overview scatter (median mag vs. RMS); click any point to load that object. Right panel: light curve coloured by MAGLIM. Controls: text box for direct object index entry, Prev/Next buttons (ranked by RMS), checkboxes to toggle individual quadrants, MAGLIM ≥ slider to discard shallow epochs, SEEING ≤ slider to discard poor-seeing epochs. Run: `python ZTFphot/scripts/lc_viewer.py path/to/lightcurves_merged.parquet` |
