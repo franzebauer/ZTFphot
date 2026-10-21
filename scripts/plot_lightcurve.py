@@ -360,8 +360,8 @@ def make_lightcurves(lc_path: Path, out_path: Path,
     logger.info(f"  lightcurves → {out_path}")
 
 
-_FLUX_COL = "FLUX_4_TOT_AB"
-_FERR_COL = "FERR_4_TOT_AB"
+_FLUX_COL = "FLUX_4_TOT_uJy"
+_FERR_COL = "FERR_4_TOT_uJy"
 
 
 def _robust_flux_half(vals, k=3.0):
@@ -387,7 +387,7 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
     """
     Flux (μJy) equivalent of make_lightcurves. Difference photometry is bipolar, so
     this shows the fainter-than-reference (negative-flux) epochs the magnitude drops
-    to NaN. Top: target FLUX_4_TOT_AB vs MJD with a zero line; bottom: comparison
+    to NaN. Top: target FLUX_4_TOT_uJy vs MJD with a zero line; bottom: comparison
     stars. Each panel auto-scales (the target sits near 0 μJy, comps near their
     reference flux).
     """

@@ -5,7 +5,7 @@ Flag variable calibration stars using their lightcurve scatter relative to
 the local photometric precision locus.
 
 This directly corresponds to what is visible in Fig 3: sources whose
-UNBIASED bipolar-flux scatter (σ of FLUX_4_TOT_AB in μJy, which keeps the
+UNBIASED bipolar-flux scatter (σ of FLUX_4_TOT_uJy in μJy, which keeps the
 fainter-than-reference epochs the magnitude drops to NaN) across clean epochs
 exceeds threshold × the running-median locus at that magnitude are flagged as
 unreliable calibrators. Using flux σ (not the censored magnitude std) catches
@@ -20,7 +20,7 @@ Sources must pass all calibration eligibility criteria to be considered:
 Algorithm
 ---------
 1. Load lightcurves.parquet; compute per-source median and std of the bipolar
-   flux (FLUX_4_TOT_AB, μJy) across clean epochs.
+   flux (FLUX_4_TOT_uJy, μJy) across clean epochs.
 2. Restrict to calibration-eligible sources (above criteria).
 3. Match to reference catalog to get q_mag.
 4. Fit locus: running median of σ_flux in 0.5-mag bins (robust against outliers).
@@ -92,7 +92,7 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
     # Vet on the UNBIASED bipolar flux scatter (μJy), not the censored magnitude std:
     # keeping every clean epoch — including the fainter-than-reference (negative-flux)
     # ones the magnitude drops to NaN — so a source that dips faint is not hidden.
-    clean['flux'] = pd.to_numeric(clean['FLUX_4_TOT_AB'], errors='coerce')
+    clean['flux'] = pd.to_numeric(clean['FLUX_4_TOT_uJy'], errors='coerce')
     clean = clean[clean['flux'].notna()]
 
     grp   = clean.groupby('object_index')

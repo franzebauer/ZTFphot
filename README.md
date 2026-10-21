@@ -345,7 +345,7 @@ Two variants are produced per quadrant, sharing the same `LightCurves/` root but
 | File | Positions used | Epoch position column |
 |------|----------------|-----------------------|
 | `lightcurves.parquet` | Reference catalog (fixed) | — (forced positions) |
-| `lightcurves_sci.parquet` | Per-epoch science sexcat | `ALPHA_SCI`, `DELTA_SCI` |
+| `lightcurves_sci.parquet` | Per-epoch science sexcat | `DRA_SCI`, `DDEC_SCI` |
 
 Both files share the same `object_index` and can be joined on `(object_index, OBSMJD)`. Sources not detected in the science image for a given epoch are absent from `lightcurves_sci.parquet` for that epoch (no forced photometry).
 
@@ -363,20 +363,32 @@ Both files share the same `object_index` and can be joined on `(object_index, OB
 | Column | Type | Description |
 |--------|------|-------------|
 | `CLASS_STAR_OBJ` | float32 | Reference-catalog star/galaxy classifier (0=galaxy, 1=star) |
-| `FLAGS` | Int32 | **The** quality bitmask (`scripts/ztfphot_flags.py`). Per epoch: 1 neighbour within 5 px, **8 the 4 px aperture crosses the image edge**, **16 masked/saturated pixels in the 4 px aperture**, 32 edge/masked only in the larger 6/10 px apertures. Per source: 256 reference neighbour/blend (IRSA refsexcat FLAGS ≠ 0), 1024 no reference source (`FLUX` is difference flux). Summaries: 2048 aperture flags unknown (epoch rebuilt from an older parquet by `update_parquet.py`), 4096 cautionary ZTF INFOBITS this epoch, 8192 reference image has INFOBITS. Only **8 and 16 corrupt the 4 px measurement** → default rejection: `from ztfphot_flags import good; good(lc)`; add bits as needed, e.g. `good(lc, reject=F.DEFAULT_REJECT \| F.CAUTIONARY_EPOCH \| F.REF_BLEND)`. `good()` also reads parquets that carry `FLAG_AP` / `FLAG_SE_REF` columns instead. The reference-image INFOBITS are file metadata `INFOBITS_REF_{tag}` |
-| `MAG_3_TOT_AB` | float32 | Calibrated AB mag, 3 px diameter aperture |
-| `MERR_3_TOT_AB` | float32 | Magnitude error, 3 px aperture |
-| `MAG_4_TOT_AB` | float32 | Calibrated AB mag, 4 px diameter aperture (primary), **aperture-corrected to 10 px** (`APCORR410`; add it back for the 4 px value). **NaN when total flux ≤ 0** (fainter-than-reference epoch) — use `FLUX_4_TOT_AB` there |
-| `MERR_4_TOT_AB` | float32 | Magnitude error, 4 px aperture |
-| `FLUX_4_TOT_AB` | float32 | **Bipolar** total flux (μJy), 4 px aperture aperture-corrected to 10 px (same scale as `MAG_4_TOT_AB`) — retains the negative (fainter-than-reference) epochs the magnitude drops to NaN. For a reference-less target (`target_ref_mag` = NaN) this is the *difference* flux, not total |
-| `FERR_4_TOT_AB` | float32 | Flux error (μJy), 4 px aperture |
-| `FLUX_6_TOT_AB` | float32 | Bipolar total flux (μJy), 6 px aperture (carried for the aperture-correction check) |
-| `MAG_6_TOT_AB` | float32 | Calibrated AB mag, 6 px diameter aperture |
-| `MERR_6_TOT_AB` | float32 | Magnitude error, 6 px aperture |
-| `MAG_10_TOT_AB` | float32 | Calibrated AB mag, 10 px diameter aperture |
-| `MERR_10_TOT_AB` | float32 | Magnitude error, 10 px aperture |
-| `MAG_4_TOT_AB_org` | float32 | Raw (pre-calibration, not aperture-corrected) 4 px magnitude |
-| `MERR_4_TOT_AB_org` | float32 | Raw magnitude error, 4 px aperture |
+| `FLAGS` | Int32 | **The** quality bitmask (`scripts/ztfphot_flags.py`). Per epoch: 1 neighbour within 5 px, **8 the 4 px aperture crosses the image edge**, **16 masked/saturated pixels in the 4 px aperture**, 32 edge/masked only in the larger apertures. Per source: 256 reference neighbour/blend (IRSA refsexcat FLAGS ≠ 0), 1024 no reference source (flux is difference flux). Summaries: 2048 aperture flags unknown (epoch rebuilt from an older parquet), 4096 cautionary ZTF INFOBITS this epoch, 8192 reference image has INFOBITS. Only **8 and 16 corrupt the 4 px measurement** → default rejection: `from ztfphot_flags import good; good(lc)`; add bits as needed, e.g. `good(lc, reject=F.DEFAULT_REJECT \| F.CAUTIONARY_EPOCH \| F.REF_BLEND)`. The reference-image INFOBITS are file metadata `INFOBITS_REF_{tag}` |
+
+#### Photometry (`--lc-columns slim`, the default)
+
+| Column | Type | Units | Calibrated | Aperture-corrected | Merge offset | Description |
+|--------|------|-------|-----------|--------------------|--------------|-------------|
+| `MAG_4_TOT_AB` | float32 | AB mag | yes | **yes, 4→10 px** | yes | The calibrated light curve. **NaN when the total flux ≤ 0** (fainter-than-reference epoch) — use `FLUX_4_TOT_uJy` there |
+| `MERR_4_TOT_AB` | float32 | mag | — | — | — | Error of `MAG_4_TOT_AB` |
+| `FLUX_4_TOT_uJy` | float32 | μJy | yes | **yes, 4→10 px** | yes | Same measurement as `MAG_4_TOT_AB` as a **bipolar** total flux (reference + difference): keeps the negative epochs the magnitude drops. For a source without a reference detection (`MAG_4_REF` NaN or > 90, FLAGS 1024) it is the difference flux |
+| `FERR_4_TOT_uJy` | float32 | μJy | — | — | — | Error of `FLUX_4_TOT_uJy` |
+| `FLUX_4_DIF_uJy` | float32 | μJy | **no** (ZTF's per-epoch `MAGZP_DIF` only) | **no** | **no** | Raw 4 px difference-image flux (variable part only, no reference flux), converted from counts with ZTF's zero point: counts × 10^(−0.4(`MAGZP_DIF` − 23.9)). **Not on the pipeline's calibration** — to use it, apply the epoch's calibration and `APCORR410`; for analysis use `FLUX_4_TOT_uJy`. Kept so the light curve can be recalibrated/extended (`update_parquet.py`) |
+| `FERR_4_DIF_uJy` | float32 | μJy | — | — | — | Error of `FLUX_4_DIF_uJy` |
+| `APCORR410` | float32 | mmag | — | — | — | Per-epoch 4 px → 10 px aperture correction: median `MAG_APER_4px − MAG_APER_10px` of the reference calibrators. Already applied to `MAG_4_TOT_AB` (subtracted) and `FLUX_4_TOT_uJy` (× 10^(0.4·APCORR410/1000)); add it back for 4 px values |
+| `MAG_4_REF` | float32 | AB mag | reference | no | no | 4 px reference magnitude of the source (`MAG_APER_4px + MAGZP_REF`); > 90 for injected sources, NaN for the `--ra/--dec` target without a reference source. Reference flux in μJy = 10^(−0.4(`MAG_4_REF` − 23.9)) |
+
+`--lc-columns full` adds the 10 px aperture, e.g. to check the aperture correction (`MAG_10_TOT_AB` ≈ `MAG_4_TOT_AB` for point sources):
+
+| Column | Type | Units | Calibrated | Aperture-corrected | Merge offset | Description |
+|--------|------|-------|-----------|--------------------|--------------|-------------|
+| `MAG_10_TOT_AB`, `MERR_10_TOT_AB` | float32 | AB mag | yes | no (reference aperture) | yes | Calibrated 10 px magnitude |
+| `FLUX_10_TOT_uJy`, `FERR_10_TOT_uJy` | float32 | μJy | yes | no | yes | Calibrated bipolar 10 px total flux |
+| `FLUX_10_DIF_uJy`, `FERR_10_DIF_uJy` | float32 | μJy | **no** | **no** | **no** | Raw 10 px difference flux on ZTF's `MAGZP_DIF`, as `FLUX_4_DIF_uJy` |
+
+The 3 px and 6 px apertures are measured and calibrated (per-epoch `_cal.fits`) but not written to the parquet.
+
+Parquets written before 2026-10-21 use `FLUX_k_TOT_AB` (μJy), `FLUX_4_DIF` (counts), `MAG_4_TOT_AB_org` and a 4→6 px correction `APCORR46`. `from ztfphot_lc import read_lc; lc = read_lc(path)` reads any version with the current names and units (it does not change their calibration — `update_old_parquet.py` recalibrates them).
 
 #### Per-epoch metadata (broadcast from image header)
 | Column | Type | Description |
@@ -390,24 +402,23 @@ Both files share the same `object_index` and can be joined on `(object_index, OB
 | `CLRCOEFF` | float32 | Color coefficient (already applied internally by ZTF) |
 | `NMATCHES` | int32 | Number of calibration stars used |
 | `INFOBITS_DIF` | int32 | ZTF's raw per-epoch image quality bits, verbatim (see ZTF documentation); summarised in `FLAGS` bit 4096 |
-| `APCORR410` | float32 | Aperture correction from 4 px to 10 px (mmag), median `MAG_APER_4px − MAG_APER_10px` of reference calibrators; subtracted from `MAG_4_TOT_AB` (flux × 10^(0.4·APCORR410/1000)) |
 
 File-level metadata keys: `field`, `filtercode`, `ccdid`, `qid`, `MAGZP_REF_{tag}`, `MAGZPRMS_REF_{tag}`, `target_sep_arcsec` (arcsec distance from target to the nearest reference catalog source; `nan` if `--ra`/`--dec` not provided), `target_ref_mag` (reference AB mag of the target's matched source, or `nan` if the target has **no** reference detection — see [Target coverage diagnostics §2](#2-target_sep_arcsec--target_ref_mag-metadata-in-the-parquet)).
 
 ### Per-quadrant sci-pos (`LightCurves/{field}/{fc}/ccd{ccd}/q{qid}/lightcurves_sci.parquet`)
 
-Identical schema to the ref-pos file above, with one addition:
+Identical schema to the ref-pos file above, plus the per-epoch science-catalog position as an offset from the reference position:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `ALPHA_SCI` | float64 | Science-image RA of detection (deg) |
-| `DELTA_SCI` | float64 | Science-image Dec of detection (deg) |
+| `DRA_SCI` | float32 | Science-image RA offset of the detection from `ALPHAWIN_REF` (arcsec, × cos Dec, 0.01") |
+| `DDEC_SCI` | float32 | Science-image Dec offset from `DELTAWIN_REF` (arcsec, 0.01") |
 
 ---
 
 ### Merged (`LightCurves/merged/{ra}_{dec}/{fc}/lightcurves_merged.parquet`)
 
-Contains all per-quadrant columns above, with `norm_offset` already applied to all `MAG_*` columns (and as a factor 10^(−0.4·norm_offset) to `FLUX_4_TOT_AB`, `FERR_4_TOT_AB`, `FLUX_6_TOT_AB`) so that magnitudes from different field/ccdid/qids are on a common photometric scale. Plus:
+Contains all per-quadrant columns above, with `norm_offset` already applied to the calibrated `MAG_*_TOT_AB` columns (and as a factor 10^(−0.4·norm_offset) to the calibrated `FLUX/FERR_*_TOT_uJy`; the raw `*_DIF_uJy` stay uncorrected) so that magnitudes from different field/ccdid/qids are on a common photometric scale. Plus:
 
 | Column        | Type    | Description |
 |---------------|---------|-------------|
@@ -468,7 +479,7 @@ Every `run_pipeline` invocation is appended to `<base-dir>/Epochs/ztfphot_runs.j
 
 - **Positions**: ref-pos = every reference-catalog source (plus the `--ra/--dec` target as index N+1 when no reference source lies within `--target-match-radius`); sci-pos = every source of the epoch's ZTF `*_sexcat.fits`, tied to the nearest reference entry within `--assoc-radius-sci` (unmatched dropped). `VECTOR_ASSOC`/`object_index` is the 1-based reference index.
 - **Which sources**: centre on the frame and > 50% finite pixels within 0.75×SEEING.
-- **Apertures**: diameters 3, 4, 6, 10 px (radii 1.5, 2, 3, 5), exact pixel overlap; masked (NaN) pixels excluded. Primary aperture k=1 (4 px) → `MAG_4_TOT_AB` / `FLUX_4_TOT_AB`.
+- **Apertures**: diameters 3, 4, 6, 10 px (radii 1.5, 2, 3, 5), exact pixel overlap; masked (NaN) pixels excluded. Primary aperture k=1 (4 px) → `MAG_4_TOT_AB` / `FLUX_4_TOT_uJy`.
 - **Background** (`--aper-bkg`): `box` (default) = 3σ-clipped mean in a square annulus from 1.58×SEEING to +35 px, for all sources at once via integral images (pixels clipped against the 64 px background level/RMS first); `local` = clipped median in the circular annulus. Tested on J1025 (642 epochs, g/r/i): per-star σ identical to `local` in g/r (ratio 1.000) and within 0–1.2% in i; photometry 2.5× faster. A 64 px `mesh` matches in g/r but degrades i (fringes: +6% faint σ, +20 mmag faint bias).
 - **Errors**: background RMS (64 px `Background2D` mesh, evaluated at the source positions) × √(unmasked aperture area) (background-only error).
 - **Per-epoch flags** (bits 0–7 of the parquet `FLAGS`): 1 = another catalog source within 5 px, 8 = the 4 px aperture crosses the image edge, 16 = masked (NaN) pixels in the 4 px aperture, 32 = edge/masked pixels only in the larger 6/10 px apertures. Calibration rejects calibrator measurements with 8, 16 or 32 (all apertures are calibrated) and requires the calibrator to be clean in the reference (`FLAG_SE_REF == 0` in the reference catalog). On est_084892 0.1% edge, 0.3% masked, 0.6% outer-only.
@@ -503,7 +514,7 @@ print(meta[b"target_ref_mag"])      # reference AB mag of the target, or b"nan" 
 ```
 
 **You must check `target_ref_mag`.** If it is `nan`, the target has **no reference-image
-detection** — so its `FLUX_4_TOT_AB` is the **bipolar *difference* flux** (`flux_ref = 0`,
+detection** — so its `FLUX_4_TOT_uJy` is the **bipolar *difference* flux** (`flux_ref = 0`,
 total = difference), *not* a total flux, and the magnitude columns are NaN whenever that
 difference is negative. Such a target may also be **blended** with a nearby reference
 source (its flux then contaminated by that source's subtraction residual). To recover a
@@ -530,7 +541,7 @@ For a `--ra/--dec` run the pipeline records **why** the target did or did not ge
 | Reason | Meaning |
 |--------|---------|
 | `OK` | target has a light curve — ≥1 finite **flux** measurement, **positive or negative** (a fainter-than-reference detection is still a detection; difference photometry is bipolar) — *and* has a reference detection |
-| `LACKS_REFIMG_DETECTION` | has a flux light curve but **no reference source** (`target_ref_mag` = NaN) — `FLUX_4_TOT_AB` is bipolar *difference* flux, not total; check for blends (see [§2](#2-target_sep_arcsec--target_ref_mag-metadata-in-the-parquet)) |
+| `LACKS_REFIMG_DETECTION` | has a flux light curve but **no reference source** (`target_ref_mag` = NaN) — `FLUX_4_TOT_uJy` is bipolar *difference* flux, not total; check for blends (see [§2](#2-target_sep_arcsec--target_ref_mag-metadata-in-the-parquet)) |
 | `MATCHED_NEIGHBOR` | within `--target-match-radius` of a catalog source (photometered as that source) |
 | `NOT_RECOVERED` | measurable (in frame, unmasked) in ≥1 epoch but no row reached the light curve |
 | `ON_MASK` | in-frame but never measurable — `_valid_frac ≤ 0.5` every epoch (target pixel persistently masked) |
@@ -548,8 +559,8 @@ These scripts are not wired into `run_pipeline.py` but can be run directly from 
 | Script | Function |
 |--------|----------|
 | `transient_catalog.py` | Augments the reference catalog with additional sources (e.g. from TNS or a user CSV) before the photometry step. Needed when the target brightened after the ZTF reference epoch and is therefore absent from the reference catalog. Pass `--refsexcat` and `--input` (or `--ra/--dec` for a TNS cone search) to produce an augmented `*_refsexcat_augmented.fits` that the pipeline then prefers. |
-| `update_parquet.py` | Adds missing (and, unless `--no-new`, newer) epochs to existing light-curve parquets **without re-downloading the epochs already in them**, recalibrating all photometry with the current pipeline. Inputs must be in the current format (`FLUX_4_DIF`, `APCORR410`); older files are refused — use `update_old_parquet.py`. A ref-pos parquet and its `_sci` sibling are updated together. Epoch cuts come from the `ztfphot_download` metadata, or `--infer-cuts`. The old epochs are rebuilt as per-epoch catalogs from `FLUX_4_DIF`; the rebuilt reference catalog is completed with every source of the old parquet it lacks (from refsexcat, or as an injected source), so no light curve is lost; then vet → calibrate → flatfield → recalibrate → lightcurves → merge run over old + new epochs. Old rows get the new 4 px values with MAG_3/6/10 (and FLUX_6) shifted by the same 4 px change (before the 4 px aperture correction); new epochs have all apertures. Images already on disk are reused instead of downloaded: `--image-dir DIR` (repeatable) and the `base_dir` recorded in the parquet metadata. Writes `<stem>_updated.parquet` (+ `ztfphot_update` metadata). Validated on est_084892: restoring 5 removed epochs reproduces a fresh run row for row in all apertures (≤0.004 mmag). Run: `python ZTFphot/scripts/update_parquet.py X_zg_merged.parquet [--dry-run]`, or on a whole directory: `update_parquet.py RESULTS_DIR [--plan] [--recursive] [--redo]` — per target/band/variant it uses `X_recal.parquet` if present, else `X.parquet`, pairs ref + `_sci`, skips targets that already have an `_updated` output, continues past failures and prints a summary. Downloads that still fail after short retries (`--download-retries 2`, `--retry-wait 15` s) are **deferred** rather than waited for (recorded as `epochs_deferred` in the output metadata); `update_parquet.py RESULTS_DIR --retry-deferred` later re-runs just those targets from their `_updated` files, downloading only the deferred epochs and refreshing the files in place |
-| `update_old_parquet.py` | Same options and procedure as `update_parquet.py`, for parquets written before 2026-10-21 (no `FLUX_4_DIF` / `APCORR410`). Every old row's raw 4 px difference flux is rebuilt: from `MAG_4_TOT_AB_org` (exact), or — for epochs with total flux ≤ 0 — from `FLUX_4_TOT_AB` and that epoch's calibration factor fitted on its other rows; the reference flux is removed with the zero point the file was built with (`MAG_4_REF`, else `MAGZP_REF_{tag}` metadata). Epochs where the **target** has no 4 px photometry are measured again from the images; rows of other sources without any 4 px photometry are dropped. Validated on est_084892 (old file without `FLUX_4_DIF`): 4 px identical to a fresh run (MAG_4 p99 0.006 mmag; negative-flux rows within 0.0015σ); MAG_6/10 of old epochs unbiased but with 12–22 mmag MAD, since the zero-point fix rescales each row's difference flux per aperture. Run: `python ZTFphot/scripts/update_old_parquet.py RESULTS_DIR --from-updated --recalibrate --infer-cuts` |
+| `update_parquet.py` | Adds missing (and, unless `--no-new`, newer) epochs to existing light-curve parquets **without re-downloading the epochs already in them**, recalibrating all photometry with the current pipeline. Inputs must be in the current format (`FLUX_4_DIF_uJy`, `APCORR410`); older files are refused — use `update_old_parquet.py`. A ref-pos parquet and its `_sci` sibling are updated together. Epoch cuts come from the `ztfphot_download` metadata, or `--infer-cuts`. The old epochs are rebuilt as per-epoch catalogs from `FLUX_4_DIF_uJy` (and `FLUX_10_DIF_uJy` in `--lc-columns full` files); the rebuilt reference catalog is completed with every source of the old parquet it lacks (from refsexcat, or as an injected source), so no light curve is lost; then vet → calibrate → flatfield → recalibrate → lightcurves → merge run over old + new epochs. All photometric columns of old and new epochs come from the current pipeline; the output keeps the input's `--lc-columns` preset. Images already on disk are reused instead of downloaded: `--image-dir DIR` (repeatable) and the `base_dir` recorded in the parquet metadata. Writes `<stem>_updated.parquet` (+ `ztfphot_update` metadata). Validated on est_084892: restoring 5 removed epochs reproduces a fresh run row for row in all apertures (≤0.004 mmag). Run: `python ZTFphot/scripts/update_parquet.py X_zg_merged.parquet [--dry-run]`, or on a whole directory: `update_parquet.py RESULTS_DIR [--plan] [--recursive] [--redo]` — per target/band/variant it uses `X_recal.parquet` if present, else `X.parquet`, pairs ref + `_sci`, skips targets that already have an `_updated` output, continues past failures and prints a summary. Downloads that still fail after short retries (`--download-retries 2`, `--retry-wait 15` s) are **deferred** rather than waited for (recorded as `epochs_deferred` in the output metadata); `update_parquet.py RESULTS_DIR --retry-deferred` later re-runs just those targets from their `_updated` files, downloading only the deferred epochs and refreshing the files in place |
+| `update_old_parquet.py` | Same options and procedure as `update_parquet.py`, for parquets written before 2026-10-21 (no `FLUX_4_DIF_uJy` / `APCORR410`); writes a current-format `slim` parquet. Every old row's raw 4 px difference flux is rebuilt: from `MAG_4_TOT_AB_org` (exact), or — for epochs with total flux ≤ 0 — from `FLUX_4_TOT_AB` and that epoch's calibration factor fitted on its other rows; the reference flux is removed with the zero point the file was built with (`MAG_4_REF`, else `MAGZP_REF_{tag}` metadata). Epochs where the **target** has no 4 px photometry are measured again from the images; rows of other sources without any 4 px photometry are dropped. Validated on est_084892 (old file without `FLUX_4_DIF`): 4 px identical to a fresh run (MAG_4 p99 0.006 mmag; negative-flux rows within 0.0015σ). Run: `python ZTFphot/scripts/update_old_parquet.py RESULTS_DIR --from-updated --recalibrate --infer-cuts` |
 | `batch_pipeline.py` | Process a list of targets in sequence, keeping only the final LC parquets and plots for each. Supports two input modes auto-detected by column count: **RA/Dec mode** (2 columns: `ra,dec`) runs the full pipeline including merge; **quadrant mode** (4 columns: `field,ccdid,qid,filtercode`) skips merge, derives the quadrant center from ztfquery field tables for lookup, suppresses target plots (`--no-target`). `--skip-existing` is band-aware in RA/Dec mode (a target is skipped only when a parquet exists for *every* requested band, and the sci variant with `--both`). Writes a coarse good/failed summary to `<results-dir>/sources_status.csv` (see [Target coverage diagnostics](#target-coverage-diagnostics)). Run: `python ZTFphot/scripts/batch_pipeline.py targets.txt [--both] [--bands zg zr] [--workers 20] [--skip-existing]` |
 | `replot_merged.py` | Regenerate precision and light curve plots from a merged parquet when the original working directory has been deleted (e.g. after `batch_pipeline.py` cleanup). The light-curve plot includes the binned overlay (`--bin-days`, default 50). Run: `python ZTFphot/scripts/replot_merged.py lightcurves_merged.parquet --ra RA --dec DEC --out-dir plots/ [--bin-days 50]` |
 | `lc_viewer.py` | Interactive GUI for browsing merged (or single-quadrant) light curve parquets. Left panel: overview scatter (median mag vs. RMS); click any point to load that object. Right panel: light curve coloured by MAGLIM. Controls: text box for direct object index entry, Prev/Next buttons (ranked by RMS), checkboxes to toggle individual quadrants, MAGLIM ≥ slider to discard shallow epochs, SEEING ≤ slider to discard poor-seeing epochs. Run: `python ZTFphot/scripts/lc_viewer.py path/to/lightcurves_merged.parquet` |

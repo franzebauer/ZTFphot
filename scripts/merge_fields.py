@@ -14,8 +14,8 @@ Algorithm
         delta_mag(mag) = median_mag_dominant - median_mag_minority
     as a function of magnitude over all common sources, in bins of width
     MAG_BIN with a 3σ MAD clip per bin.  Apply the magnitude-dependent
-    correction to all MAG_* columns (and the equivalent factor to FLUX_4_TOT_AB,
-    FERR_4_TOT_AB, FLUX_6_TOT_AB) by interpolating the curve at each row's
+    correction to MAG_4/10_TOT_AB (and the equivalent factor to the calibrated
+    FLUX/FERR_*_TOT_uJy) by interpolating the curve at each row's
     MAG_4_TOT_AB.  Falls back to a scalar median offset if too few bins.
 5.  Re-key object_index to be globally unique across quadrants, then
     link overlap sources to the dominant quadrant's object_index via
@@ -61,8 +61,9 @@ MAG_FAINT      = 21.5
 MAX_ERR        = 0.1      # max MERR_4_TOT_AB for a clean epoch
 
 
-_MAG_COLS = ['MAG_3_TOT_AB', 'MAG_4_TOT_AB', 'MAG_6_TOT_AB', 'MAG_10_TOT_AB', 'MAG_4_TOT_AB_org']
-_FLUX_COLS = ['FLUX_4_TOT_AB', 'FERR_4_TOT_AB', 'FLUX_6_TOT_AB']
+_MAG_COLS = ['MAG_4_TOT_AB', 'MAG_10_TOT_AB']
+# calibrated fluxes only; the raw difference fluxes (*_DIF_uJy) stay uncorrected
+_FLUX_COLS = ['FLUX_4_TOT_uJy', 'FERR_4_TOT_uJy', 'FLUX_10_TOT_uJy', 'FERR_10_TOT_uJy']
 # Per-quadrant metadata kept in the merged file as {key}_{field}_{fc}_c{ccd}_q{qid}
 _PER_QUAD_META = (b'target_sep_arcsec', b'target_ref_mag', b'ztfphot_run', b'ztfphot_download')
 _QUAD_ID_META = (b'field', b'filtercode', b'ccdid', b'qid')

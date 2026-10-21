@@ -75,7 +75,7 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
     OK means the target has a light curve, i.e. at least one finite FLUX measurement —
     positive OR negative (a fainter-than-reference detection is still a detection).
     LACKS_REFIMG_DETECTION is OK but with no reference source (MAG_4_REF NaN), so its
-    FLUX_4_TOT_AB is bipolar *difference* flux, not total — treat with care (blends).
+    FLUX_4_TOT_uJy is bipolar *difference* flux, not total — treat with care (blends).
     NOT_RECOVERED means it was measurable ("painted": in frame, unmasked) in >= 1 epoch
     but no row reached the light curve.
     Aggregates the per-epoch target fate written under TargetStatus/ by the photometry
@@ -99,7 +99,7 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
 
     # OK if the target (real neighbour or injected sentinel) is in a light curve.
     # Also record whether the target has a reference-image detection: a NaN MAG_4_REF
-    # means no reference source, so FLUX_4_TOT_AB is the (bipolar) *difference* flux,
+    # means no reference source, so FLUX_4_TOT_uJy is the (bipolar) *difference* flux,
     # not a total — the user must treat it accordingly (and watch for blends).
     found = False
     tgt_has_ref = True
@@ -111,11 +111,10 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
         # A finite FLUX is a real measurement — including the negative-flux
         # (fainter-than-reference) detections the magnitude drops to NaN. Difference
         # photometry is bipolar, so "detected" must not require a positive magnitude.
-        # Fall back to magnitude for parquets written before the flux column existed.
         try:
             import pyarrow.parquet as _pq
             _cols = set(_pq.read_schema(lc).names)
-            _meas = 'FLUX_4_TOT_AB' if 'FLUX_4_TOT_AB' in _cols else 'MAG_4_TOT_AB'
+            _meas = 'FLUX_4_TOT_uJy'
             _want = ['ALPHAWIN_REF', 'DELTAWIN_REF', _meas, 'object_index']
             if 'MAG_4_REF' in _cols:
                 _want.append('MAG_4_REF')
@@ -734,6 +733,11 @@ def main() -> None:
     p.add_argument("--no-target",   action="store_true",
                    help="Suppress target-source plots (lightcurves, precision target marker). "
                         "Use when processing a whole quadrant without a specific target.")
+    p.add_argument("--lc-columns", choices=["slim", "full"], default="slim",
+                   help="photometric columns of the light-curve parquets: slim (default) = "
+                        "4 px calibrated magnitude and μJy flux (aperture-corrected to "
+                        "10 px), raw 4 px difference flux, APCORR410, MAG_4_REF; full = "
+                        "slim + the same for the 10 px aperture")
     p.add_argument("--lc-bin-days", type=float, default=50.0,
                    help="Bin width (days) for the binned light-curve overlay in the "
                         "lightcurves plot (default: 50).")
@@ -1066,6 +1070,7 @@ def main() -> None:
                              use_calibrated=("calibrate" in steps or "recalibrate" in steps),
                              suffix=suffix, target_ra=args.ra, target_dec=args.dec,
                              target_match_radius=args.target_match_radius,
+                             lc_columns=args.lc_columns,
                              run_meta={
                                  "ztfphot_run": _json.dumps(_run_rec, default=str),
                                  "ztfphot_download": _json.dumps(

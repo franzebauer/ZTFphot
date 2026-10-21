@@ -2,11 +2,11 @@
 """
 update_old_parquet.py
 ---------------------
-Retrofit light-curve parquets written before 2026-10-21 (no raw FLUX_4_DIF / APCORR410)
+Retrofit light-curve parquets written before 2026-10-21 (no FLUX_4_DIF_uJy / APCORR410)
 to the current pipeline: same options and procedure as update_parquet.py (missing and
 newer epochs are added; old epochs are rebuilt from the parquet and recalibrated,
-without re-downloading them), with the old rows first converted to the current
-conventions.
+without re-downloading them). The output is a current-format --lc-columns slim
+parquet (4 px only: the old files have no raw flux for the other apertures).
 
 Raw 4 px difference flux of every old row:
   - FLUX_4_DIF where stored;
@@ -23,14 +23,9 @@ Raw 4 px difference flux of every old row:
   Rows with neither a magnitude nor a flux carry no photometry and are dropped — except
   for the target: epochs where the target has none are measured again from the images
   (reused locally where present, else downloaded).
-Other conventions: FLUX_6_TOT_AB is put on the merge-corrected scale (factor
-10^(-0.4 norm_offset)); per-epoch flags come from FLAG_AP, or are marked AP_UNKNOWN.
-
-MAG_3/6/10 of old epochs are shifted by the 4 px change, as in update_parquet.py: the
-median is unbiased, but the reference zero-point correction rescales each row's
-difference flux per aperture, which a common shift cannot reproduce (est_084892: MAD
-12-22 mmag vs a fresh run). 4 px is exact. Parquets made before 2026-09-08 had the faint
-correction in FLUX_4_TOT_AB; for their negative-flux rows it is not modelled.
+Per-epoch flags come from FLAG_AP, or are marked AP_UNKNOWN. Parquets made before
+2026-09-08 had the faint correction in FLUX_4_TOT_AB; for their negative-flux rows it
+is not modelled.
 
 Usage (ztf env, IRSA credentials in ~/.netrc): as update_parquet.py, e.g.
     python update_old_parquet.py RESULTS_DIR --from-updated --recalibrate --infer-cuts
@@ -69,9 +64,6 @@ def prepare(df: pd.DataFrame, path: Path) -> pd.DataFrame:
         raise ValueError(f"{path.name}: no MAG_4_TOT_AB_org — cannot rebuild the raw flux")
     if "FLAGS" not in df:
         df["FLAGS"] = flags_of(df).to_numpy()
-    if "flux_norm_applied" not in meta and "FLUX_6_TOT_AB" in df:
-        df["FLUX_6_TOT_AB"] = (_num(df, "FLUX_6_TOT_AB")
-                               * 10.0 ** (-0.4 * np.nan_to_num(_num(df, "norm_offset"))))
     # reference zero point the file was built with, per quadrant (used where MAG_4_REF
     # is absent)
     tags = (df["field"].astype(int).map("{:06d}".format) + "_" + df["filtercode"].astype(str)

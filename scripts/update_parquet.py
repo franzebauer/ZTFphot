@@ -6,7 +6,7 @@ Add missing (and, by default, newer) epochs to existing light-curve parquets, an
 recalibrate all 4 px photometry consistently with the CURRENT pipeline — without
 re-downloading the epochs already in the parquet.
 
-Inputs must be in the current format (raw FLUX_4_DIF and APCORR410 columns); parquets
+Inputs must be in the current format (FLUX_4_DIF_uJy and APCORR410 columns); parquets
 written before 2026-10-21 are retrofitted with update_old_parquet.py, which uses the
 same machinery.
 
@@ -21,17 +21,14 @@ when both exist):
   2. Temporary base dir: reference products + reference catalogs (same object order
      as the original run); download ONLY the missing/new epochs.
   3. Old epochs become per-epoch catalogs again (same LDAC layout the photometry step
-     writes) from the parquet's raw 4 px difference flux FLUX_4_DIF / FERR_4_DIF. The
-     4 px value fills all four aperture slots; only 4 px is used from these epochs.
+     writes) from the parquet's raw difference flux FLUX_4_DIF_uJy / FERR_4_DIF_uJy
+     (converted back to counts with MAGZP_DIF), and FLUX_10_DIF_uJy for the 10 px
+     aperture in --lc-columns full files; the output keeps the input's preset.
   4. run_pipeline (current code) on the temp dir: forced photometry of the new epochs,
      then vet -> calibrate -> flatfield -> recalibrate -> lightcurves -> merge over
      old + new epochs together.
   5. Output <stem>_updated.parquet next to the input (or --outdir):
-       old epochs : new 4 px values; MAG_3/6/10 (and FLUX_6) shifted by the same
-                    4 px change before its aperture correction (MAG_k_new = MAG_k_old +
-                    dMAG_4, dMAG_4 on MAG_4 + APCORR410; where MAG_4 is NaN the
-                    epoch's median dMAG_4); MERR_k kept
-       new epochs : full photometry (all apertures)
+       old and new epochs alike: all photometric columns from the current pipeline
        old rows the current pipeline does not reproduce (e.g. an epoch that now has
        too few calibrators, a quadrant the footprint check drops) are dropped.
      Metadata: the current pipeline's keys plus ztfphot_update (source, counts).
@@ -118,7 +115,7 @@ def _load(path: Path) -> pd.DataFrame:
 
 def _is_current(df: pd.DataFrame) -> bool:
     """Written by the current pipeline (raw 4 px flux stored, 4→10 px correction)."""
-    return {"FLUX_4_DIF", "FERR_4_DIF", "APCORR410"} <= set(df.columns)
+    return {"FLUX_4_DIF_uJy", "FERR_4_DIF_uJy", "APCORR410"} <= set(df.columns)
 
 
 # ── reference catalogs + source matching ─────────────────────────────────────
@@ -325,8 +322,16 @@ def _csv_index(ra, dec, ref: pd.DataFrame, target, match_radius, tol=0.5) -> np.
 
 def _raw_flux(rows: pd.DataFrame, q_mag: np.ndarray, is_target: np.ndarray, ref: pd.DataFrame):
     """Raw 4 px difference flux and error (counts, MAGZP_DIF units) per parquet row."""
-    return (pd.to_numeric(rows["FLUX_4_DIF"], errors="coerce").to_numpy(float),
-            pd.to_numeric(rows["FERR_4_DIF"], errors="coerce").to_numpy(float))
+    return _dif_counts(rows, "4")
+
+
+def _dif_counts(rows: pd.DataFrame, k: str):
+    """FLUX/FERR_{k}_DIF_uJy in counts (MAGZP_DIF units); NaN where absent."""
+    if f"FLUX_{k}_DIF_uJy" not in rows:
+        return np.full(len(rows), np.nan), np.full(len(rows), np.nan)
+    c = 10.0 ** (0.4 * (pd.to_numeric(rows["MAGZP_DIF"], errors="coerce").to_numpy(float) - 23.9))
+    return (pd.to_numeric(rows[f"FLUX_{k}_DIF_uJy"], errors="coerce").to_numpy(float) * c,
+            pd.to_numeric(rows[f"FERR_{k}_DIF_uJy"], errors="coerce").to_numpy(float) * c)
 
 
 def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_of,
@@ -347,8 +352,9 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
         is_t = ci == len(ref)
         q_mag = np.where(is_t, np.nan, ref["q_mag"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
         f, e = raw_flux(rows, q_mag, is_t, ref)
+        f10, e10 = _dif_counts(rows, "10")              # 10 px slot (full preset)
         keep = (ci >= 0) & np.isfinite(f) & np.isfinite(e)
-        rows, ci, f, e = rows[keep], ci[keep], f[keep], e[keep]
+        rows, ci, f, e, f10, e10 = rows[keep], ci[keep], f[keep], e[keep], f10[keep], e10[keep]
         if sci:
             if {"ALPHA_SCI", "DELTA_SCI"} <= set(rows.columns):
                 ra = pd.to_numeric(rows["ALPHA_SCI"], errors="coerce").to_numpy(float)
@@ -384,6 +390,8 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
             n = len(idx)
             fa = np.repeat(f[idx, None], 4, axis=1).astype(np.float32)
             ea = np.repeat(e[idx, None], 4, axis=1).astype(np.float32)
+            fa[:, 3] = np.where(np.isfinite(f10[idx]), f10[idx], f[idx])
+            ea[:, 3] = np.where(np.isfinite(e10[idx]), e10[idx], e[idx])
             name = catalog_name(f"ztf_{ffd_of(q, mjd)}_{q[0]:06d}_{q[1]}_c{q[2]:02d}_o_q{q[3]}"
                                 f"_scimrefdiffimg")
             _write_ldac(cat_dir / name, h, {
@@ -415,8 +423,8 @@ def _collect(base: Path, ra, dec, fc, suffix) -> tuple[pd.DataFrame | None, dict
 
 def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
               old_epochs: set, all_sources: bool = False) -> pd.DataFrame:
-    """Old epochs: new 4 px, other apertures shifted by the 4 px change; new epochs as
-    measured. Old rows absent from the new output are dropped."""
+    """The new output (old and new epochs), restricted to the original object set unless
+    `all_sources`; old rows absent from it are dropped (and counted)."""
     new = new.copy()
     new["_csv"] = -1
     for key, idx in new.groupby(QKEY).groups.items():
@@ -440,29 +448,13 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
                         f"not in the original parquet (--all-sources keeps them)")
         new = new[in_old]
     is_old_ep = new.set_index(["field", "filtercode", "ccdid", "qid", "_mjd"]).index.isin(list(old_epochs))
-    shift_cols = [c for c in ("MAG_3_TOT_AB", "MAG_6_TOT_AB", "MAG_10_TOT_AB") if c in old]
-    keep_cols = shift_cols + [c.replace("MAG_", "MERR_") for c in shift_cols
-                              if c.replace("MAG_", "MERR_") in old]
-    o = old[k + ["MAG_4_TOT_AB"] + keep_cols + (["FLUX_6_TOT_AB"] if "FLUX_6_TOT_AB" in old else [])
-            + (["APCORR410"] if "APCORR410" in old else [])]
-    o = o.drop_duplicates(k)
+    o = old[k + ["MAG_4_TOT_AB"] + (["APCORR410"] if "APCORR410" in old else [])].drop_duplicates(k)
     m = new[is_old_ep].reset_index().merge(o, on=k, how="left", suffixes=("", "_old"))
-    # Change of the 4 px magnitude before its aperture correction (APCORR410, mmag;
-    # MAG_4 is corrected, MAG_3/6/10 are not)
+    # change of the 4 px magnitude before its aperture correction (for the log)
     _apc = lambda c: (pd.to_numeric(m[c], errors="coerce").fillna(0.0) / 1000.0
                       if c in m else 0.0)
     dm = ((m["MAG_4_TOT_AB"] + _apc("APCORR410"))
           - (m["MAG_4_TOT_AB_old"] + _apc("APCORR410_old")))
-    # rows without a 4 px magnitude (total flux <= 0) take the epoch's median change
-    dm = dm.fillna(m.assign(_d=dm).groupby(QKEY + ["_mjd"])["_d"].transform("median"))
-    for c in shift_cols:
-        new.loc[m["index"].to_numpy(), c] = (m[f"{c}_old"] + dm).to_numpy()
-    for c in keep_cols:
-        if c not in shift_cols:
-            new.loc[m["index"].to_numpy(), c] = m[f"{c}_old"].to_numpy()
-    if "FLUX_6_TOT_AB" in new:
-        f6 = (m["FLUX_6_TOT_AB_old"] * 10 ** (-0.4 * dm)) if "FLUX_6_TOT_AB_old" in m else np.nan
-        new.loc[m["index"].to_numpy(), "FLUX_6_TOT_AB"] = np.asarray(f6, float)
     n_drop = int((~pd.MultiIndex.from_frame(old[k]).isin(pd.MultiIndex.from_frame(new[k]))).sum())
     out = new
     out["FLAGS"] = pd.to_numeric(out["FLAGS"]).astype("Int32")
@@ -656,6 +648,8 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
                "--workers", str(a.workers), "--target-match-radius", str(a.target_match_radius),
                "--footprint-margin-px", str(a.footprint_margin_px)]
         cmd += ["--both"] if both else (["--scipos"] if "" not in variants else [])
+        full = legacy is None and all("FLUX_10_DIF_uJy" in df for df in frames.values())
+        cmd += ["--lc-columns", "full" if full else "slim"]
         logger.info("  running: " + " ".join(cmd[1:]))
         log = base / "run_pipeline.log"
         with open(log, "w") as fh:

@@ -124,7 +124,7 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
     # σ_flux from the bipolar FLUX column (unbiased, keeps them). The brightness axis is
     # MAG_4_REF (reference mag) when available, else the biased median mag; it is shared
     # by both rows so the panels stack meaningfully.
-    _FLUX_STD = "FLUX_4_TOT_AB"
+    _FLUX_STD = "FLUX_4_TOT_uJy"
     _BRT = "MAG_4_REF" if "MAG_4_REF" in df.columns else _MAG_COL
     if _MAG_COL not in df.columns:
         logger.warning(f"  {_MAG_COL} missing — skipping precision plot")
@@ -155,34 +155,27 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
     grp      = _summarise(_MAG_COL)
     grp_flux = _summarise(_FLUX_STD)
 
-    # ── per-source summary from pre-calibration mags (aperture-corrected maginst)
-    _ORG_COL = "MAG_4_TOT_AB_org"
+    # ── per-source summary before calibration: total flux = reference flux (MAG_4_REF)
+    # + raw difference flux on ZTF's per-epoch zero point (FLUX_4_DIF_uJy), no
+    # recalibration and no aperture correction. The flux is bipolar (negative-flux
+    # epochs included); the magnitude is NaN where it is <= 0.
     grp_org = grp_org_flux = None
-    if _ORG_COL in clean.columns:
-        clean[_ORG_COL] = pd.to_numeric(clean[_ORG_COL], errors="coerce")
-        agg_org = clean.groupby("object_index").agg(
-            n_org=(_ORG_COL, "count"),
-            med=(_ORG_COL,   "median"),
-            std=(_ORG_COL,   "std"),
-        ).dropna(subset=["std"])
-        grp_org = agg_org[agg_org["n_org"] >= 5]
-
-        # Flux-row equivalent. There is no pre-calibration FLUX column, so convert the
-        # magnitude scatter: σ_flux ≈ flux · σ_mag · 0.4·ln10, with flux from the
-        # source's own pre-calibration median magnitude (AB: 10^(-0.4(m-23.9)) μJy).
-        # NOTE this curve is CENSORED — MAG_4_TOT_AB_org is NaN wherever total flux was
-        # ≤0, so those epochs never enter σ_mag. At the faint end it therefore sits low
-        # relative to a true unbiased pre-calibration flux scatter; it is labelled as
-        # such. Recovering the unbiased version would need the per-epoch ZP/poly/
-        # flatfield factors, which live in the FITS headers, not the parquet.
-        _org_med_mag = agg_org["med"].values
-        _org_flux    = 10.0 ** (-0.4 * (_org_med_mag - 23.9))     # μJy
-        g = agg_org.copy()
-        g["std"] = g["std"].values * _org_flux * (0.4 * np.log(10.0))
-        # x-axis must match the flux row (reference mag when available)
-        if _BRT != _MAG_COL:
-            g["med"] = clean.groupby("object_index")[_BRT].median()
-        grp_org_flux = g[(g["n_org"] >= 5) & np.isfinite(g["std"])]
+    if {"FLUX_4_DIF_uJy", "MAG_4_REF"} <= set(clean.columns):
+        _mref = pd.to_numeric(clean["MAG_4_REF"], errors="coerce").to_numpy(float)
+        _fref = np.where(np.isfinite(_mref) & (_mref < 90), 10.0 ** (-0.4 * (_mref - 23.9)), 0.0)
+        clean["_FLUX_RAW"] = _fref + pd.to_numeric(clean["FLUX_4_DIF_uJy"], errors="coerce")
+        with np.errstate(invalid="ignore", divide="ignore"):
+            clean["_MAG_RAW"] = np.where(clean["_FLUX_RAW"] > 0,
+                                         23.9 - 2.5 * np.log10(clean["_FLUX_RAW"]), np.nan)
+        for _col, _flux in (("_MAG_RAW", False), ("_FLUX_RAW", True)):
+            g = clean.groupby("object_index").agg(
+                n_org=(_col, "count"), med=(_BRT if _flux else _col, "median"),
+                std=(_col, "std")).dropna(subset=["std"])
+            g = g[(g["n_org"] >= 5) & np.isfinite(g["std"])]
+            if _flux:
+                grp_org_flux = g
+            else:
+                grp_org = g
 
     tgt_obj_idx  = _find_target_obj(df, target_ra, target_dec) if target_ra is not None else None
     vet_rejected = _load_vet_rejected(vet_catalog, df)
@@ -208,7 +201,7 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
         if _row_grp is None or _row_grp.empty:
             for _c in range(2):
                 axes[row_idx, _c].text(0.5, 0.5,
-                                       "FLUX_4_TOT_AB not in parquet"
+                                       "FLUX_4_TOT_uJy not in parquet"
                                        if _row_flux else "no data",
                                        ha="center", va="center",
                                        transform=axes[row_idx, _c].transAxes,
@@ -253,8 +246,7 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
                 cx_org, my_org = _running_median(grp_org, edges, scale=_YS)
                 if cx_org:
                     ax.plot(cx_org, my_org, "k--", lw=1.5, zorder=4,
-                            label=("Median σ (pre-calibration, censored)" if flux
-                                   else "Median σ (pre-calibration)"))
+                            label="Median σ (pre-calibration)")
 
             # calibration star range
             ax.axvline(_CALIB_MAG_LO, color="steelblue", lw=1.2, ls=":", alpha=0.8)

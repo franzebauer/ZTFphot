@@ -37,16 +37,8 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
         'SEEING', 'MAGLIM', 'DISTANCE',
         'CLASS_STAR_OBJ',
-        'MAG_3_TOT_AB', 'MERR_3_TOT_AB',
-        'MAG_4_TOT_AB', 'MERR_4_TOT_AB',
-        'MAG_6_TOT_AB', 'MERR_6_TOT_AB',
-        'MAG_10_TOT_AB', 'MERR_10_TOT_AB',
-        'MAG_4_TOT_AB_org', 'MERR_4_TOT_AB_org',
-        'MAG_4_REF',
-        'FLUX_4_TOT_AB', 'FERR_4_TOT_AB', 'FLUX_6_TOT_AB',   # bipolar μJy flux
-        'FLUX_4_DIF', 'FERR_4_DIF',                          # raw 4 px diff flux, counts
+        *_PHOT_COLS['full'],
         'DRA_SCI', 'DDEC_SCI',                               # sci-pos offsets, arcsec
-        'APCORR410',
     ]
     int32_cols = [
         'NMATCHES', 'INFOBITS_DIF', 'FLAGS', 'object_index',
@@ -74,25 +66,38 @@ _EPOCH_KEYS = [
 # Columns to drop before writing (redundant, derivable, or replaced by metadata)
 _DROP_COLS = {
     'ALPHAWIN_J2000', 'DELTAWIN_J2000',   # dropped in ref-pos; renamed to ALPHA_SCI/DELTA_SCI in sci-pos
-    'FLUX_3_TOT_AB', 'FERR_3_TOT_AB',
-    # FLUX_4_TOT_AB / FERR_4_TOT_AB / FLUX_6_TOT_AB are KEPT — bipolar μJy flux
-    # (sign-preserving; the negative-flux epochs the magnitude drops to NaN). 6px
-    # carried for the aperture-correction check.
-    'FERR_6_TOT_AB',
-    'FLUX_10_TOT_AB', 'FERR_10_TOT_AB',
-    'FLUX_AUTO_TOT_AB', 'FERR_AUTO_TOT_AB',
-    'FLUX_3_DIF', 'FERR_3_DIF',
-    'FLUX_6_DIF', 'FERR_6_DIF',
-    'FLUX_10_DIF', 'FERR_10_DIF',
-    'FLUX_AUTO_DIF', 'FERR_AUTO_DIF',
     'ALPHA_J2000', 'DELTA_J2000',          # reference positions — kept in ALPHAWIN_REF/DELTAWIN_REF
     'VECTOR_ASSOC',                        # carried as object_index; raw column not needed in parquet
-    'MAG_AP_3_REF', 'MAG_AP_4_REF', 'MAG_AP_6_REF', 'MAG_AP_10_REF', 'MAG_AP_AUTO_REF',
     'SATURATE',
-    'MAG_3_TOT_AB_org', 'MERR_3_TOT_AB_org',   # only 4px _org retained
-    'MAG_6_TOT_AB_org', 'MERR_6_TOT_AB_org',
-    'MAG_10_TOT_AB_org', 'MERR_10_TOT_AB_org',
 }
+
+# Photometric columns written per --lc-columns preset (all others of that kind are
+# dropped). TOT: calibrated, 4 px aperture-corrected to 10 px (APCORR410), bipolar
+# flux in μJy. DIF: raw difference-image flux converted to μJy with ZTF's per-epoch
+# MAGZP_DIF — neither recalibrated nor aperture-corrected.
+_PHOT_COLS = {
+    'slim': ['MAG_4_TOT_AB', 'MERR_4_TOT_AB', 'FLUX_4_TOT_uJy', 'FERR_4_TOT_uJy',
+             'FLUX_4_DIF_uJy', 'FERR_4_DIF_uJy', 'APCORR410', 'MAG_4_REF'],
+}
+_PHOT_COLS['full'] = _PHOT_COLS['slim'] + [
+    'MAG_10_TOT_AB', 'MERR_10_TOT_AB', 'FLUX_10_TOT_uJy', 'FERR_10_TOT_uJy',
+    'FLUX_10_DIF_uJy', 'FERR_10_DIF_uJy']
+
+
+def _photometry_columns(df: pd.DataFrame, preset: str) -> pd.DataFrame:
+    """Rename the calibrated fluxes to μJy names, convert the raw difference fluxes
+    (counts) to μJy with MAGZP_DIF, and keep only the preset's photometric columns."""
+    for k in ('4', '10'):
+        df = df.rename(columns={f'FLUX_{k}_TOT_AB': f'FLUX_{k}_TOT_uJy',
+                                f'FERR_{k}_TOT_AB': f'FERR_{k}_TOT_uJy'})
+        if f'FLUX_{k}_DIF' in df.columns:
+            ujy = 10.0 ** (-0.4 * (pd.to_numeric(df['MAGZP_DIF'], errors='coerce') - 23.9))
+            df[f'FLUX_{k}_DIF_uJy'] = pd.to_numeric(df[f'FLUX_{k}_DIF'], errors='coerce') * ujy
+            df[f'FERR_{k}_DIF_uJy'] = pd.to_numeric(df[f'FERR_{k}_DIF'], errors='coerce') * ujy
+    keep = set(_PHOT_COLS[preset])
+    phot = [c for c in df.columns if c.split('_')[0] in ('MAG', 'MERR', 'FLUX', 'FERR')
+            or c == 'APCORR410']
+    return df.drop(columns=[c for c in phot if c not in keep])
 
 
 def step_lightcurves(
@@ -104,11 +109,13 @@ def step_lightcurves(
     target_dec: float | None = None,
     target_match_radius: float = 1.0,
     run_meta: dict | None = None,
+    lc_columns: str = "slim",
 ) -> int:
     """
     Assemble light curves from calibrated per-epoch FITS for each quadrant.
     Reads Calibrated/{field}/{fc}/{ccd}/{qid}/*_cal.fits directly.
-    Saves one Parquet per quadrant under LightCurves/.
+    Saves one Parquet per quadrant under LightCurves/, with the photometric columns of
+    the `lc_columns` preset (_PHOT_COLS: slim or full).
 
     Parquet metadata keys (not columns):
       field, filtercode, ccdid, qid
@@ -116,7 +123,7 @@ def step_lightcurves(
       MAGZPRMS_REF_{field}_{fc}_c{ccd}_q{qid}
       target_sep_arcsec  (nearest ref source to target; NaN if target not given)
       target_ref_mag     (reference AB mag of the target's matched source, or NaN if
-                          reference-less — then FLUX_4_TOT_AB is difference flux)
+                          reference-less — then FLUX_4_TOT_uJy is difference flux)
       epoch_summary_{field}_{fc}_c{ccd}_q{qid}
                          JSON, from the data: n_epochs, MJD range, min MAGLIM, max
                          SEEING, epochs with INFOBITS set — the effective epoch cuts
@@ -197,7 +204,7 @@ def step_lightcurves(
         # Nearest ref source to target — stored as metadata for downstream diagnostics.
         # target_ref_mag = that source's reference AB mag if it is within the match
         # radius (i.e. the target HAS a reference detection); NaN when reference-less
-        # (then FLUX_4_TOT_AB is bipolar difference flux, not total — see README).
+        # (then FLUX_4_TOT_uJy is bipolar difference flux, not total — see README).
         target_sep_val = float('nan')
         target_ref_mag = float('nan')
         if target_ra is not None and target_dec is not None:
@@ -285,6 +292,7 @@ def step_lightcurves(
         drop = [c for c in _DROP_COLS if c in all_lcs.columns]
         if drop:
             all_lcs = all_lcs.drop(columns=drop)
+        all_lcs = _photometry_columns(all_lcs, lc_columns)
 
         # Sci-pos: store epoch positions as offsets FROM THE REFERENCE position in
         # arcsec (2 dp, float32) rather than absolute degrees. The absolute values

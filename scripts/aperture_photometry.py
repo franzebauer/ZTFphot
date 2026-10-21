@@ -59,7 +59,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Aperture DIAMETERS in pixels — do not change (match the original Rust pipeline;
-# k=0 3 px, k=1 4 px = primary -> FLUX_4_TOT_AB / MAG_4_TOT_AB, k=2 6 px, k=3 10 px)
+# k=0 3 px, k=1 4 px = primary -> FLUX_4_TOT_uJy / MAG_4_TOT_AB, k=2 6 px, k=3 10 px)
 PHOT_APERTURES = "3,4,6,10"
 
 BKG_ANNULUS_THICK = 35.0      # px, local-background annulus thickness
