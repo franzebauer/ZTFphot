@@ -285,11 +285,17 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
         j, sep, _ = match_coordinates_sky(SkyCoord(sra, sdec, unit="deg"),
                                           SkyCoord(ra[ok], dec[ok], unit="deg"))
         keep = sep.arcsec <= assoc_radius
+        # one science detection per reference source: the nearest
+        order = np.lexsort((sep.arcsec, j))
+        first = np.zeros(len(j), bool)
+        first[order[np.r_[True, j[order][1:] != j[order][:-1]]]] = True
+        keep &= first
         idx, ra, dec = idx[ok][j[keep]], sra[keep], sdec[keep]
 
     x, y = ep.wcs.all_world2pix(ra, dec, 0)
-    ix, iy = np.floor(x).astype(int), np.floor(y).astype(int)
-    on = np.isfinite(x) & np.isfinite(y) & (ix >= 0) & (ix < ncols) & (iy >= 0) & (iy < nrows)
+    # centre on the frame: within the pixel edges (pixel centres at integers, 0-based)
+    on = (np.isfinite(x) & np.isfinite(y) & (x >= -0.5) & (x < ncols - 0.5)
+          & (y >= -0.5) & (y < nrows - 0.5))
 
     # > 50% finite pixels within 0.75*SEEING (the old "paint" criterion)
     good = np.zeros(len(x), bool)

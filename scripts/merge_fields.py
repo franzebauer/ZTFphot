@@ -383,7 +383,9 @@ def merge_band(
         b'flux_norm_applied': b'1',
         **({b'not_cross_calibrated': ','.join(not_calibrated).encode()} if not_calibrated else {}),
     })
-    pq_io.write_table(table, out_path)
+    _tmp = out_path.with_name(out_path.name + ".tmp")      # atomic: no truncated file
+    pq_io.write_table(table, _tmp)
+    _tmp.replace(out_path)
 
     n_src_quads = merged.groupby(['field', 'filtercode', 'ccdid', 'qid', 'object_index']).ngroups
     logger.info(f"merge [{band}]: {len(merged)} rows, {n_src_quads} source×quadrant combinations "

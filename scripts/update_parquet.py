@@ -93,6 +93,8 @@ def _sibling(path: Path) -> Path | None:
         cands.append(path.with_name(s[:-len("_merged")] + "_sci_merged" + tail + ".parquet"))
     else:
         cands.append(path.with_name(s + "_sci" + tail + ".parquet"))
+    if tail:                                        # sibling without the suffix
+        cands += [c.with_name(c.name.replace(tail + ".parquet", ".parquet")) for c in list(cands)]
     return next((c for c in cands if c.exists()), None)
 
 
@@ -489,6 +491,13 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
                        f"current format (no FLUX_4_DIF / APCORR410) — use update_old_parquet.py")
         return "fail"
     have, meta = read_parquet_epochs(first)
+    # an epoch counts as present only if every variant has it (else it is missing for
+    # one: downloaded, and measured for that variant)
+    for p in variants.values():
+        if p != first:
+            h2 = read_parquet_epochs(p)[0][QKEY + ["OBSMJD"]].assign(_m=lambda d: d["OBSMJD"].round(6))
+            have = (have.assign(_m=have["OBSMJD"].round(6))
+                    .merge(h2.drop(columns="OBSMJD"), on=QKEY + ["_m"]).drop(columns="_m"))
     if legacy is not None:
         have = have[np.array([k in kept for k in map(tuple, have[QKEY].assign(
             _m=have["OBSMJD"].round(6)).to_numpy().tolist())], dtype=bool)].reset_index(drop=True)

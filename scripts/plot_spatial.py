@@ -34,8 +34,7 @@ Reads *_resid.npz from FlatfieldResiduals/.  NPZ arrays (all in magnitudes):
   ra_2/dec_2/dm_2       calibrators, after 3σ iterative clip
   ra_4/dec_4/dm_4       calibrators, after 2D polynomial
   ra_5/dec_5/dm_5       calibrators, after spatial flatfield
-  ra_3/dec_3/dm_3       all matched sources, after flatfield (the faint correction
-                        that once followed it is disabled)
+  ra_3/dec_3/dm_3       all matched sources, after flatfield
   ra_all/dec_all/dm_all_pre   all matched sources, before calibration
   ra_all/dec_all/dm_all_post  all matched sources, after full calibration
   dflux_all_post              bipolar FRACTIONAL FLUX residual, the uncensored
@@ -75,8 +74,8 @@ def _load_resid_npz(resid_dir: Path) -> list[dict]:
         try:
             d = np.load(str(p))
             epochs.append({k: d[k] for k in d.files})
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"  skipping unreadable {p.name}: {exc}")
     return epochs
 
 
@@ -89,7 +88,7 @@ def _stack_stage(epochs: list[dict], rk: str, dk: str, mk: str):
     """
     ras, decs, dms = [], [], []
     for e in epochs:
-        if rk in e and mk in e:
+        if rk in e and dk in e and mk in e:
             ras.append(e[rk])
             decs.append(e[dk])
             dm = e[mk] * 1000                                      # mag → mmag

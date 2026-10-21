@@ -43,6 +43,7 @@ def make_catalog(save_path, refcats):
             chosen[stem] = f
     catalogs = list(chosen.values())
 
+    n_written = 0
     for catalog in catalogs:
         tmp = (catalog.replace("_refsexcat_augmented.fits", "_refimg.fits")
                if catalog.endswith("_refsexcat_augmented.fits")
@@ -92,7 +93,10 @@ def make_catalog(save_path, refcats):
             table['ID'][i] = str(i) + "_" + catname
 
         catname = save_path + '/' + catname + '(REFERENCE)[OBJECTS].csv'
-        ascii.write(table, catname, format='csv', overwrite=True)
+        ascii.write(table, catname + '.tmp', format='csv', overwrite=True)
+        os.replace(catname + '.tmp', catname)        # atomic: no truncated catalog
+        n_written += 1
+    return n_written
 
 def main():
     # Makes a catalog to use with other scripts

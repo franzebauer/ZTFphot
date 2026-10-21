@@ -148,9 +148,16 @@ def step_lightcurves(
         lc_dir = lc_root / f"{field:06d}" / fc / f"ccd{ccd:02d}" / f"q{qid_}"
         lc_out = lc_dir / f"lightcurves{suffix}.parquet"
 
+        _tgt_key = (f"{target_ra},{target_dec}" if target_ra is not None and target_dec is not None
+                    else "none")
         if lc_out.exists() and not force:
-            n_skip += 1
-            continue
+            # light curves made for another target carry its metadata (target_sep_arcsec,
+            # target_ref_mag, ztfphot_run): rebuild them (the photometry is shared)
+            _old = (pq.read_schema(lc_out).metadata or {}).get(b'target_radec', b'').decode()
+            if _old == _tgt_key:
+                n_skip += 1
+                continue
+            logger.info(f"  {lc_out.name} was built for target '{_old or 'unrecorded'}' — rebuilding")
 
         ref_csv = cat_dir / f"{tag}(REFERENCE)[OBJECTS].csv"
         if not ref_csv.exists():
@@ -195,7 +202,7 @@ def step_lightcurves(
                 'MAG_4_REF':    np.float64('nan'),   # target has no reference magnitude
             }
             for dst in list(ref_cols):
-                ref_cols[dst] = np.append(ref_cols[dst], _tgt_extra.get(dst, 0))
+                ref_cols[dst] = np.append(ref_cols[dst], _tgt_extra[dst])
 
         # Extract MAGZP_REF / MAGZPRMS_REF as scalars for parquet metadata
         magzp_ref_val    = float(pd.to_numeric(ref['MAGZP_REF'],    errors='coerce').iloc[0]) if 'MAGZP_REF'    in ref.columns else float('nan')
@@ -253,7 +260,14 @@ def step_lightcurves(
             for key in _EPOCH_KEYS:
                 ep_rows[key] = hdr.get(key, np.nan)
 
-            # Reference catalog properties
+            # Reference catalog properties. A row beyond the catalog (the --ra/--dec target
+            # injected by the photometry) needs that target here too.
+            n_ref = len(next(iter(ref_cols.values()))) if ref_cols else 0
+            beyond = ep_ref_idx >= n_ref
+            if beyond.any():
+                logger.warning(f"  {cal_path.name}: {int(beyond.sum())} row(s) beyond the reference "
+                               f"catalog (injected target; run lightcurves with --ra/--dec) — skipped")
+                ep_rows, ep_ref_idx = ep_rows[~beyond].reset_index(drop=True), ep_ref_idx[~beyond]
             for dst, arr in ref_cols.items():
                 ep_rows[dst] = arr[ep_ref_idx]
 
@@ -274,6 +288,14 @@ def step_lightcurves(
             continue
 
         all_lcs = pd.concat(frames, ignore_index=True)
+        # A target without a reference source is measured only if the photometry injected
+        # it (catalogs made for another target in a reused base dir do not contain it)
+        if (target_ra is not None and np.isfinite(target_sep_val)
+                and target_sep_val > target_match_radius
+                and not (all_lcs['object_index'] == len(ref)).any()):
+            logger.warning(f"  {tag}: the target has no reference source and is not in the "
+                           f"photometry catalogs (made for another target?) — re-run the phot "
+                           f"step with --force to measure it")
 
         # One quality bitmask, FLAGS (ztfphot_flags.py): per-epoch aperture bits +
         # reference-source flag + no-reference marker + cautionary INFOBITS summaries.
@@ -325,6 +347,7 @@ def step_lightcurves(
             f'MAGZPRMS_REF_{tag}'.encode(): str(magzprms_ref_val).encode(),
             b'target_sep_arcsec':           str(target_sep_val).encode(),
             b'target_ref_mag':              str(target_ref_mag).encode(),
+            b'target_radec':                _tgt_key.encode(),
         }
         if _infobits_ref is not None:
             extra_meta[f'INFOBITS_REF_{tag}'.encode()] = str(_infobits_ref).encode()
@@ -344,7 +367,9 @@ def step_lightcurves(
         for _k, _v in (run_meta or {}).items():
             extra_meta[_k.encode()] = str(_v).encode()
         table = table.replace_schema_metadata({**existing_meta, **extra_meta})
-        pq.write_table(table, lc_out)
+        _tmp = lc_out.with_name(lc_out.name + ".tmp")   # atomic: no truncated file
+        pq.write_table(table, _tmp)
+        _tmp.replace(lc_out)
 
         n_obj = all_lcs['object_index'].nunique()
         logger.info(f"  → {n_obj} objects, {len(all_lcs)} rows → {lc_out}")

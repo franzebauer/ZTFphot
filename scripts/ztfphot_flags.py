@@ -89,6 +89,8 @@ def flags_of(df: pd.DataFrame) -> pd.Series:
     f = compose(df)
     if "FLAG_AP" not in df:
         f |= F.AP_UNKNOWN
+    else:                                           # NA FLAG_AP: not measured, not clean
+        f |= np.where(pd.to_numeric(df["FLAG_AP"], errors="coerce").isna(), F.AP_UNKNOWN, 0)
     return pd.Series(f, index=df.index, dtype="int64")
 
 
@@ -98,3 +100,10 @@ def good(df: pd.DataFrame, reject: int = F.DEFAULT_REJECT) -> pd.DataFrame:
 
 
 good.DEFAULT = F.DEFAULT_REJECT
+
+
+def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Rows for diagnostics (plots, viewer): no ZTF INFOBITS_DIF bits for the epoch and
+    none of the DEFAULT_REJECT bits for the source."""
+    ib = pd.to_numeric(df["INFOBITS_DIF"], errors="coerce").fillna(0).to_numpy() if "INFOBITS_DIF" in df else 0
+    return df[((flags_of(df) & F.DEFAULT_REJECT) == 0).to_numpy() & (np.asarray(ib) == 0)]

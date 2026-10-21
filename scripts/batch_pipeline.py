@@ -400,8 +400,11 @@ def main():
         # otherwise a target already done in one filter would skip a new one.
         if args.skip_existing:
             if quad_mode:
-                have = len(list(results_dir.glob(f"{tag}_*.parquet")))
-                skip = have > 0
+                files = list(results_dir.glob(f"{tag}_*.parquet"))
+                have = len(files)
+                # every requested variant must be present (ref, and sci with --both)
+                skip = (any("_sci" not in p.stem for p in files)
+                        and (not args.both or any("_sci" in p.stem for p in files)))
             else:
                 suffixes = ["", "_sci"] if args.both else [""]
                 want = [(BAND_TO_FC.get(b, f"z{b}"), s)

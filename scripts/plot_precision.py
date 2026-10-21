@@ -66,7 +66,7 @@ def _find_target_obj(df: pd.DataFrame, target_ra: float, target_dec: float):
                     dec=srcs["DELTAWIN_REF"].values * u.deg)
     tgt  = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
     idx, sep, _ = tgt.match_to_catalog_sky(cats)
-    if sep[0].arcsec < 2.0:
+    if sep[0].arcsec < 1.0:                       # the pipeline's target association radius
         return srcs.index[int(idx)]
     return None
 
@@ -95,7 +95,7 @@ def _load_vet_rejected(vet_catalog: Path, df: pd.DataFrame) -> set:
                            dec=srcs["DELTAWIN_REF"].values * u.deg)
         cat_bad = SkyCoord(ra=bad_ra * u.deg, dec=bad_dec * u.deg)
         idx, sep, _ = cat_bad.match_to_catalog_sky(cat_src)
-        matched = sep.arcsec < 3.0
+        matched = sep.arcsec < 1.0              # same reference positions: exact match
         return set(srcs.index[idx[matched]].tolist())
     except Exception as e:
         logger.warning(f"Could not load vet catalog {vet_catalog}: {e}")
@@ -134,7 +134,8 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
         if _c in df.columns:
             df[_c] = pd.to_numeric(df[_c], errors="coerce")
 
-    clean = df[df["INFOBITS_DIF"] == 0].copy()
+    from ztfphot_flags import clean_rows
+    clean = clean_rows(df).copy()
 
     cs_col = "CLASS_STAR" if "CLASS_STAR" in clean.columns else \
              "CLASS_STAR_OBJ" if "CLASS_STAR_OBJ" in clean.columns else None
@@ -265,8 +266,20 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
             # target
             if tgt_obj_idx is not None and tgt_obj_idx in grp.index:
                 r = grp.loc[tgt_obj_idx]
-                ax.plot(r["med"], r["std"] * _YS, "*", ms=14, color="red",
-                        zorder=5, label=f"Target  σ={r['std']*_YS:.1f} {_YU}")
+                x = r["med"]
+                if not np.isfinite(x):
+                    # no reference magnitude (reference-less target): its median
+                    # calibrated magnitude, on the reference scale (APCORR410 added back)
+                    t = clean[clean["object_index"] == tgt_obj_idx]
+                    x = float(pd.to_numeric(t[_MAG_COL], errors="coerce").median())
+                    if _BRT == "MAG_4_REF" and "APCORR410" in t:
+                        x += float(pd.to_numeric(t["APCORR410"], errors="coerce").median()) / 1000.0
+                if np.isfinite(x):
+                    ax.plot(x, r["std"] * _YS, "*", ms=14, color="red",
+                            zorder=5, label=f"Target  σ={r['std']*_YS:.1f} {_YU}")
+                else:
+                    ax.text(0.97, 0.03, "target: no magnitude to place it", ha="right",
+                            va="bottom", transform=ax.transAxes, fontsize=8, color="red")
 
             ax.set_yscale("log")
             ax.set_ylim((0.3, 3000) if flux else (1, 1000))
@@ -306,7 +319,8 @@ def make_position(lc_path: Path, out_path: Path, tag: str = "",
         if _c in df.columns:
             df[_c] = pd.to_numeric(df[_c], errors="coerce")
     _BRT  = "MAG_4_REF" if "MAG_4_REF" in df.columns else _MAG_COL
-    clean = df[df["INFOBITS_DIF"] == 0].copy()
+    from ztfphot_flags import clean_rows
+    clean = clean_rows(df).copy()
 
     # per-source median brightness, for binning both panels by magnitude
     med = clean.groupby("object_index")[_BRT].median().rename("med")

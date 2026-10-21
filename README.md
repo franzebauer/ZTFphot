@@ -223,7 +223,7 @@ data/                       ← created in your working directory on first run
 | Photometry (ref-pos) | `phot` | Forced aperture photometry on the difference images at the reference positions (plus the target if absent from the reference catalog). Writes `PhotCatalogs/…_phot.fits` |
 | Photometry (sci-pos) | `phot_sci` | Forced aperture photometry at the per-epoch science-catalog (`*_sexcat.fits`) positions, tied to the reference within `--assoc-radius-sci`. Writes `PhotCatalogs_sci/…_phot.fits`. Runs with `--both` / `--scipos` |
 | Vet | `vet` | Flag variable/bad calibration stars by multi-epoch RMS |
-| Calibrate | `calibrate` | Linear ZP → 3σ clip → faint correction → 2D polynomial → flatfield |
+| Calibrate | `calibrate` | Linear ZP → 3σ clip → 2D polynomial → flatfield; 4 px aperture correction to 10 px |
 | Flatfield | `flatfield` | Rebuild spatial flatfield from post-polynomial residuals |
 | Recalibrate | `recalibrate` | Second calibration pass; identical to `calibrate` but runs after `flatfield` to apply the spatial correction. Because it shares output paths with `calibrate`, it **always force-overwrites** them (no `--force` needed) — otherwise the existing `_cal.fits` would be skipped and the flatfield never applied. |
 | Light curves | `lightcurves` | Assemble per-object parquet light curves from calibrated FITS |
@@ -277,7 +277,6 @@ Applied when `download` is in `--steps`. All optional; default is no cuts.
 | `--ff-bins N` | Number of spatial bins per axis for the flatfield grid (default: 16) |
 | `--ff-min-count N` | Minimum detections per flatfield bin to use (default: 5) |
 | `--ff-edge-split N` | Subdivide the outer flatfield bin on each axis into N thinner bins — elongated edge cells (full width along the edge, 1/N deep perpendicular) to resolve the steep vignetting gradient at the field boundary. Default 3; 1 = uniform grid |
-| `--faint-err-max E` | Max magnitude error for sources that define the per-bin faint correction (default 0.5). Near MAGLIM a tight cut keeps only high-SNR sources — a different population from the one the correction is applied to, which under-corrects those bins. Loosen (e.g. 1.0) so the correction is built from the population it corrects |
 | `--vet-catalog PATH` | Path to a vet catalog FITS file (overrides the default location in `Calibrated/`) |
 | `--target-match-radius ARCSEC` | Target association radius (default: 1.0 arcsec). One radius for two coupled operations: the target is **injected** as a new source if no catalog source lies within it, and the input RA/Dec is **matched** to a source in the calibrated catalog within it. Because a target with no nearby reference source is injected (at the input position) and then recovered by the match, this radius never causes a spurious "target not found". |
 | `--aper-bkg {box,local,mesh,none}` | Aperture-photometry background: `box` (default) = 3σ-clipped mean in a square annulus (1.58×SEEING to +35 px) computed with integral images; `local` = clipped median in the equivalent circular annulus (same precision, ~2.5× slower photometry); `mesh` = Background2D level (`--aper-bkg-mesh`, default 64 px; degrades i band — fringing); `none` |
@@ -310,15 +309,14 @@ With `--both` and `--purge-batch`, sci-pos steps run within each batch before th
 
 ## Calibration sequence
 
-Within `calibrate`, each epoch is corrected in five stages:
+Within `calibrate`, each epoch is corrected in four stages:
 
 1. **Linear ZP fit** — per-epoch magnitude offset + slope fit against calibrators (14–19 mag, CLASS_STAR ≥ 0.7, FLAGS=0, err < 0.3 mag)
 2. **3σ iterative clip** — outlier calibrators removed, fit repeated
 3. **2D polynomial** — low-order spatial polynomial fitted to calibrator residuals and applied to all sources
 4. **Spatial flatfield** — stacked median residual map applied if a saved flatfield exists on disk. The grid spans the full source range (ref-pos positions are exact, so no percentile clipping) with **elongated edge cells** (`--ff-edge-split`, outer bins subdivided perpendicular to the edge) to resolve the steep vignetting gradient at the boundary. Query positions are clamped to the grid-centre range, so the outer half-cell receives the nearest cell's correction instead of zero.
-5. **Faint correction** — smoothed empirical offset for faint sources, applied **last** (on the residuals surviving all spatial corrections). The all-source residual is binned in 0.25 mag steps over 18.5–22 with a 3σ-clipped median per bin. The correction curve is 0 at 18.5 mag, rises linearly (taper) to the empirical profile starting at the 19.0–19.25 bin, follows the bin medians to the last bin, and is held flat out to 24 mag; the whole curve is then Gaussian-smoothed at σ = 0.2 mag. Sources below 18.5 mag (the 14–19 mag calibrators, and hence the poly/flatfield fits built from them) are left untouched.
 
-> The faint correction runs after the flatfield so it removes the magnitude-dependent offset that remains in faint sources *after* the spatial corrections, rather than feeding it into the poly/flatfield fits. The spatial fits are built from bright calibrators the faint ramp barely touches.
+Finally the primary 4 px magnitude and flux are aperture-corrected to 10 px (`APCORR410`, measured per epoch on the reference calibrators).
 
 ---
 
@@ -465,7 +463,6 @@ Every `run_pipeline` invocation is appended to `<base-dir>/Epochs/ztfphot_runs.j
 | `CALIB_N` | Linear fit intercept (mag) |
 | `CALIB_M` | Linear fit slope |
 | `CALIB_ZP` | ZP correction evaluated at mag 17 (mag) |
-| `NC_FC_00–06` | Per-bin faint correction at mag 18.75–21.75 (mmag; −999 if empty bin) |
 | `TGT_MRAW` | Raw instrumental mag of target (mmag; −999 if not detected) |
 | `TGT_DCLIN` | Linear ZP correction applied to target (mmag) |
 | `TGT_DCPOL` | 2D polynomial correction applied to target (mmag) |

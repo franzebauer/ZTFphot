@@ -9,7 +9,7 @@ Steps (run in order, or select with --steps):
     phot_sci     — forced aperture photometry at the epoch's science-catalog positions
                    (runs with --both / --scipos)
     vet          — flag variable/bad calibration stars by multi-epoch RMS
-    calibrate    — linear ZP → 3σ clip → faint correction → polynomial → flatfield
+    calibrate    — linear ZP → 3σ clip → 2D polynomial → flatfield
     flatfield    — rebuild spatial flatfield from post-polynomial residuals
     lightcurves  — assemble per-object light curves from calibrated FITS
     merge        — cross-calibrate and merge multiple quadrants per band
@@ -379,7 +379,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
     # Load epochs from cache if not already in memory (e.g. lookup not in steps)
     if epochs is None and args.ra is not None and args.dec is not None:
         import pandas as pd
-        bands = args.bands or ["zg", "zr", "zi"]
+        bands = args.bands or ["g", "i", "r"]          # same cache name as main()
         band_str   = "-".join(sorted(bands))
         cache_path = (base_dir / "Epochs"
                       / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{band_str}.epochs.parquet")
@@ -683,11 +683,6 @@ def main() -> None:
     p.add_argument("--ff-edge-split",        type=int,   default=3,
                    help="Subdivide the outer flatfield bin on each axis into this "
                         "many thinner bins (elongated edge cells; 1 = uniform grid)")
-    p.add_argument("--faint-err-max",        type=float, default=0.5,
-                   help="Max magnitude error for sources defining the faint "
-                        "correction (default 0.5). Loosen (e.g. 1.0) so the "
-                        "correction is built from the same population it corrects, "
-                        "improving faint bins near MAGLIM")
     p.add_argument("--target-match-radius",  type=float, default=1.0, metavar="ARCSEC",
                    help="Target association radius (arcsec, default 1.0): the target is "
                         "injected as a new source if no catalog source lies within this "
@@ -1030,7 +1025,7 @@ def main() -> None:
                                vet_catalog=args.vet_catalog, poly_degree=args.poly_degree,
                                flatfield=None, target_ra=args.ra, target_dec=args.dec,
                                target_match_radius=args.target_match_radius,
-                               save_residuals=True, faint_err_max=args.faint_err_max,
+                               save_residuals=True,
                                suffix=suffix)
         if "vet" in steps:
             # vetting reads the ref-pos light curves; a sci-only run vets from its sci
@@ -1048,9 +1043,11 @@ def main() -> None:
                     if (d / "lightcurves_sci.parquet").exists() and not (d / "lightcurves.parquet").exists():
                         _sh.copy2(d / "lightcurves_sci.parquet", d / "lightcurves.parquet")
                         seeded.append(d / "lightcurves.parquet")
-            step_vet(base_dir, quadrants)
-            for f in seeded:
-                f.unlink(missing_ok=True)
+            try:
+                step_vet(base_dir, quadrants)
+            finally:                                # never leave a sci-pos copy under the ref name
+                for f in seeded:
+                    f.unlink(missing_ok=True)
         logger.info("─── calibration pass 2 (flatfield + vetting) ───")
     elif "vet" in steps:
         step_vet(base_dir, quadrants)
@@ -1090,7 +1087,7 @@ def main() -> None:
                                flatfield=_ff_map.get(key),
                                target_ra=args.ra, target_dec=args.dec,
                                target_match_radius=args.target_match_radius,
-                               save_residuals=True, faint_err_max=args.faint_err_max,
+                               save_residuals=True,
                                suffix=suffix)
 
         if "lightcurves" in steps:

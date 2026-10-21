@@ -85,7 +85,7 @@ def lookup_target(
     cache_path = _cache_path(ra, dec, bands, Path(cache_dir))
 
     if not force_refresh:
-        epochs = _load_from_cache(cache_path)
+        epochs = _load_from_cache(cache_path, search_radius_deg)
         if epochs is not None:
             logger.info(f"Loaded {len(epochs)} epochs from cache")
             if plot_out:
@@ -170,7 +170,7 @@ def lookup_target(
     n_quads = meta.groupby(["field", "ccdid", "qid"]).ngroups
     logger.info(f"Found {len(meta)} epochs across {n_quads} quadrant(s)")
 
-    _save_to_cache(meta, cache_path)
+    _save_to_cache(meta, cache_path, search_radius_deg)
 
     if plot_out:
         plot_coverage(meta, out_path=plot_out,
@@ -407,16 +407,27 @@ def _cache_path(ra: float, dec: float, bands: list[str], cache_dir: Path) -> Pat
     return cache_dir / f"lookup_{ra:.5f}_{dec:.5f}_{band_str}.epochs.parquet"
 
 
-def _load_from_cache(path: Path) -> Optional[pd.DataFrame]:
+def _load_from_cache(path: Path, radius: float) -> Optional[pd.DataFrame]:
+    """Cached epochs, or None if absent or queried with another search radius."""
     if path.exists():
+        import pyarrow.parquet as pq
+        r = (pq.read_schema(path).metadata or {}).get(b"search_radius_deg")
+        if r is not None and abs(float(r) - radius) > 1e-12:
+            logger.info(f"{path.name} was queried with radius {float(r):.4f} deg — re-querying")
+            return None
         logger.info(f"Loading cached epochs from {path.name}")
         return pd.read_parquet(path)
     return None
 
 
-def _save_to_cache(epochs: pd.DataFrame, path: Path) -> None:
+def _save_to_cache(epochs: pd.DataFrame, path: Path, radius: float) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
     path.parent.mkdir(parents=True, exist_ok=True)
-    epochs.to_parquet(path, index=False)
+    t = pa.Table.from_pandas(epochs, preserve_index=False)
+    t = t.replace_schema_metadata({**(t.schema.metadata or {}),
+                                   b"search_radius_deg": str(radius).encode()})
+    pq.write_table(t, path)
     logger.info(f"Cached epochs → {path}")
 
 

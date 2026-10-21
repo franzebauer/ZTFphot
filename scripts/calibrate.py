@@ -3,7 +3,7 @@ calibrate.py
 ------------
 Pipeline steps for photometric calibration and flatfield construction:
   step_vet           — flag multi-epoch variable calibration stars
-  step_calibrate     — per-epoch linear ZP + faint + poly + flatfield
+  step_calibrate     — per-epoch linear ZP + 3σ clip + 2D poly + flatfield
   step_build_flatfield — stack per-epoch residuals into a spatial flatfield
 """
 
@@ -64,7 +64,9 @@ def step_vet(base_dir: Path, quadrants: list[dict]) -> int:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                logger.warning(f"vet failed for {cat_name}: {result.stderr.strip()[-200:]}")
+                why = (result.stderr.strip() or result.stdout.strip()).splitlines()
+                logger.warning(f"vet skipped for {cat_name}: {why[-1][-200:] if why else 'no message'}"
+                               " — calibrating with all eligible stars")
                 continue
             logger.info(f"vet: {cat_name}")
             n_done += 1
@@ -112,12 +114,11 @@ def step_calibrate(
     target_dec: Optional[float] = None,
     target_match_radius: float = 1.0,
     save_residuals: bool = False,
-    faint_err_max: float = 0.5,
     suffix: str = "",
 ) -> int:
     """
-    Apply per-epoch photometric calibration (linear ZP → 3σ clip → faint
-    correction → 2D polynomial → flatfield) to every per-epoch photometry catalog.
+    Apply per-epoch photometric calibration (linear ZP → 3σ clip → 2D polynomial →
+    flatfield) to every per-epoch photometry catalog.
 
     Reads from  PhotCatalogs{suffix}/{field}/{fc}/{ccd}/{qid}/*_phot.fits
     Writes to   Calibrated{suffix}/{field}/{fc}/{ccd}/{qid}/*_cal.fits
@@ -173,7 +174,6 @@ def step_calibrate(
                 target_ra=target_ra, target_dec=target_dec,
                 target_match_radius=target_match_radius,
                 residuals_out=str(resid_out) if resid_out else None,
-                faint_err_max=faint_err_max,
             )
             tasks.append((ref_csv, ldac, out_cal, "SIM", vet_cat, extra_kw))
 
@@ -295,7 +295,7 @@ def step_build_flatfield(
             all_ra, all_dec, all_dm, statistic='count', bins=[ra_edges, dec_edges])
 
         global_med  = float(np.nanmedian(stat[nobs >= min_count]))
-        stat_filled = np.where(nobs >= min_count, stat - global_med, -global_med)
+        stat_filled = np.where(nobs >= min_count, stat - global_med, 0.0)   # empty cell: no correction
 
         vals = stat[nobs >= min_count]
         rms  = float(np.std(vals)) * 1000 if len(vals) > 0 else np.nan

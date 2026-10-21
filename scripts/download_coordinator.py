@@ -374,25 +374,30 @@ def _is_fits(path: Path) -> bool:
 
 def funpack_file(path: Path) -> bool:
     """
-    Decompress a .fits.fz file in-place using funpack.
-    Returns True on success, False if funpack is not available or fails.
+    Decompress a .fits.fz file with funpack, into a temporary file that is renamed to
+    the .fits on success (a failed or interrupted funpack leaves no partial .fits);
+    the .fz is then deleted. Returns True on success, False if funpack is not
+    available or fails (the .fz is kept and unpacked by a later run).
     """
     if not str(path).endswith(".fits.fz"):
         return True
 
     unpacked = path.with_name(path.name.replace(".fits.fz", ".fits"))
-    if unpacked.exists():
+    if _is_fits(unpacked):
         return True
+    tmp = unpacked.with_name(unpacked.name + ".part")
+    tmp.unlink(missing_ok=True)
 
     try:
-        result = subprocess.run(
-            ["funpack", "-D", str(path)],   # -D deletes the .fz after unpacking
-            capture_output=True, timeout=120
-        )
-        if result.returncode == 0:
+        result = subprocess.run(["funpack", "-O", str(tmp), str(path)],
+                                capture_output=True, timeout=120)
+        if result.returncode == 0 and _is_fits(tmp):
+            tmp.rename(unpacked)
+            path.unlink(missing_ok=True)
             logger.debug(f"Funpacked: {path.name}")
             return True
         else:
+            tmp.unlink(missing_ok=True)
             logger.warning(f"funpack failed on {path.name}: {result.stderr.decode()}")
             return False
     except FileNotFoundError:
@@ -400,6 +405,7 @@ def funpack_file(path: Path) -> bool:
                        "Install with: conda install -c conda-forge cfitsio")
         return False
     except subprocess.TimeoutExpired:
+        tmp.unlink(missing_ok=True)
         logger.warning(f"funpack timed out on {path.name}")
         return False
 
@@ -463,14 +469,14 @@ def filter_epochs(
     # --- Seeing ---
     n_seeing = 0
     if max_seeing is not None:
-        mask_see = df["seeing"].notna() & (df["seeing"] > max_seeing)
+        mask_see = df["seeing"].isna() | (df["seeing"] > max_seeing)   # unknown fails a requested cut
         n_seeing = mask_see.sum()
         df = df[~mask_see]
 
     # --- Limiting magnitude ---
     n_maglim = 0
     if min_maglim is not None:
-        mask_mag = df["maglimit"].notna() & (df["maglimit"] < min_maglim)
+        mask_mag = df["maglimit"].isna() | (df["maglimit"] < min_maglim)
         n_maglim = mask_mag.sum()
         df = df[~mask_mag]
 
@@ -735,6 +741,8 @@ def download_all(
 
             if status == "skipped":
                 n_skipped += 1
+                if funpack and dest.exists():       # a .fz left by an earlier failed funpack
+                    funpack_file(dest)
 
             elif status == "ok":
                 n_downloaded += 1

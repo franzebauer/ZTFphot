@@ -3,7 +3,7 @@ plot_rms.py
 -------------------
 Fig 2 — Calibration RMS improvement & corrections (4 panels).
 Top row (summary): calibrator RMS boxplot per stage | linear ZP correction vs
-seeing | per-epoch faint correction curve vs source mag.
+seeing.
 Bottom row (full-sample residual vs calibrated magnitude, per-column-normalised
 density):
   bot-left  — BEFORE calibration (dm_all_pre, per-epoch bulk offset removed)
@@ -17,7 +17,6 @@ mag_all + dm_all_post from *_resid.npz in FlatfieldResiduals/.
 Header keywords used:
     NC_RMS0 … NC_RMS4, NC_RMSFC  — calibrator RMS at each stage (mmag)
     CALIB_N, CALIB_M              — linear fit intercept and slope
-    NC_FC_00 … NC_FC_06           — faint correction per mag bin (mmag)
     SEEING, MAGLIM
 """
 
@@ -42,12 +41,10 @@ _SENTINEL = -999.0
 def _load_epoch_headers(cal_dir: Path) -> "pd.DataFrame":
     import pandas as pd
     from astropy.io import fits
-    keys = ["OBSMJD", "SEEING", "MAGLIM", "num_stars", "NC_N",
+    keys = ["OBSMJD", "SEEING", "MAGLIM", "num_stars",
             "NC_RMS0", "NC_RMS1", "NC_RMS2", "NC_RMSFC", "NC_RMS3", "NC_RMS4",
             "CALIB_N", "CALIB_M", "CALIB_ZP", "APCORR46", "APCORR410",
-            "TGT_MRAW", "TGT_DCLIN", "TGT_DCPOL", "TGT_DCFF",
-            "NC_FC_00", "NC_FC_01", "NC_FC_02", "NC_FC_03",
-            "NC_FC_04", "NC_FC_05", "NC_FC_06"]
+            "TGT_MRAW", "TGT_DCLIN", "TGT_DCPOL", "TGT_DCFF"]
     rows = []
     for p in sorted(cal_dir.glob("*_cal.fits")):
         try:
@@ -56,8 +53,8 @@ def _load_epoch_headers(cal_dir: Path) -> "pd.DataFrame":
             row = {k: float(hdr.get(k, np.nan)) for k in keys}
             row["fname"] = p.name
             rows.append(row)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"  skipping unreadable {p.name}: {exc}")
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows).replace(_SENTINEL, np.nan)
@@ -134,7 +131,8 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) 
         for p in sorted(Path(resid_dir).glob("*_resid.npz")):
             try:
                 d = np.load(str(p))
-            except Exception:
+            except Exception as exc:
+                logger.warning(f"  skipping unreadable {p.name}: {exc}")
                 continue
             if key not in d or ("qmag_all" not in d and "mag_all" not in d):
                 continue
@@ -143,14 +141,16 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) 
             else:
                 m = np.asarray(d["mag_all"], float)
                 _used_ref = False
-            r = (_mmag_to_pct(np.asarray(d[key], float) * 1000.0) if flux
-                 else np.asarray(d[key], float) * 1000.0)  # mag → % flux or mmag
+            r = np.asarray(d[key], float) * 1000.0             # mmag
             if is_pre:
                 # remove the per-epoch bulk offset (aperture corr + ZP shift), as in
-                # the spatial_rms plot, so the magnitude structure isn't smeared out
+                # the spatial_rms plot, so the magnitude structure isn't smeared out;
+                # in magnitudes, before any conversion, so mag and flux rows agree
                 fin = np.isfinite(r)
                 if fin.any():
                     r = r - float(np.median(r[fin]))
+            if flux:
+                r = _mmag_to_pct(r)                            # mmag → % flux
             mags.append(m)
             res.append(r)
     if not mags:
@@ -222,8 +222,6 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
         return
     u = "mmag"
 
-    # NC_RMSFC ("After faint corr.") dropped — Step 5 is disabled, so that stage is
-    # identical to the preceding one and only added a flat segment to the trend.
     stages = ["NC_RMS0", "NC_RMS1", "NC_RMS2", "NC_RMS3", "NC_RMS4"]
     labels = ["Before\ncal", "After\nlinear", "After\n3σ clip",
               "After\n2D poly", "After\nflatfield"]
@@ -305,9 +303,6 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     # added back in, expressed in mmag.
     ax.set_ylabel(f"Linear ZP correction, evaluated at mag 17 ({u})")
     ax.set_title("ZP correction vs seeing\n(coloured by limiting magnitude)")
-
-    # The per-epoch faint-correction curve panel (NC_FC_00…06 vs magnitude) was removed
-    # here: the Step 5 faint correction is disabled, so those headers are all -999.
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130, bbox_inches="tight")

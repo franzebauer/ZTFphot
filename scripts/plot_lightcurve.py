@@ -40,10 +40,16 @@ _MERR_COL = "MERR_4_TOT_AB"
 _COMP_COLORS = ["C1", "C2", "C3", "C4", "C5"]
 
 
-def _find_target(clean: pd.DataFrame, tgt_coord: SkyCoord):
-    """Return (object_index, median_mag, sep_arcsec) of closest source to tgt_coord.
+TARGET_RADIUS = 1.0      # arcsec, the pipeline's target association radius
 
-    sep_arcsec is always the nearest-source distance regardless of the 3\" threshold,
+
+def _find_target(clean: pd.DataFrame, tgt_coord: SkyCoord):
+    """Return (object_index, median_mag, sep_arcsec) of closest source to tgt_coord,
+    searched over all sources of `clean` within TARGET_RADIUS. median_mag is the median
+    calibrated magnitude, or for a target without one (all epochs with total flux <= 0)
+    the magnitude of its median positive flux, else NaN.
+
+    sep_arcsec is always the nearest-source distance regardless of the threshold,
     so callers can report it even when the target is not found.
     """
     if "ALPHAWIN_REF" not in clean.columns:
@@ -55,12 +61,15 @@ def _find_target(clean: pd.DataFrame, tgt_coord: SkyCoord):
                     dec=srcs["DELTAWIN_REF"].values * u.deg)
     idx, sep, _ = tgt_coord.match_to_catalog_sky(cats)
     sep_arcsec = float(sep[0].arcsec)
-    if sep_arcsec > 3.0:
+    if sep_arcsec > TARGET_RADIUS:
         return None, np.nan, sep_arcsec
     tgt_obj  = srcs.index[int(idx)]
-    tgt_mags = pd.to_numeric(
-        clean.loc[clean["object_index"] == tgt_obj, _MAG_COL], errors="coerce")
-    return tgt_obj, float(tgt_mags.median()), sep_arcsec
+    rows = clean.loc[clean["object_index"] == tgt_obj]
+    med = float(pd.to_numeric(rows[_MAG_COL], errors="coerce").median())
+    if not np.isfinite(med) and _FLUX_COL in rows:
+        f = float(pd.to_numeric(rows[_FLUX_COL], errors="coerce").median())
+        med = 23.9 - 2.5 * np.log10(f) if f > 0 else np.nan
+    return tgt_obj, med, sep_arcsec
 
 
 def _make_no_target_plot(out_path: Path, tag: str,
@@ -107,7 +116,7 @@ def _load_vet_good_indices(vet_catalog: Path, clean: pd.DataFrame) -> set:
                             dec=srcs["DELTAWIN_REF"].values * u.deg)
         cat_good = SkyCoord(ra=good_ra[ok] * u.deg, dec=good_dec[ok] * u.deg)
         idx, sep, _ = cat_good.match_to_catalog_sky(cat_src)
-        matched = sep.arcsec < 3.0
+        matched = sep.arcsec < TARGET_RADIUS     # same reference positions: exact match
         return set(srcs.index[idx[matched]].tolist())
     except Exception as e:
         logger.warning(f"Could not load vet catalog {vet_catalog}: {e}")
@@ -214,12 +223,13 @@ def make_lightcurves(lc_path: Path, out_path: Path,
         return
 
     df[_MAG_COL] = pd.to_numeric(df[_MAG_COL], errors="coerce")
-    clean = df[df["INFOBITS_DIF"] == 0].copy()
+    from ztfphot_flags import clean_rows
+    clean = clean_rows(df).copy()
 
     tgt_coord = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
-    tgt_obj, tgt_med, sep_arcsec = _find_target(clean, tgt_coord)
+    tgt_obj, tgt_med, sep_arcsec = _find_target(df, tgt_coord)   # all rows: found even if every epoch is flagged
     if tgt_obj is None:
-        logger.warning(f"  target not found within 3\" in {tag} (nearest: {sep_arcsec:.1f}\")")
+        logger.warning(f"  target not found within {TARGET_RADIUS:.0f}\" in {tag} (nearest: {sep_arcsec:.1f}\")")
         _make_no_target_plot(out_path, tag, target_ra, target_dec, sep_arcsec)
         return
 
@@ -235,6 +245,8 @@ def make_lightcurves(lc_path: Path, out_path: Path,
     tgt_rows = tgt_rows[tgt_rows[_MAG_COL].between(10, 26)]
     _n_cut  = _n_tot - _n_nan - int(len(tgt_rows))
     if tgt_rows.empty:
+        logger.info(f"  {tag}: no target epoch with a magnitude (all {_n_tot} have total flux <= 0 "
+                    f"or are out of range) — magnitude light curve skipped; see the flux plot")
         return
 
     vet_good  = _load_vet_good_indices(vet_catalog, clean)
@@ -401,12 +413,13 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
         return
 
     df[_FLUX_COL] = pd.to_numeric(df[_FLUX_COL], errors="coerce")
-    clean = df[df["INFOBITS_DIF"] == 0].copy()
+    from ztfphot_flags import clean_rows
+    clean = clean_rows(df).copy()
 
     tgt_coord = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
-    tgt_obj, tgt_med, sep_arcsec = _find_target(clean, tgt_coord)
+    tgt_obj, tgt_med, sep_arcsec = _find_target(df, tgt_coord)   # all rows: found even if every epoch is flagged
     if tgt_obj is None:
-        logger.warning(f"  target not found within 3\" in {tag} (nearest: {sep_arcsec:.1f}\") [flux]")
+        logger.warning(f"  target not found within {TARGET_RADIUS:.0f}\" in {tag} (nearest: {sep_arcsec:.1f}\") [flux]")
         _make_no_target_plot(out_path, tag, target_ra, target_dec, sep_arcsec)
         return
 

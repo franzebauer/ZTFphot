@@ -35,7 +35,9 @@ import pyarrow.parquet as _pq
 _pf = _pq.read_table(sys.argv[1])
 _meta = {k.decode(): v.decode() for k, v in (_pf.schema.metadata or {}).items()}
 df = _pf.to_pandas()
-df = df.dropna(subset=['MAG_4_TOT_AB', 'OBSMJD']).copy()
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+from ztfphot_flags import clean_rows
+df = clean_rows(df).dropna(subset=['MAG_4_TOT_AB', 'OBSMJD']).copy()
 
 # For single-quadrant parquets the origin columns live in file metadata, not data.
 for _col, _key in [('field', 'field'), ('filtercode', 'filtercode'),
@@ -126,8 +128,10 @@ ax_ov.grid(True, color=GRID, lw=0.5)
 
 # ── MAGLIM colorbar ───────────────────────────────────────────────────────────
 
-ml_lo = float(df['MAGLIM'].quantile(0.02))
-ml_hi = float(df['MAGLIM'].quantile(0.98))
+if df.empty:
+    sys.exit("no clean epochs with a 4 px magnitude in this file")
+ml_lo = float(df['MAGLIM'].quantile(0.02)) if df['MAGLIM'].notna().any() else 15.0
+ml_hi = float(df['MAGLIM'].quantile(0.98)) if df['MAGLIM'].notna().any() else 22.0
 ml_norm = Normalize(vmin=ml_lo, vmax=ml_hi)
 ml_cmap = cm.plasma
 
@@ -298,6 +302,8 @@ sml_slider.on_changed(on_slider)
 ssee_slider.on_changed(on_slider)
 
 # Start on highest-RMS object
+if len(ranked) == 0:
+    sys.exit("no object with enough epochs to show")
 update(ranked[0])
 
 plt.show()

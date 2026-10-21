@@ -467,8 +467,9 @@ def _filter_in_footprint(sources, image_path):
     if idx.size == 0:
         return []
 
-    def _in_frame(x, y):
-        return np.isfinite(x) and np.isfinite(y) and 0 <= x < nx and 0 <= y < ny
+    def _in_frame(x, y, margin=3):     # px from the edge, as the reference-footprint gate
+        return (np.isfinite(x) and np.isfinite(y)
+                and margin <= x < nx - margin and margin <= y < ny - margin)
 
     kept = []
     try:

@@ -31,8 +31,8 @@ def _catalog_zp_ok(csv: Path, refimg: Path | None = None) -> bool:
             if hzp is not None and abs(float(zp.iloc[0]) - float(hzp)) > 1e-6:
                 return False
         return True
-    except Exception:
-        return True
+    except Exception:                               # unreadable catalog: rebuild it
+        return False
 
 
 def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False) -> int:
@@ -61,8 +61,7 @@ def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False
                            f"image's MAGZP — rebuilding")
         logger.info(f"Building reference catalog for {cat_name}")
         try:
-            make_catalog(save_path=str(cat_dir), refcats=str(q["ref_dir"]))
-            n_done += 1
+            n_done += make_catalog(save_path=str(cat_dir), refcats=str(q["ref_dir"]))
         except Exception as exc:
             logger.error(f"make_catalog failed for {cat_name}: {exc}")
 
