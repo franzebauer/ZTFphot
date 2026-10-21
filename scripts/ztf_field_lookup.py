@@ -109,8 +109,10 @@ def lookup_target(
         zquery = ztfquery.ZTFQuery()
         zquery.load_metadata(radec=[ra, dec], size=search_radius_deg)
         meta = zquery.metatable
-        if meta is not None and not meta.empty and not any(
-                str(c).strip().startswith(("<!","<?")) for c in meta.columns):
+        # An HTML/XML page parsed as a table is an IRSA error (retried); a well-formed
+        # empty table is returned as is (no coverage, or an IRSA-side problem)
+        if meta is not None and not any(
+                str(c).strip().startswith(("<!", "<?")) for c in meta.columns):
             break
         if _attempt < _max_attempts:
             _wait = 30 * _attempt
@@ -125,8 +127,9 @@ def lookup_target(
             "python -c \"from ztfquery import io; io.set_account('irsa')\""
         )
 
-    if meta is None or meta.empty:
-        logger.warning("ztfquery returned no metadata. Check credentials and coordinates.")
+    if meta.empty:
+        logger.warning("IRSA returned no epochs for this position — no coverage or an "
+                       "IRSA-side problem (not cached; a later run queries again)")
         return pd.DataFrame()
 
     logger.debug(f"metatable columns: {list(meta.columns)}")

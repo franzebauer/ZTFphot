@@ -555,11 +555,17 @@ def augment_sexcat(
                         f"{Path(refsexcat_path).name}")
 
     # ---- Drop those already present in the reference catalog ----
-    to_inject = _filter_already_in_catalog(to_inject, orig_table, match_radius_arcsec)
+    # Only against the sources make_catalog keeps (FLAGS < 4): a target next to a
+    # saturated/truncated reference source is injected (it gets a light curve of its
+    # difference flux, flagged by the neighbour bit below), like the --ra/--dec target.
+    kept = orig_table[np.asarray(orig_table["FLAGS"]) < 4] if "FLAGS" in orig_table.colnames else orig_table
+    to_inject = _filter_already_in_catalog(to_inject, kept, match_radius_arcsec)
 
     if not to_inject:
+        if output_path.exists():                     # stale injections of an earlier run
+            output_path.unlink()
         logger.info("No sources to inject after footprint + cross-match — "
-                    "no augmented catalog written for this quadrant.")
+                    "no augmented catalog for this quadrant.")
         return refsexcat_path
 
     # ---- Reference positions, for the neighbour-blend flag ----
@@ -678,13 +684,14 @@ def augment_all_refsexcats(
         # Path: .../Reference/{field}/{filtercode}/ccd{ccdid}/q{qid}/ztf_*_refsexcat.fits
         parts = refcat.parts
         try:
-            q_idx   = next(i for i, p in enumerate(parts) if p.startswith("q"))
+            # last component q<digits> (an ancestor directory may also start with "q")
+            q_idx   = max(i for i, p in enumerate(parts) if p.startswith("q") and p[1:].isdigit())
             ccd_idx = q_idx - 1
             fc_idx  = ccd_idx - 1
             fld_idx = fc_idx - 1
             filtercode = parts[fc_idx]
             field_str  = parts[fld_idx]
-        except (StopIteration, IndexError):
+        except (ValueError, IndexError):
             logger.warning(f"Cannot parse path structure: {refcat} — skipping")
             continue
 

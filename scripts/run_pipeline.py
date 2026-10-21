@@ -224,16 +224,34 @@ def _inject_targets_into_quadrants(base_dir: Path, quadrants: list[dict],
         if not refcat.exists():
             continue
         diffs = sorted(q["sci_dir"].glob("*_scimrefdiffimg.fits"))
+        refimg = refcat.with_name(refcat.name.replace("_refsexcat.fits", "_refimg.fits"))
         augment_sexcat(
             refsexcat_path=refcat,
             transients=transients,
-            diff_img_path=(diffs[0] if diffs else None),
+            # footprint from a difference image, else the reference image (same WCS
+            # footprint; the only image on disk before purge-batch downloads epochs)
+            diff_img_path=(diffs[0] if diffs else refimg if refimg.exists() else None),
             output_path=refcat.with_name(refcat.stem + "_augmented.fits"),
             match_radius_arcsec=match_radius,
             footprint_filter=True,
         )
         n_quad += 1
     logger.info(f"inject-targets: augmented {n_quad} quadrant catalog(s)")
+
+
+def _injection_list(args, base_dir: Path) -> list:
+    """Sources to inject (--grabTNSobjs, --inject-targets); empty if neither is given."""
+    _transients = []
+    if args.grabTNSobjs:
+        from transient_catalog import load_tns_catalog
+        _transients += load_tns_catalog(
+            args.tns_cred_file, args.tns_key_file,
+            args.tns_cache_dir or (base_dir / "TNS"),
+            force_download=args.tns_force_download)
+    if args.inject_targets:
+        from transient_catalog import load_user_catalog
+        _transients += load_user_catalog(args.inject_targets)
+    return _transients
 
 
 def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
@@ -352,6 +370,11 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
 
     N = args.purge_batch
     steps = set(args.steps)
+    if not steps & {"phot", "phot_sci"}:
+        logger.info("purge-batch without a photometry step: no epoch images are downloaded "
+                    "(they would be deleted unused); only the reference catalogs are built")
+    _transients = (_injection_list(args, base_dir)
+                   if "catalog" in steps and (args.inject_targets or args.grabTNSobjs) else [])
 
     # Load epochs from cache if not already in memory (e.g. lookup not in steps)
     if epochs is None and args.ra is not None and args.dec is not None:
@@ -431,9 +454,18 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
         logger.info(f"─── purge-batch {tag}: {len(q_epochs)} epochs → "
                     f"{n_batches} batches of {N} ───")
 
+        # injection needs only the reference products, so it precedes the catalog step;
+        # it changes the source list, so the reference CSV is then rebuilt
+        _injected = bool(_transients)
+        if _injected:
+            _inject_targets_into_quadrants(base_dir, [q], _transients, args.target_match_radius)
         cat_csv = (base_dir / "Catalogs" /
                    f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(REFERENCE)[OBJECTS].csv")
-        catalog_done = cat_csv.exists() and not args.force
+        catalog_done = cat_csv.exists() and not (args.force or _injected)
+        if not steps & {"phot", "phot_sci"}:
+            if "catalog" in steps:
+                step_make_catalog(base_dir, [q], force=args.force or _injected)
+            continue
 
         def _cat_path(ffd, suffix):
             stem = f"ztf_{ffd}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"
@@ -486,7 +518,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                         failed.add(m.group(1))
 
             if "catalog" in steps and not catalog_done:
-                step_make_catalog(base_dir, [q], force=args.force)
+                step_make_catalog(base_dir, [q], force=args.force or _injected)
                 catalog_done = True
 
             _run_phot(steps, step_phot, step_phot_sci, base_dir, [q], args,
@@ -798,6 +830,13 @@ def main() -> None:
                 min_maglim=args.min_maglim,
                 max_seeing=args.max_seeing,
             )
+            if epochs is not None and epochs.empty:
+                # IRSA answered with no epochs: no coverage, or an IRSA-side problem. Not
+                # cached, so a later run queries again (README: re-running IRSA_EMPTY).
+                (base_dir / "target_status.csv").write_text(f"{args.ra},{args.dec},IRSA_EMPTY\n")
+                logger.warning("lookup: IRSA returned no epochs for this position — "
+                               "target status IRSA_EMPTY")
+                return
 
     # ── Step: download ────────────────────────────────────────────────────────
     if "download" in steps and not args.purge_batch:
@@ -921,8 +960,13 @@ def main() -> None:
         for _, _row in epochs[["field", "filtercode", "ccdid", "qid"]].drop_duplicates().iterrows():
             _key = (int(_row["field"]), str(_row["filtercode"]),
                     int(_row["ccdid"]),  int(_row["qid"]))
+            _f, _fc, _ccd, _qid = _key
+            if ((args.field is not None and _f != args.field)
+                    or (args.ccdid is not None and _ccd != args.ccdid)
+                    or (args.qid is not None and _qid != args.qid)
+                    or (args.bands and _fc[1:] not in args.bands)):
+                continue
             if _key not in _on_disk:
-                _f, _fc, _ccd, _qid = _key
                 _added.append({
                     "field": _f, "filtercode": _fc, "ccdid": _ccd, "qid": _qid,
                     "ref_dir": (base_dir / "Reference"
@@ -966,21 +1010,7 @@ def main() -> None:
         if "catalog"    in steps:
             _injected = False
             if args.inject_targets or args.grabTNSobjs:
-                import sys as _sys
-                _sc = Path(__file__).parent
-                if str(_sc) not in _sys.path:
-                    _sys.path.insert(0, str(_sc))
-                _transients = []
-                if args.grabTNSobjs:
-                    from transient_catalog import load_tns_catalog
-                    _transients += load_tns_catalog(
-                        args.tns_cred_file, args.tns_key_file,
-                        args.tns_cache_dir or (base_dir / "TNS"),
-                        force_download=args.tns_force_download)
-                if args.inject_targets:
-                    from transient_catalog import load_user_catalog
-                    _transients += load_user_catalog(args.inject_targets)
-                _inject_targets_into_quadrants(base_dir, quadrants, _transients,
+                _inject_targets_into_quadrants(base_dir, quadrants, _injection_list(args, base_dir),
                                                args.target_match_radius)
                 _injected = True
             # injecting changes the source list, so the reference CSV must be rebuilt
@@ -1066,7 +1096,7 @@ def main() -> None:
         if "lightcurves" in steps:
             # after a two-pass calibration the pass-1 light curves (written for vetting)
             # must be replaced by the final, flatfield-applied ones
-            step_lightcurves(base_dir, quadrants, force=args.force or two_pass,
+            step_lightcurves(base_dir, quadrants, force=args.force or two_pass or "recalibrate" in steps,
                              use_calibrated=("calibrate" in steps or "recalibrate" in steps),
                              suffix=suffix, target_ra=args.ra, target_dec=args.dec,
                              target_match_radius=args.target_match_radius,
@@ -1077,7 +1107,7 @@ def main() -> None:
                                      _latest_download_run(base_dir, args), default=str),
                              })
 
-        if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force or two_pass,
+        if "merge"      in steps: step_merge(base_dir, quadrants, force=args.force or two_pass or "recalibrate" in steps,
                                               target_ra=args.ra, target_dec=args.dec,
                                               suffix=suffix,
                                               mag_bin=args.merge_mag_bin,

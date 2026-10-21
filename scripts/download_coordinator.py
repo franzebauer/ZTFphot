@@ -321,12 +321,11 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
         "failed"      — retriable error (timeout, incomplete read, server error,
                         HTML error/maintenance page)
     """
-    if skip_if_exists and dest.exists() and dest.stat().st_size > 0:
+    if skip_if_exists and _is_fits(dest):
         return (url, "skipped", "exists")
     # A .fits.fz is deleted by funpack after unpacking: the .fits counts as present
     unpacked = dest.with_name(dest.name.replace(".fits.fz", ".fits"))
-    if (skip_if_exists and unpacked != dest and unpacked.exists()
-            and unpacked.stat().st_size > 0):
+    if skip_if_exists and unpacked != dest and _is_fits(unpacked):
         return (url, "skipped", "exists (unpacked)")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -351,6 +350,10 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
                 for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB chunks
                     f.write(chunk)
 
+        # Any other non-FITS body (error text, XML, truncated) is retriable, not cached
+        if not _is_fits(tmp):
+            tmp.unlink()
+            return (url, "failed", f"response is not a FITS file ({content_type or 'no Content-Type'})")
         tmp.rename(dest)
         return (url, "ok", f"downloaded ({dest.stat().st_size / 1e6:.1f} MB)")
 
@@ -358,6 +361,15 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
         if tmp.exists():
             tmp.unlink()
         return (url, "failed", str(exc))
+
+
+def _is_fits(path: Path) -> bool:
+    """A FITS file (plain or fpack-compressed): starts with the SIMPLE card."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(6) == b"SIMPLE"
+    except OSError:
+        return False
 
 
 def funpack_file(path: Path) -> bool:

@@ -666,11 +666,8 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
                 return "fail"
             out = _assemble(frames[s], new, refs, target, a.target_match_radius, old_epochs,
                             all_sources=a.all_sources or not catalog_changed)
-            out_dir = Path(a.outdir) if a.outdir else path.parent
-            out_dir.mkdir(parents=True, exist_ok=True)
-            # re-running on an updated file (--retry-deferred) refreshes it in place
-            stem = path.stem if path.stem.endswith(a.suffix) else f"{path.stem}{a.suffix}"
-            out_path = out_dir / f"{stem}.parquet"
+            out_path = _output_path(path, a)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
             new_meta[b"ztfphot_update"] = json.dumps({
                 "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "source": str(path), "cuts": cuts, "cuts_recorded": recorded,
@@ -690,6 +687,19 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
             logger.info(f"  (kept temp dir {base})")
         else:
             shutil.rmtree(base, ignore_errors=True)
+
+
+def _output_path(path: Path, a) -> Path:
+    """<stem><suffix>.parquet next to the input, or in --outdir; an input that is already
+    an output (stem ends with the suffix) is refreshed in place. Pipeline-tree inputs
+    (LightCurves/merged/{ra}_{dec}/{band}/lightcurves_merged.parquet) are named
+    {ra}_{dec}_{band}_merged in --outdir, so targets, bands and variants stay distinct."""
+    stem = path.stem
+    if a.outdir and stem.startswith("lightcurves_merged"):
+        stem = f"{path.parent.parent.name}_{path.parent.name}_merged" + stem[len("lightcurves_merged"):]
+    if not stem.endswith(a.suffix):
+        stem += a.suffix
+    return (Path(a.outdir) if a.outdir else path.parent) / f"{stem}.parquet"
 
 
 def _plan_directory(d: Path, a) -> list[list[Path]]:
@@ -721,8 +731,7 @@ def _plan_directory(d: Path, a) -> list[list[Path]]:
             groups.setdefault(gkey, []).append(chosen)
     out = []
     for gkey, members in groups.items():
-        outs = [(Path(a.outdir) if a.outdir else m.parent) / f"{m.stem}{a.suffix}.parquet"
-                for m in members]
+        outs = [_output_path(m, a) for m in members]
         done = all(o.exists() for o in outs)
         if a.from_updated and done:
             # refresh the existing outputs in place (they already hold every epoch)
