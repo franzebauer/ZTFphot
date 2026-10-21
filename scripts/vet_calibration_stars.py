@@ -20,9 +20,10 @@ Sources must pass all calibration eligibility criteria to be considered:
 Algorithm
 ---------
 1. Load lightcurves.parquet; compute per-source median and std of the bipolar
-   flux (FLUX_4_TOT_uJy, μJy) across clean epochs.
+   flux (FLUX_4_TOT_uJy, μJy) across clean epochs (INFOBITS_DIF == 0 and no
+   EDGE / MASKED bit in FLAGS).
 2. Restrict to calibration-eligible sources (above criteria).
-3. Match to reference catalog to get q_mag.
+3. Reference-catalog properties (q_mag, CLASS_STAR) by object_index.
 4. Fit locus: running median of σ_flux in 0.5-mag bins (robust against outliers).
 5. Flag sources with σ_flux > threshold × locus(q_mag).
 6. Write vet_calib_stars_{field}_{band}_c{ccd}_q{qid}.fits with IS_GOOD column.
@@ -41,8 +42,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from astropy.io import fits
-from astropy.coordinates import SkyCoord
-import astropy.units as u
 
 
 def _flux_to_mag(flux):
@@ -88,7 +87,12 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
 
     # ── Load and aggregate lightcurves ────────────────────────────────────────
     df = pd.read_parquet(parquet_path)
-    clean = df[df['INFOBITS_DIF'] == 0].copy()
+    # Clean epochs: no ZTF image-quality bits (INFOBITS_DIF) and an uncorrupted 4 px
+    # aperture for this source (FLAGS: no EDGE / MASKED, the ztfphot_flags default)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from ztfphot_flags import flags_of, F
+    clean = df[(df['INFOBITS_DIF'] == 0)
+               & ((flags_of(df) & F.DEFAULT_REJECT) == 0).to_numpy()].copy()
     # Vet on the UNBIASED bipolar flux scatter (μJy), not the censored magnitude std:
     # keeping every clean epoch — including the fainter-than-reference (negative-flux)
     # ones the magnitude drops to NaN — so a source that dips faint is not hidden.
@@ -106,32 +110,25 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
 
     # Reference-image neighbour/blend flag: FLAGS bit REF_BLEND (older parquets:
     # FLAG_SE_REF; flags_of handles both)
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from ztfphot_flags import flags_of, F
     clean = clean.assign(_ref_blend=((flags_of(clean) & F.REF_BLEND) != 0).astype(int))
     stats = stats.join(clean.groupby('object_index')['_ref_blend'].max()
                        .rename('flag_se'), on='object_index')
 
-    # ── Match to reference catalog to get q_mag ───────────────────────────────
+    # ── Reference-catalog properties by index ─────────────────────────────────
+    # object_index is the 0-based row of the reference catalog; the --ra/--dec target
+    # injected beyond it (index len(ref)) has no reference row and is not a candidate
     ref = pd.read_csv(ref_csv_path)
     for col in ['MAG_APER_4px', 'MAGZP_REF']:
         ref[col] = pd.to_numeric(ref[col], errors='coerce')
     ref['q_mag'] = ref['MAG_APER_4px'] + ref['MAGZP_REF']
 
-    cat_ref   = SkyCoord(ra=ref['ALPHAWIN_J2000'].values * u.deg,
-                         dec=ref['DELTAWIN_J2000'].values * u.deg)
-    cat_stats = SkyCoord(ra=stats['ra'].values * u.deg,
-                         dec=stats['dec'].values * u.deg)
-    idx, sep, _ = cat_stats.match_to_catalog_sky(cat_ref)
-    matched = sep.arcsec < 3.0
-    stats = stats[matched].copy()
-    stats['q_mag']    = ref['q_mag'].iloc[idx[matched]].values
-    stats['ref_idx']  = idx[matched]
-    # class_star from reference CSV (CLASS_STAR column)
-    if 'CLASS_STAR' in ref.columns:
-        stats['class_star'] = pd.to_numeric(ref['CLASS_STAR'].iloc[idx[matched]].values, errors='coerce')
-    else:
-        stats['class_star'] = np.nan
+    oi = pd.to_numeric(stats['object_index'], errors='coerce')
+    stats = stats[(oi >= 0) & (oi < len(ref))].copy()
+    idx = stats['object_index'].astype(int).to_numpy()
+    stats['q_mag']    = ref['q_mag'].to_numpy()[idx]
+    stats['ref_idx']  = idx
+    stats['class_star'] = (pd.to_numeric(ref['CLASS_STAR'], errors='coerce').to_numpy()[idx]
+                           if 'CLASS_STAR' in ref.columns else np.nan)
 
     # ── Restrict to calibration-eligible sources ──────────────────────────────
     calib = stats[

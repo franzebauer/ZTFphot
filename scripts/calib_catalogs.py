@@ -651,14 +651,22 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                 flux_ab[k]    = flux_ab[k] * _apc_factor
                 fluxerr_ab[k] = fluxerr_ab[k] * _apc_factor
 
-            rms     = np.sum((diff - fit)**2) / len(maginst)
-            chi_red = (np.sum(((diff - fit)**2) / (errf**2 + var_fit)) / (len(maginst) - 2))
-            write   = True
+            if k == 1:                                  # header statistics: primary aperture
+                rms_hdr = np.sum((diff - fit)**2) / len(maginst)
+                chi_red = (np.sum(((diff - fit)**2) / (errf**2 + var_fit)) / (len(maginst) - 2))
+                n_stars = len(maginst)
+                n_nc    = int(np.sum(faint_nc_mask))
+                write   = True
 
     # ── Write output catalog ──────────────────────────────────────────────────
+    # The epoch is written only if the primary 4 px aperture was calibrated; another
+    # aperture without enough calibrators gets NaN columns (not zeros)
     if not write:
-        print(f'  {input_catalog}: too few calibration stars — skipped')
+        print(f'  {input_catalog}: too few calibration stars in the 4 px aperture — skipped')
         return
+    for k in range(4):
+        if len(Q_cal[k]) == 0:
+            Q_cal[k] = Q_err[k] = flux_ab[k] = fluxerr_ab[k] = np.full(len(pos), np.nan)
 
     cols = [
         pf.Column(name='ALPHAWIN_J2000',    format='D', array=alphafin),
@@ -703,10 +711,10 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             f = float(v)
             return -999.0 if np.isnan(f) else f
 
-        head['fit_rms']      = np.sqrt(rms)
+        head['fit_rms']      = np.sqrt(rms_hdr)
         head['chi_red']      = chi_red
-        head['num_stars']    = len(maginst)
-        head['NC_N']         = int(np.sum(faint_nc_mask))
+        head['num_stars']    = n_stars
+        head['NC_N']         = n_nc
         head['CALIB_N']      = _hv(_calib_n)
         head['CALIB_M']      = _hv(_calib_m)
         head['CALIB_ZP']     = _hv(_calib_n + _calib_m * 17.0)

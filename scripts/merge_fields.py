@@ -7,7 +7,7 @@ Algorithm
 ---------
 1.  Load all per-quadrant lightcurves.parquet files for the requested band.
 2.  Determine the **dominant quadrant**: the one with the most clean epochs
-    (INFOBITS_DIF == 0).
+    (distinct OBSMJD with INFOBITS_DIF == 0); ties broken by number of sources.
 3.  For every non-dominant quadrant, find sources common to both quadrants
     (matched within MAX_SEP arcsec, N_clean >= MIN_EPOCHS in both quadrants).
 4.  Measure
@@ -15,25 +15,30 @@ Algorithm
     as a function of magnitude over all common sources, in bins of width
     MAG_BIN with a 3σ MAD clip per bin.  Apply the magnitude-dependent
     correction to MAG_4/10_TOT_AB (and the equivalent factor to the calibrated
-    FLUX/FERR_*_TOT_uJy) by interpolating the curve at each row's
-    MAG_4_TOT_AB.  Falls back to a scalar median offset if too few bins.
-5.  Re-key object_index to be globally unique across quadrants, then
-    link overlap sources to the dominant quadrant's object_index via
-    coordinate matching.
+    FLUX/FERR_*_TOT_uJy) by interpolating the curve at each source's median
+    MAG_4_TOT_AB in its quadrant (one offset per source).  Falls back to a scalar
+    median offset if too few bins.  A quadrant that cannot be cross-calibrated
+    (too few common sources) is merged with offset 0 and flagged: FLAGS bit
+    NOT_CROSS_CALIBRATED, metadata not_cross_calibrated.
+5.  Re-key object_index to be globally unique across quadrants, then link
+    sources seen in several quadrants to one object_index: each quadrant is
+    matched against all quadrants linked before it (dominant first), mutual
+    nearest neighbours within MAX_SEP arcsec only.
 6.  Concatenate all quadrants (with origin columns), sort by OBSMJD, and
     write to LightCurves/merged/{band}/lightcurves_merged.parquet.
 
 Output parquet extra columns (beyond per-quadrant schema)
 ----------------------------------------------------------
-    norm_offset   float32   per-row magnitude-dependent correction applied to
+    norm_offset   float32   per-source magnitude-dependent correction applied to
                             MAG_* columns (0.0 for dominant quadrant rows)
     field         int64     origin field number
     filtercode    str       origin filter code
     ccdid         int64     origin CCD ID
     qid           int64     origin quadrant ID
 
-File-level metadata key added:
-    dominant_quadrant   "{field:06d}_{filtercode}_c{ccdid:02d}_q{qid}"
+File-level metadata keys added:
+    dominant_quadrant      "{field:06d}_{filtercode}_c{ccdid:02d}_q{qid}"
+    not_cross_calibrated   comma-separated tags of quadrants merged without offset
 """
 
 from __future__ import annotations
@@ -224,21 +229,25 @@ def merge_band(
 
     # ── 2. Determine dominant quadrant ───────────────────────────────────────
     def _n_clean_epochs(df: pd.DataFrame) -> int:
-        return int((df['INFOBITS_DIF'] == 0).sum())
+        return int(df.loc[df['INFOBITS_DIF'] == 0, 'OBSMJD'].nunique())
 
     def _quad_tag(df: pd.DataFrame) -> str:
         return (f"{int(df['field'].iloc[0]):06d}_{df['filtercode'].iloc[0]}"
                 f"_c{int(df['ccdid'].iloc[0]):02d}_q{int(df['qid'].iloc[0])}")
 
+    # Dominant = most clean epochs (temporal sampling); ties broken by number of sources
     n_clean = [_n_clean_epochs(df) for df in frames]
-    dom_idx = int(np.argmax(n_clean))
+    n_src   = [int(df['object_index'].nunique()) for df in frames]
+    dom_idx = max(range(len(frames)), key=lambda i: (n_clean[i], n_src[i]))
     dom_tag = _quad_tag(frames[dom_idx])
-    logger.info(f"merge [{band}]: dominant quadrant = {dom_tag} ({n_clean[dom_idx]} clean det-epochs)")
+    logger.info(f"merge [{band}]: dominant quadrant = {dom_tag} ({n_clean[dom_idx]} clean epochs)")
     for i, (df, n) in enumerate(zip(frames, n_clean)):
-        logger.info(f"  {'[DOM]' if i == dom_idx else '     '} {_quad_tag(df)}: {n} clean det-epochs")
+        logger.info(f"  {'[DOM]' if i == dom_idx else '     '} {_quad_tag(df)}: {n} clean epochs, "
+                    f"{n_src[i]} sources")
 
     # ── 3 & 4. Compute and apply magnitude-dependent normalization correction ──
     stats_dom = _per_source_stats(frames[dom_idx])
+    not_calibrated: list[str] = []
 
     for i, df in enumerate(frames):
         if i == dom_idx:
@@ -255,9 +264,19 @@ def merge_band(
                 f"faint={deltas[-1]:+.4f}@{centers[-1]:.2f}  "
                 f"median={float(np.median(deltas)):+.4f} mag"
             )
-            row_mag = pd.to_numeric(df['MAG_4_TOT_AB'], errors='coerce').values
-            correction = np.interp(row_mag, centers, deltas)  # flat extrapolation
-            correction[~np.isfinite(row_mag)] = float(np.median(deltas))
+            # One offset per source, evaluated at its median calibrated magnitude in this
+            # quadrant (the curve's axis); without one, at its reference magnitude on the
+            # same aperture-corrected scale; else the curve's median
+            mag = pd.to_numeric(df['MAG_4_TOT_AB'], errors='coerce')
+            src_mag = mag.groupby(df['object_index']).transform('median').to_numpy(float)
+            if 'MAG_4_REF' in df.columns:
+                mref = pd.to_numeric(df['MAG_4_REF'], errors='coerce').to_numpy(float)
+                apc = (float(np.nanmedian(pd.to_numeric(df['APCORR410'], errors='coerce'))) / 1000.0
+                       if 'APCORR410' in df.columns else 0.0)
+                src_mag = np.where(np.isfinite(src_mag), src_mag,
+                                   np.where(mref < 90, mref - apc, np.nan))
+            correction = np.interp(src_mag, centers, deltas)  # flat extrapolation
+            correction[~np.isfinite(src_mag)] = float(np.median(deltas))
             correction = correction.astype(np.float32)
             for col in _MAG_COLS:
                 if col in df.columns:
@@ -269,9 +288,15 @@ def merge_band(
                     df[col] = (pd.to_numeric(df[col], errors='coerce')
                                * _flux_factor).astype('float32')
             df['norm_offset'] = correction
-        except ValueError as exc:
-            logger.warning(f"merge [{band}]: cannot normalize {qid_str}: {exc}. "
-                           "Merging without offset correction.")
+        except (ValueError, KeyError, IndexError) as exc:
+            # kept with norm_offset = 0, but marked: FLAGS bit NOT_CROSS_CALIBRATED and
+            # metadata not_cross_calibrated
+            from ztfphot_flags import F
+            logger.warning(f"merge [{band}]: cannot cross-calibrate {qid_str}: {exc} — "
+                           f"merged without offset, flagged NOT_CROSS_CALIBRATED")
+            df['FLAGS'] = (pd.to_numeric(df['FLAGS'], errors='coerce').fillna(0).astype('int64')
+                           | F.NOT_CROSS_CALIBRATED).astype('Int32')
+            not_calibrated.append(qid_str)
 
     # ── 5. Re-key object_index to be globally unique, then link overlap sources ─
     # Step 5a: offset each secondary quadrant's indices above all previous blocks
@@ -282,38 +307,42 @@ def merge_band(
         df['object_index'] = df['object_index'] + running_max + 1
         running_max = int(df['object_index'].max())
 
-    # Step 5b: replace matched secondary indices with the dominant's object_index
-    # so that the same physical star shares one index across quadrants
+    # Step 5b: link sources seen in more than one quadrant to one object_index. Each
+    # secondary quadrant is matched against all quadrants linked so far (dominant first),
+    # so overlaps between secondaries are linked too; only mutual nearest neighbours
+    # within max_sep_arcsec are linked, so two distinct sources never share an index.
     from astropy.coordinates import SkyCoord as _SkyCoord
     import astropy.units as _u
 
-    dom_pos = (frames[dom_idx]
-               .groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']]
-               .first().reset_index())
-    cat_dom = _SkyCoord(ra=dom_pos['ALPHAWIN_REF'].values * _u.deg,
-                        dec=dom_pos['DELTAWIN_REF'].values * _u.deg)
+    def _positions(df):
+        return (df.groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']]
+                .first().reset_index())
 
+    linked = _positions(frames[dom_idx])
     for i, df in enumerate(frames):
         if i == dom_idx:
             continue
-        min_pos = (df.groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']]
-                   .first().reset_index())
-        cat_min = _SkyCoord(ra=min_pos['ALPHAWIN_REF'].values * _u.deg,
-                            dec=min_pos['DELTAWIN_REF'].values * _u.deg)
-        idx_arr, sep, _ = cat_min.match_to_catalog_sky(cat_dom)
-        matched = sep.arcsec < max_sep_arcsec
-
-        remap = {
-            int(min_pos['object_index'].iloc[j]): int(dom_pos['object_index'].iloc[idx_arr[j]])
-            for j in range(len(min_pos)) if matched[j]
-        }
+        sec = _positions(df)
+        remap = {}
+        if len(sec) and len(linked):
+            c_sec = _SkyCoord(ra=sec['ALPHAWIN_REF'].values * _u.deg,
+                              dec=sec['DELTAWIN_REF'].values * _u.deg)
+            c_lnk = _SkyCoord(ra=linked['ALPHAWIN_REF'].values * _u.deg,
+                              dec=linked['DELTAWIN_REF'].values * _u.deg)
+            fwd, sep, _ = c_sec.match_to_catalog_sky(c_lnk)
+            back, _, _ = c_lnk.match_to_catalog_sky(c_sec)
+            mutual = (sep.arcsec < max_sep_arcsec) & (back[fwd] == np.arange(len(sec)))
+            remap = {int(sec['object_index'].iloc[j]): int(linked['object_index'].iloc[fwd[j]])
+                     for j in np.where(mutual)[0]}
         if remap:
             df['object_index'] = (df['object_index']
                                   .map(remap)
                                   .fillna(df['object_index'])
                                   .astype('Int32'))
             logger.info(f"merge [{band}]: linked {len(remap)} overlap sources from "
-                        f"{_quad_tag(df)} → dominant object_index")
+                        f"{_quad_tag(df)} to earlier quadrants")
+        new = sec[~sec['object_index'].isin(list(remap))]
+        linked = pd.concat([linked, new], ignore_index=True)
 
     # ── 6. Concatenate and write ──────────────────────────────────────────────
     merged = pd.concat(frames, ignore_index=True)
@@ -352,6 +381,7 @@ def merge_band(
         **(table.schema.metadata or {}),
         b'dominant_quadrant': dom_tag.encode(),
         b'flux_norm_applied': b'1',
+        **({b'not_cross_calibrated': ','.join(not_calibrated).encode()} if not_calibrated else {}),
     })
     pq_io.write_table(table, out_path)
 

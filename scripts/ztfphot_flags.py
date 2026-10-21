@@ -13,11 +13,13 @@ flag convention: 1 neighbour, 8 truncated, 16 incomplete aperture data)
 Bits 8-15: per source, from the reference image
    256  REF_BLEND         reference neighbour / blend (IRSA refsexcat FLAGS != 0)
   1024  NO_REFERENCE      no reference source (injected target): FLUX is difference flux
-Bits 11-13: provenance / summaries
+Bits 11-14: provenance / summaries
   2048  AP_UNKNOWN        aperture flags not measured for this epoch (rebuilt from an older
                           parquet by update_parquet.py)
   4096  CAUTIONARY_EPOCH  the epoch has cautionary ZTF INFOBITS (see INFOBITS_DIF)
   8192  REF_INFOBITS      the quadrant's reference image has INFOBITS set
+ 16384  NOT_CROSS_CALIBRATED  merged file: this quadrant could not be cross-calibrated
+                          to the dominant one (merged with norm_offset = 0)
 
 Only EDGE and MASKED corrupt the difference-image photometry of the primary aperture, so
 the default selection rejects just those (DEFAULT_REJECT); everything else is
@@ -46,6 +48,7 @@ class F:
     AP_UNKNOWN = 2048
     CAUTIONARY_EPOCH = 4096
     REF_INFOBITS = 8192
+    NOT_CROSS_CALIBRATED = 16384
 
     EPOCH_BITS = 0xFF                                  # bits written by the photometry step
     DEFAULT_REJECT = EDGE | MASKED                      # corrupt the 4 px measurement
