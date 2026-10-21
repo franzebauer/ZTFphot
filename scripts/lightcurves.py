@@ -46,7 +46,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
         'FLUX_4_TOT_AB', 'FERR_4_TOT_AB', 'FLUX_6_TOT_AB',   # bipolar μJy flux
         'FLUX_4_DIF', 'FERR_4_DIF',                          # raw 4 px diff flux, counts
         'DRA_SCI', 'DDEC_SCI',                               # sci-pos offsets, arcsec
-        'APCORR46',
+        'APCORR410',
     ]
     int32_cols = [
         'NMATCHES', 'INFOBITS_DIF', 'FLAGS', 'object_index',
@@ -68,7 +68,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 # Header keywords to broadcast from cal.fits HDU[0] to every source row
 _EPOCH_KEYS = [
     'OBSMJD', 'AIRMASS', 'MAGZP_DIF', 'MAGZPRMS_DIF', 'CLRCOEFF',
-    'SEEING', 'MAGLIM', 'NMATCHES', 'INFOBITS_DIF', 'APCORR46',
+    'SEEING', 'MAGLIM', 'NMATCHES', 'INFOBITS_DIF', 'APCORR410',
 ]
 
 # Columns to drop before writing (redundant, derivable, or replaced by metadata)

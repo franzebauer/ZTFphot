@@ -14,7 +14,8 @@ Algorithm
         delta_mag(mag) = median_mag_dominant - median_mag_minority
     as a function of magnitude over all common sources, in bins of width
     MAG_BIN with a 3σ MAD clip per bin.  Apply the magnitude-dependent
-    correction to all MAG_* columns by interpolating the curve at each row's
+    correction to all MAG_* columns (and the equivalent factor to FLUX_4_TOT_AB,
+    FERR_4_TOT_AB, FLUX_6_TOT_AB) by interpolating the curve at each row's
     MAG_4_TOT_AB.  Falls back to a scalar median offset if too few bins.
 5.  Re-key object_index to be globally unique across quadrants, then
     link overlap sources to the dominant quadrant's object_index via
@@ -61,6 +62,10 @@ MAX_ERR        = 0.1      # max MERR_4_TOT_AB for a clean epoch
 
 
 _MAG_COLS = ['MAG_3_TOT_AB', 'MAG_4_TOT_AB', 'MAG_6_TOT_AB', 'MAG_10_TOT_AB', 'MAG_4_TOT_AB_org']
+_FLUX_COLS = ['FLUX_4_TOT_AB', 'FERR_4_TOT_AB', 'FLUX_6_TOT_AB']
+# Per-quadrant metadata kept in the merged file as {key}_{field}_{fc}_c{ccd}_q{qid}
+_PER_QUAD_META = (b'target_sep_arcsec', b'target_ref_mag', b'ztfphot_run', b'ztfphot_download')
+_QUAD_ID_META = (b'field', b'filtercode', b'ccdid', b'qid')
 
 
 def _per_source_stats(df: pd.DataFrame, min_epochs: int = MIN_EPOCHS) -> pd.DataFrame:
@@ -190,7 +195,7 @@ def merge_band(
 
     # ── 1. Load per-quadrant parquets ─────────────────────────────────────────
     frames: list[pd.DataFrame] = []
-    all_meta: dict = {}
+    metas: list[dict] = []
     for q in quadrants:
         if q['filtercode'] != band:
             continue
@@ -200,10 +205,8 @@ def merge_band(
             logger.warning(f"merge [{band}]: parquet missing for {field:06d} {fc} c{ccd:02d} q{qid} — skipped")
             continue
 
-        # Read parquet and carry MAGZP_REF_* metadata forward
         pf = pq_io.read_table(pq_path)
-        file_meta = pf.schema.metadata or {}
-        all_meta.update(file_meta)
+        metas.append(dict(pf.schema.metadata or {}))
 
         df = pf.to_pandas()
         # Restore origin columns from quadrant dict (stored as metadata in per-quadrant files)
@@ -259,6 +262,11 @@ def merge_band(
                 if col in df.columns:
                     df[col] = (pd.to_numeric(df[col], errors='coerce')
                                + correction).astype('float32')
+            _flux_factor = 10.0 ** (-0.4 * correction.astype(np.float64))
+            for col in _FLUX_COLS:
+                if col in df.columns:
+                    df[col] = (pd.to_numeric(df[col], errors='coerce')
+                               * _flux_factor).astype('float32')
             df['norm_offset'] = correction
         except ValueError as exc:
             logger.warning(f"merge [{band}]: cannot normalize {qid_str}: {exc}. "
@@ -312,12 +320,37 @@ def merge_band(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Metadata: tag-specific keys (MAGZP_REF_{tag}, …) from every quadrant; per-quadrant
+    # copies of the target/run keys; top-level quadrant identity and run keys from the
+    # dominant quadrant; top-level target keys from the quadrant whose nearest reference
+    # source is closest to the target.
+    all_meta: dict = {}
+    for df, fm in zip(frames, metas):
+        tag = _quad_tag(df).encode()
+        for k_, v_ in fm.items():
+            if k_.startswith(b'pandas'):
+                continue
+            if k_ in _PER_QUAD_META:
+                all_meta[k_ + b'_' + tag] = v_
+            elif k_ not in _QUAD_ID_META:
+                all_meta[k_] = v_
+    for k_ in _QUAD_ID_META + (b'ztfphot_run', b'ztfphot_download'):
+        if k_ in metas[dom_idx]:
+            all_meta[k_] = metas[dom_idx][k_]
+    seps = np.array([float(fm.get(b'target_sep_arcsec', b'nan')) for fm in metas])
+    if np.isfinite(seps).any():
+        j = int(np.nanargmin(seps))
+        for k_ in (b'target_sep_arcsec', b'target_ref_mag'):
+            if k_ in metas[j]:
+                all_meta[k_] = metas[j][k_]
+
     import pyarrow as pa
     table = pa.Table.from_pandas(merged, preserve_index=False)
     table = table.replace_schema_metadata({
         **all_meta,
         **(table.schema.metadata or {}),
         b'dominant_quadrant': dom_tag.encode(),
+        b'flux_norm_applied': b'1',
     })
     pq_io.write_table(table, out_path)
 

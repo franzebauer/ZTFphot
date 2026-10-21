@@ -15,9 +15,17 @@ from scipy.ndimage import gaussian_filter1d
 
 # ── Spatial-correction helpers ────────────────────────────────────────────────
 
+def _unwrap_ra(ra, ra_ref):
+    """RA (deg) made continuous across 0/360 around `ra_ref`: values more than 180°
+    from ra_ref are shifted by ∓360. Returns the input values unchanged otherwise."""
+    ra = np.asarray(ra, dtype=float)
+    d  = ra - ra_ref
+    return np.where(d >= 180.0, ra - 360.0, np.where(d < -180.0, ra + 360.0, ra))
+
+
 def _poly2d_basis(ra, dec, ra0, dec0, degree):
     """Design matrix for 2-D polynomial in normalised (u, v) = (RA-ra0, Dec-dec0)."""
-    u, v = ra - ra0, dec - dec0
+    u, v = _unwrap_ra(ra, ra0) - ra0, dec - dec0
     cols = [np.ones_like(u), u, v]
     if degree >= 2:
         cols += [u * u, u * v, v * v]
@@ -49,6 +57,7 @@ def _apply_flatfield(ra, dec, ff):
     was left uncorrected (linear interpolation over cell centres extrapolates to
     the fill value outside [centre_0, centre_-1]).
     """
+    ra      = _unwrap_ra(ra, 0.5 * (ff['ra_edges'][0] + ff['ra_edges'][-1]))
     ra_cen  = 0.5 * (ff['ra_edges'][:-1]  + ff['ra_edges'][1:])
     dec_cen = 0.5 * (ff['dec_edges'][:-1] + ff['dec_edges'][1:])
     interp  = RegularGridInterpolator(
@@ -195,7 +204,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     n_safe[_is_tgt] = 0
 
     # Reference frame centre for polynomial normalisation
-    ra0  = float(np.mean(raref))
+    ra0  = float(np.mean(_unwrap_ra(raref, raref[0])))
     dec0 = float(np.mean(decref))
 
     # Find target in matched-source array (same position for all apertures)
@@ -203,7 +212,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     if target_ra is not None and target_dec is not None and len(n) > 0:
         _ra_m   = np.array(alpha[pos])
         _dec_m  = np.array(delta[pos])
-        _sep_sq = (_ra_m - target_ra)**2 + (_dec_m - target_dec)**2
+        _dra    = (_unwrap_ra(_ra_m, target_ra) - target_ra) * np.cos(np.radians(target_dec))
+        _sep_sq = _dra**2 + (_dec_m - target_dec)**2
         _j = int(np.argmin(_sep_sq))
         if np.sqrt(_sep_sq[_j]) < target_match_radius / 3600.0:
             tgt_in_matched = _j
@@ -228,10 +238,13 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
 
     write = False
 
-    # ── Part 1: aperture correction from reference catalog (4px → 6px) ────────
+    # ── Aperture correction from the reference catalog (4 px → 10 px) ─────────
     # Uses calibration stars in the refcat; ref_zp cancels in the difference so
-    # this is purely MAG_APER_4px − MAG_APER_6px on the reference image PSF.
-    _apcorr_4_6 = 0.0
+    # this is purely MAG_APER_4px − MAG_APER_10px on the reference image PSF. The
+    # primary aperture is calibrated against the 4 px reference magnitudes and the
+    # correction is applied to the calibrated MAG_4 / FLUX_4 at the end (APCORR410
+    # header; MAG_4_TOT_AB_org and FLUX_4_DIF stay uncorrected).
+    _apcorr_4_10 = 0.0
     _ac_mask = (
         (clas >= 0.7) &
         (mag_ref_tot[1] > 14.) & (mag_ref_tot[1] < 19.0) &
@@ -239,9 +252,9 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         is_good_calib
     )
     if _ac_mask.sum() >= 5:
-        _apcorr_4_6 = float(np.median(
-            mag_ref_tot[1][_ac_mask] - mag_ref_tot[2][_ac_mask]))
-        print(f"  AperCorr 4→6px: {_apcorr_4_6*1000:.1f} mmag  ({_ac_mask.sum()} stars)")
+        _apcorr_4_10 = float(np.median(
+            mag_ref_tot[1][_ac_mask] - mag_ref_tot[3][_ac_mask]))
+        print(f"  AperCorr 4→10px: {_apcorr_4_10*1000:.1f} mmag  ({_ac_mask.sum()} stars)")
 
     for k in range(4):
         if len(n) == 0:
@@ -274,9 +287,6 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             np.float64(magzp_dif) - 2.5 * np.log10(np.maximum(flux_tot[k], 1e-30)),
             np.nan,
         )
-        # ── Part 2: apply aperture correction (4px aperture only) ─────────────
-        if k == 1:
-            maginst = maginst - _apcorr_4_6
         magQi[k] = maginst
 
         errinst    = 1.0857 / (flux_tot[k] / flux_dif_err_tmp)
@@ -618,7 +628,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                                           flux_cal_k / np.where(flux_ref_ujy > 0,
                                                                 flux_ref_ujy, np.nan) - 1.0,
                                           np.nan), dtype=float),
-                             apcorr_4_6=np.float64(_apcorr_4_6))
+                             apcorr_4_10=np.float64(_apcorr_4_10))
 
             interpolation = np.interp(Q_cal[k], median_mag_per_bin, rms_per_bin)
             Q_err[k]      = np.array([max(i, j) for i, j in zip(interpolation, errmagQi[k])])
@@ -633,6 +643,13 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             flux_ab[k]    = flux_cal_k * _faint_factor
             fluxerr_ab[k] = (np.abs(np.float64(flux_dif_err_tmp))
                              * _zp_ujy * _cal_factor * _faint_factor)
+
+            # Primary aperture: aperture-correct magnitude and flux to 10 px
+            if k == 1:
+                Q_cal[k]      = Q_cal[k] - _apcorr_4_10
+                _apc_factor   = 10.0**(0.4 * _apcorr_4_10)
+                flux_ab[k]    = flux_ab[k] * _apc_factor
+                fluxerr_ab[k] = fluxerr_ab[k] * _apc_factor
 
             rms     = np.sum((diff - fit)**2) / len(maginst)
             chi_red = (np.sum(((diff - fit)**2) / (errf**2 + var_fit)) / (len(maginst) - 2))
@@ -691,7 +708,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         head['CALIB_N']      = _hv(_calib_n)
         head['CALIB_M']      = _hv(_calib_m)
         head['CALIB_ZP']     = _hv(_calib_n + _calib_m * 17.0)
-        head['APCORR46']     = _hv(_apcorr_4_6 * 1000)        # mmag, 4px→6px
+        head['APCORR410']    = _hv(_apcorr_4_10 * 1000)       # mmag, 4px→10px, applied to MAG_4/FLUX_4
 
         head['NC_RMS0']      = _hv(_nc_rms0)
         head['NC_RMS1']      = _hv(_nc_rms1)

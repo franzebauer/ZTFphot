@@ -6,6 +6,10 @@ Add missing (and, by default, newer) epochs to existing light-curve parquets, an
 recalibrate all 4 px photometry consistently with the CURRENT pipeline — without
 re-downloading the epochs already in the parquet.
 
+Inputs must be in the current format (raw FLUX_4_DIF and APCORR410 columns); parquets
+written before 2026-10-21 are retrofitted with update_old_parquet.py, which uses the
+same machinery.
+
 Per target and band (a ref-pos parquet and its `_sci` sibling are updated together
 when both exist):
 
@@ -17,21 +21,19 @@ when both exist):
   2. Temporary base dir: reference products + reference catalogs (same object order
      as the original run); download ONLY the missing/new epochs.
   3. Old epochs become per-epoch catalogs again (same LDAC layout the photometry step
-     writes) from the parquet: raw 4 px difference flux = FLUX_4_DIF when present,
-     else reconstructed exactly from MAG_4_TOT_AB_org
-         flux_tot = 10^(0.4 (MAGZP_DIF - APCORR46/1000 - (MAG_4_TOT_AB_org - norm_offset)))
-         FLUX_4_DIF = flux_tot - 10^(0.4 (MAGZP_DIF - q_mag_ref))
-     (error from MERR_4_TOT_AB_org). The 4 px value fills all four aperture slots;
-     only 4 px is used from these epochs.
+     writes) from the parquet's raw 4 px difference flux FLUX_4_DIF / FERR_4_DIF. The
+     4 px value fills all four aperture slots; only 4 px is used from these epochs.
   4. run_pipeline (current code) on the temp dir: forced photometry of the new epochs,
      then vet -> calibrate -> flatfield -> recalibrate -> lightcurves -> merge over
      old + new epochs together.
   5. Output <stem>_updated.parquet next to the input (or --outdir):
        old epochs : new 4 px values; MAG_3/6/10 (and FLUX_6) shifted by the same
-                    4 px change (MAG_k_new = MAG_k_old + dMAG_4); MERR_k kept
+                    4 px change before its aperture correction (MAG_k_new = MAG_k_old +
+                    dMAG_4, dMAG_4 on MAG_4 + APCORR410; where MAG_4 is NaN the
+                    epoch's median dMAG_4); MERR_k kept
        new epochs : full photometry (all apertures)
-       old rows that cannot be reconstructed (NaN 4 px magnitude and no FLUX_4_DIF,
-       or quadrants the current footprint check drops) are carried over unchanged.
+       old rows the current pipeline does not reproduce (e.g. an epoch that now has
+       too few calibrators, a quadrant the footprint check drops) are dropped.
      Metadata: the current pipeline's keys plus ztfphot_update (source, counts).
 
 Usage (ztf env, IRSA credentials in ~/.netrc):
@@ -114,6 +116,11 @@ def _load(path: Path) -> pd.DataFrame:
     return df
 
 
+def _is_current(df: pd.DataFrame) -> bool:
+    """Written by the current pipeline (raw 4 px flux stored, 4→10 px correction)."""
+    return {"FLUX_4_DIF", "FERR_4_DIF", "APCORR410"} <= set(df.columns)
+
+
 # ── reference catalogs + source matching ─────────────────────────────────────
 
 def _fetch_references(base: Path, quads, auth, retries: int, wait: float) -> list:
@@ -179,12 +186,118 @@ def _download_epochs(dc, todo: pd.DataFrame, base: Path, fc: str, a) -> list[str
     return deferred
 
 
+def _image_dirs(a, meta: dict) -> list[Path]:
+    """Directories that may already hold the images: --image-dir, then the base dir
+    recorded in the parquet metadata (ztfphot_run / ztfphot_download), if present here."""
+    cands = [Path(d) for d in (a.image_dir or [])]
+    for key in ("ztfphot_run", "ztfphot_download"):
+        try:
+            cands.append(Path(json.loads(meta.get(key) or "null")["args"]["base_dir"]))
+        except (TypeError, KeyError, ValueError):
+            pass
+    out = []
+    for d in cands:
+        d = d.expanduser().resolve()
+        if d not in out and ((d / "Science").is_dir() or (d / "Reference").is_dir()):
+            out.append(d)
+    return out
+
+
+def _reuse_local(dc, base: Path, todo: pd.DataFrame, quads, src_dirs: list[Path]) -> tuple[int, int]:
+    """Put images that already exist in `src_dirs` into the temporary base dir, so they
+    are not downloaded again: an unpacked .fits is symlinked; a .fits.fz is copied and
+    unpacked (funpack deletes its input). Returns (epochs, reference products) reused."""
+    def put(src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if not dst.exists():
+            os.symlink(src.resolve(), dst)
+    ok = lambda f: f.is_file() and f.stat().st_size > 0
+    n_ref = 0
+    for q in quads:
+        for suf in _REF_PRODUCTS:
+            src = next((s for d in src_dirs if ok(s := dc.ref_local_path(d, *q, suf))), None)
+            if src is not None:
+                put(src, dc.ref_local_path(base, *q, suf))
+                n_ref += 1
+    n_sci = 0
+    for r in todo.itertuples():
+        e = (int(r.field), r.filtercode, int(r.ccdid), int(r.qid), str(int(float(r.filefracday))))
+        for d in src_dirs:
+            diff, fz = (dc.sci_local_path(d, *e, "scimrefdiffimg.fits"),
+                        dc.sci_local_path(d, *e, "scimrefdiffimg.fits.fz"))
+            if ok(diff):
+                put(diff, dc.sci_local_path(base, *e, "scimrefdiffimg.fits"))
+            elif ok(fz):
+                dst = dc.sci_local_path(base, *e, "scimrefdiffimg.fits.fz")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(fz, dst)
+                dc.funpack_file(dst)
+            else:
+                continue
+            if ok(cat := dc.sci_local_path(d, *e, "sexcat.fits")):
+                put(cat, dc.sci_local_path(base, *e, "sexcat.fits"))
+            n_sci += 1
+            break
+    return n_sci, n_ref
+
+
 def _ref_catalog(base: Path, q) -> pd.DataFrame:
     tag = f"{q[0]:06d}_{q[1]}_c{q[2]:02d}_q{q[3]}"
     ref = pd.read_csv(base / "Catalogs" / f"{tag}(REFERENCE)[OBJECTS].csv")
     ref["q_mag"] = (pd.to_numeric(ref["MAG_APER_4px"], errors="coerce")
                     + pd.to_numeric(ref["MAGZP_REF"], errors="coerce"))
     return ref
+
+
+def _complete_catalog(dc, base: Path, q, positions: np.ndarray, target, match_radius,
+                      tol: float = 0.5) -> tuple[int, int]:
+    """Append to the rebuilt reference CSV of quadrant `q` every source of the old
+    parquet (reference positions `positions`) it lacks, so no source loses its light
+    curve: one in IRSA's refsexcat (removed by make_catalog's selection) with its
+    reference photometry; otherwise (injected in the original run) as an injected
+    entry, as transient_catalog writes them (99 mag sentinel; FLAG_SE_REF = 1 with a
+    reference neighbour within 3"). The --ra/--dec target is left to the pipeline,
+    which injects it itself. Returns (from refsexcat, injected)."""
+    from astropy.coordinates import SkyCoord
+    from astropy.io import fits
+    tag = f"{q[0]:06d}_{q[1]}_c{q[2]:02d}_q{q[3]}"
+    csv = base / "Catalogs" / f"{tag}(REFERENCE)[OBJECTS].csv"
+    ref = pd.read_csv(csv)
+    pos = np.unique(np.round(positions[np.isfinite(positions).all(1)], 7), axis=0)
+    if not len(pos):
+        return 0, 0
+    sc = SkyCoord(pos[:, 0], pos[:, 1], unit="deg")
+    rc = SkyCoord(ref["ALPHAWIN_J2000"].to_numpy(float), ref["DELTAWIN_J2000"].to_numpy(float), unit="deg")
+    miss = sc.match_to_catalog_sky(rc)[1].arcsec >= tol
+    if target is not None:
+        miss &= sc.separation(SkyCoord(target[0], target[1], unit="deg")).arcsec >= match_radius
+    if not miss.any():
+        return 0, 0
+    sc = sc[miss]
+    raw = fits.getdata(dc.ref_local_path(base, *q, "refsexcat.fits"), 1)
+    j, sep, _ = sc.match_to_catalog_sky(SkyCoord(raw["ALPHAWIN_J2000"], raw["DELTAWIN_J2000"], unit="deg"))
+    in_raw = sep.arcsec < tol
+    rows = []
+    for k in sorted(set(j[in_raw])):                 # as make_catalog converts refsexcat rows
+        r = raw[k]
+        rows.append({"CLASS_STAR": r["CLASS_STAR"], "ALPHAWIN_J2000": r["ALPHAWIN_J2000"],
+                     "DELTAWIN_J2000": r["DELTAWIN_J2000"], "MAG_AUTO": r["MAG_AUTO"],
+                     "MAGERR_AUTO": r["MAGERR_AUTO"], "FLAG_SE_REF": r["FLAGS"],
+                     **{f"MAG_APER_{px}": r["MAG_APER"][i] for i, px in enumerate(("3px", "4px", "6px", "10px"), 1)},
+                     **{f"MAGERR_APER_{px}": r["MAGERR_APER"][i] for i, px in enumerate(("3px", "4px", "6px", "10px"), 1)}})
+    n_raw = len(rows)
+    for c in sc[~in_raw]:
+        rows.append({"CLASS_STAR": 0.0, "ALPHAWIN_J2000": c.ra.deg, "DELTAWIN_J2000": c.dec.deg,
+                     "MAG_AUTO": 99.0, "MAGERR_AUTO": 99.0,
+                     "FLAG_SE_REF": int(len(ref) > 0 and c.separation(rc).arcsec.min() < 3.0),
+                     **{f"MAG_APER_{px}": 99.0 for px in ("3px", "4px", "6px", "10px")},
+                     **{f"MAGERR_APER_{px}": 99.0 for px in ("3px", "4px", "6px", "10px")}})
+    add = pd.DataFrame(rows)
+    for c in ("MAGZP_REF", "MAGZPRMS_REF", "INFOBITS_REF"):
+        add[c] = ref[c].iloc[0]
+    add["ID"] = [f"{len(ref) + i}_{tag}" for i in range(len(add))]
+    pd.concat([ref, add[ref.columns]], ignore_index=True).to_csv(csv, index=False)
+    return n_raw, len(rows) - n_raw
 
 
 def _csv_index(ra, dec, ref: pd.DataFrame, target, match_radius, tol=0.5) -> np.ndarray:
@@ -210,31 +323,14 @@ def _csv_index(ra, dec, ref: pd.DataFrame, target, match_radius, tol=0.5) -> np.
 
 # ── old epochs -> per-epoch catalogs ─────────────────────────────────────────
 
-def _raw_flux(rows: pd.DataFrame, q_mag: np.ndarray, is_target: np.ndarray):
+def _raw_flux(rows: pd.DataFrame, q_mag: np.ndarray, is_target: np.ndarray, ref: pd.DataFrame):
     """Raw 4 px difference flux and error (counts, MAGZP_DIF units) per parquet row."""
-    zp = pd.to_numeric(rows["MAGZP_DIF"], errors="coerce").to_numpy(float)
-    if "FLUX_4_DIF" in rows and "FERR_4_DIF" in rows:
-        f = pd.to_numeric(rows["FLUX_4_DIF"], errors="coerce").to_numpy(float)
-        e = pd.to_numeric(rows["FERR_4_DIF"], errors="coerce").to_numpy(float)
-        if np.isfinite(f).all():
-            return f, e
-    apc = (pd.to_numeric(rows["APCORR46"], errors="coerce").fillna(0.0).to_numpy(float) / 1000.0
-           if "APCORR46" in rows else np.zeros(len(rows)))
-    mraw = (pd.to_numeric(rows["MAG_4_TOT_AB_org"], errors="coerce").to_numpy(float)
-            - pd.to_numeric(rows["norm_offset"], errors="coerce").fillna(0.0).to_numpy(float))
-    ftot = 10.0 ** (0.4 * (zp - apc - mraw))
-    fref = np.where(is_target, 0.0, 10.0 ** (0.4 * (zp - q_mag)))
-    ferr = pd.to_numeric(rows["MERR_4_TOT_AB_org"], errors="coerce").to_numpy(float) * ftot / 1.0857
-    f, e = ftot - fref, ferr
-    if "FLUX_4_DIF" in rows:                          # prefer stored raw flux where present
-        fs = pd.to_numeric(rows["FLUX_4_DIF"], errors="coerce").to_numpy(float)
-        es = pd.to_numeric(rows["FERR_4_DIF"], errors="coerce").to_numpy(float)
-        f, e = np.where(np.isfinite(fs), fs, f), np.where(np.isfinite(es), es, e)
-    return f, e
+    return (pd.to_numeric(rows["FLUX_4_DIF"], errors="coerce").to_numpy(float),
+            pd.to_numeric(rows["FERR_4_DIF"], errors="coerce").to_numpy(float))
 
 
 def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_of,
-                      target, match_radius) -> tuple[int, pd.Index]:
+                      target, match_radius, raw_flux=_raw_flux) -> tuple[int, pd.Index]:
     """Write one LDAC catalog per old epoch and quadrant; return (n catalogs, index of
     the parquet rows written)."""
     from astropy.io import fits
@@ -250,7 +346,7 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
         ci = rows["_csv"].to_numpy()
         is_t = ci == len(ref)
         q_mag = np.where(is_t, np.nan, ref["q_mag"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
-        f, e = _raw_flux(rows, q_mag, is_t)
+        f, e = raw_flux(rows, q_mag, is_t, ref)
         keep = (ci >= 0) & np.isfinite(f) & np.isfinite(e)
         rows, ci, f, e = rows[keep], ci[keep], f[keep], e[keep]
         if sci:
@@ -268,16 +364,10 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
                           ref["ALPHAWIN_J2000"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
             dec = np.where(ci == len(ref), target[1] if target else np.nan,
                            ref["DELTAWIN_J2000"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
-        # per-epoch aperture bits of the old epochs: FLAGS (current schema), FLAG_AP
-        # (older), or unknown -> AP_UNKNOWN, carried into the rebuilt FLAGS
+        # per-epoch aperture bits of the old epochs, carried into the rebuilt FLAGS
         from ztfphot_flags import F
-        if "FLAGS" in rows:
-            flags = (pd.to_numeric(rows["FLAGS"], errors="coerce").fillna(0).astype("int64")
-                     .to_numpy() & (F.EPOCH_BITS | F.AP_UNKNOWN))
-        elif "FLAG_AP" in rows:
-            flags = pd.to_numeric(rows["FLAG_AP"], errors="coerce").fillna(0).to_numpy(int)
-        else:
-            flags = np.full(len(rows), F.AP_UNKNOWN, int)
+        flags = (pd.to_numeric(rows["FLAGS"], errors="coerce").fillna(0).astype("int64")
+                 .to_numpy() & (F.EPOCH_BITS | F.AP_UNKNOWN))
         cat_dir = base / sub / f"{q[0]:06d}" / q[1] / f"{q[2]:02d}" / str(q[3])
         for mjd, idx in rows.groupby("OBSMJD").indices.items():
             r0 = rows.iloc[idx[0]]
@@ -326,7 +416,7 @@ def _collect(base: Path, ra, dec, fc, suffix) -> tuple[pd.DataFrame | None, dict
 def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
               old_epochs: set, all_sources: bool = False) -> pd.DataFrame:
     """Old epochs: new 4 px, other apertures shifted by the 4 px change; new epochs as
-    measured; unreconstructable old rows appended unchanged."""
+    measured. Old rows absent from the new output are dropped."""
     new = new.copy()
     new["_csv"] = -1
     for key, idx in new.groupby(QKEY).groups.items():
@@ -353,10 +443,18 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
     shift_cols = [c for c in ("MAG_3_TOT_AB", "MAG_6_TOT_AB", "MAG_10_TOT_AB") if c in old]
     keep_cols = shift_cols + [c.replace("MAG_", "MERR_") for c in shift_cols
                               if c.replace("MAG_", "MERR_") in old]
-    o = old[k + ["MAG_4_TOT_AB"] + keep_cols + (["FLUX_6_TOT_AB"] if "FLUX_6_TOT_AB" in old else [])]
+    o = old[k + ["MAG_4_TOT_AB"] + keep_cols + (["FLUX_6_TOT_AB"] if "FLUX_6_TOT_AB" in old else [])
+            + (["APCORR410"] if "APCORR410" in old else [])]
     o = o.drop_duplicates(k)
     m = new[is_old_ep].reset_index().merge(o, on=k, how="left", suffixes=("", "_old"))
-    dm = m["MAG_4_TOT_AB"] - m["MAG_4_TOT_AB_old"]
+    # Change of the 4 px magnitude before its aperture correction (APCORR410, mmag;
+    # MAG_4 is corrected, MAG_3/6/10 are not)
+    _apc = lambda c: (pd.to_numeric(m[c], errors="coerce").fillna(0.0) / 1000.0
+                      if c in m else 0.0)
+    dm = ((m["MAG_4_TOT_AB"] + _apc("APCORR410"))
+          - (m["MAG_4_TOT_AB_old"] + _apc("APCORR410_old")))
+    # rows without a 4 px magnitude (total flux <= 0) take the epoch's median change
+    dm = dm.fillna(m.assign(_d=dm).groupby(QKEY + ["_mjd"])["_d"].transform("median"))
     for c in shift_cols:
         new.loc[m["index"].to_numpy(), c] = (m[f"{c}_old"] + dm).to_numpy()
     for c in keep_cols:
@@ -365,59 +463,23 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
     if "FLUX_6_TOT_AB" in new:
         f6 = (m["FLUX_6_TOT_AB_old"] * 10 ** (-0.4 * dm)) if "FLUX_6_TOT_AB_old" in m else np.nan
         new.loc[m["index"].to_numpy(), "FLUX_6_TOT_AB"] = np.asarray(f6, float)
-    # old rows not represented in the new output -> carried over unchanged
-    # Quadrants the current pipeline does not process (e.g. the footprint check drops
-    # them because the target is off-chip) cannot be recalibrated consistently: drop them
-    qnew = pd.MultiIndex.from_frame(new[QKEY].drop_duplicates())
-    gone = ~pd.MultiIndex.from_frame(old[QKEY]).isin(qnew)
-    if gone.any():
-        logger.info(f"    dropping {int(gone.sum()):,} rows of quadrant(s) "
-                    f"{sorted(map(tuple, old.loc[gone, QKEY].drop_duplicates().to_numpy().tolist()))} "
-                    f"that the current pipeline does not process (e.g. target off the reference footprint)")
-        old = old[~gone]
-    have = pd.MultiIndex.from_frame(new[k])
-    carry = old[~pd.MultiIndex.from_frame(old[k]).isin(have)].copy()
-    # carried rows take the object_index the new output uses for the same quadrant +
-    # reference source (catalog ordering / merge re-keying may differ from the original)
-    oid = new.drop_duplicates(QKEY + ["_csv"]).set_index(QKEY + ["_csv"])["object_index"]
-    keyc = pd.MultiIndex.from_frame(carry[QKEY + ["_csv"]])
-    mapped = oid.reindex(keyc).to_numpy(dtype=float)
-    # objects with no row in the new output (e.g. only unreconstructable NaN rows) keep
-    # their original object_index — exact whenever the reference catalog is unchanged;
-    # a row that would then collide with an existing (quadrant, object, epoch) is dropped
-    carry["object_index"] = np.where(np.isfinite(mapped), mapped,
-                                     pd.to_numeric(carry["object_index"]).to_numpy(float))
-    n_unm = int((carry["_csv"] < 0).sum())
-    if n_unm:
-        logger.info(f"    {n_unm:,} old rows match no reference-catalog source — dropped")
-    carry = carry[carry["_csv"] >= 0]
-    kk = QKEY + ["object_index", "_mjd"]
-    clash = pd.MultiIndex.from_frame(carry[kk].astype({"object_index": float})).isin(
-        pd.MultiIndex.from_frame(new[kk].astype({"object_index": float})))
-    if clash.any():
-        logger.info(f"    {int(clash.sum()):,} carried rows would duplicate an existing "
-                    f"(quadrant, object_index, epoch) — dropped")
-    carry = carry[~clash]
-    # carried rows from older files: express their flags in the FLAGS schema too
-    from ztfphot_flags import flags_of
-    carry["FLAGS"] = flags_of(carry).to_numpy()
-    carry = carry.drop(columns=[c for c in ("FLAG_AP", "FLAG_SE_REF", "INFOBITS_REF")
-                                if c in carry.columns])
-    out = pd.concat([new, carry], ignore_index=True, sort=False)
+    n_drop = int((~pd.MultiIndex.from_frame(old[k]).isin(pd.MultiIndex.from_frame(new[k]))).sum())
+    out = new
     out["FLAGS"] = pd.to_numeric(out["FLAGS"]).astype("Int32")
     out = out.drop(columns=["_csv", "_mjd"]).sort_values("OBSMJD", ignore_index=True)
     out["object_index"] = pd.to_numeric(out["object_index"]).astype("Int32")
     logger.info(f"    old-epoch rows recalibrated {len(m):,} (median dMAG_4 "
                 f"{1000 * np.nanmedian(dm):+.1f} mmag), new-epoch rows {int((~is_old_ep).sum()):,}, "
-                f"carried unchanged {len(carry):,}")
+                f"old rows not reproduced by the current pipeline (dropped) {n_drop:,}")
     return out
 
 
 # ── driver ───────────────────────────────────────────────────────────────────
 
-def update_target(paths: list[Path], a, auth) -> str:
+def update_target(paths: list[Path], a, auth, legacy=None) -> str:
     """Returns "ok", "refs" (reference products unavailable — worth retrying later in
-    the same run) or "fail"."""
+    the same run) or "fail". `legacy` (update_old_parquet) converts parquets written
+    before the current format: legacy.prepare(df, path) and legacy.raw_flux."""
     import download_coordinator as dc
     import ztf_field_lookup as zl
     from make_catalog import make_catalog
@@ -425,7 +487,19 @@ def update_target(paths: list[Path], a, auth) -> str:
     variants = {("_sci" if _is_sci(p) else ""): p for p in paths}
     first = next(iter(variants.values()))
     frames = {s: _load(p) for s, p in variants.items()}
+    if legacy is not None:
+        frames = {s: legacy.prepare(df, variants[s]) for s, df in frames.items()}
+        # epochs the conversion removed count as missing (measured again)
+        kept = set().union(*(map(tuple, df[QKEY].assign(_m=df["OBSMJD"].round(6))
+                                 .drop_duplicates().to_numpy().tolist()) for df in frames.values()))
+    elif not all(_is_current(df) for df in frames.values()):
+        logger.warning(f"SKIP {', '.join(p.name for p in variants.values())}: written before the "
+                       f"current format (no FLUX_4_DIF / APCORR410) — use update_old_parquet.py")
+        return "fail"
     have, meta = read_parquet_epochs(first)
+    if legacy is not None:
+        have = have[np.array([k in kept for k in map(tuple, have[QKEY].assign(
+            _m=have["OBSMJD"].round(6)).to_numpy().tolist())], dtype=bool)].reset_index(drop=True)
     ra, dec = target_position(first, meta)
     fcs = sorted(have["filtercode"].unique())
     if len(fcs) != 1:
@@ -435,6 +509,7 @@ def update_target(paths: list[Path], a, auth) -> str:
     logger.info(f"═══ {', '.join(p.name for p in variants.values())}: RA={ra} Dec={dec} {fc} ═══")
 
     base = Path(tempfile.mkdtemp(prefix="ztfupd_", dir=a.tmpdir))
+    keep = a.keep_temp                              # also kept for this target if it fails
     try:
         (base / "Epochs").mkdir(parents=True)
         epochs = zl.lookup_target(ra, dec, bands=[fc], cache_dir=base / "Epochs", force_refresh=True)
@@ -481,6 +556,11 @@ def update_target(paths: list[Path], a, auth) -> str:
         # References are essential: a quadrant missing them would lose its rows, so a
         # (transient) reference failure fails the whole target — nothing is written and
         # the next run retries it — rather than dropping the quadrant.
+        src_dirs = _image_dirs(a, meta)
+        if src_dirs:
+            n_s, n_r = _reuse_local(dc, base, todo, quads_in, src_dirs)
+            logger.info(f"  reused from {', '.join(map(str, src_dirs))}: {n_s}/{len(todo)} epoch "
+                        f"image(s), {n_r} reference product(s) — not downloaded")
         quads = _fetch_references(base, quads_in, auth, max(a.download_retries, 3), a.retry_wait)
         if len(quads) < len(quads_in):
             logger.warning(f"FAIL {first.name}: reference products unavailable for "
@@ -506,6 +586,16 @@ def update_target(paths: list[Path], a, auth) -> str:
                                   for r in todo.itertuples()], dtype=bool)]
         (base / "Catalogs").mkdir(exist_ok=True)
         make_catalog(str(base / "Catalogs"), str(base / "Reference"))
+        old_pos = pd.concat([df[QKEY + ["ALPHAWIN_REF", "DELTAWIN_REF"]] for df in frames.values()])
+        for q in quads:
+            sel = old_pos[(old_pos["field"] == q[0]) & (old_pos["filtercode"] == q[1])
+                          & (old_pos["ccdid"] == q[2]) & (old_pos["qid"] == q[3])]
+            n_raw, n_inj = _complete_catalog(
+                dc, base, q, sel[["ALPHAWIN_REF", "DELTAWIN_REF"]].to_numpy(float),
+                (ra, dec), a.target_match_radius)
+            if n_raw or n_inj:
+                logger.info(f"  {q}: reference catalog completed with the parquet's sources — "
+                            f"{n_raw} from refsexcat, {n_inj} injected")
         refs = {q: _ref_catalog(base, q) for q in quads}
         deferred = _download_epochs(dc, todo, base, fc, a)
 
@@ -530,7 +620,8 @@ def update_target(paths: list[Path], a, auth) -> str:
                                                      sel["DELTAWIN_REF"].to_numpy(float),
                                                      refs[q], target, a.target_match_radius)
             n_cat, used = _write_old_epochs(base, df, bool(s), refs, ffd_of, target,
-                                            a.target_match_radius)
+                                            a.target_match_radius,
+                                            raw_flux=legacy.raw_flux if legacy else _raw_flux)
             logger.info(f"  {variants[s].name}: {n_cat} old-epoch catalogs from "
                         f"{len(used):,}/{len(df):,} rows (unmatched {int((df['_csv'] < 0).sum())})")
             old_epochs |= set(map(tuple, df[QKEY].assign(_m=df["OBSMJD"].round(6)).to_numpy().tolist()))
@@ -570,7 +661,7 @@ def update_target(paths: list[Path], a, auth) -> str:
         with open(log, "w") as fh:
             if subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT).returncode != 0:
                 logger.warning(f"FAIL: run_pipeline failed — see {log}")
-                a.keep_temp = True
+                keep = True
                 return "fail"
 
         # 5. assemble + write
@@ -601,7 +692,7 @@ def update_target(paths: list[Path], a, auth) -> str:
             logger.info(f"  → {out_path} ({len(out):,} rows, {out['OBSMJD'].nunique()} epochs)")
         return "ok"
     finally:
-        if a.keep_temp:
+        if keep:
             logger.info(f"  (kept temp dir {base})")
         else:
             shutil.rmtree(base, ignore_errors=True)
@@ -681,8 +772,9 @@ def _n_deferred(p: Path) -> int:
         return 0
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(legacy=None):
+    p = argparse.ArgumentParser(description=legacy.__doc__ if legacy else __doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("parquet", nargs="+", type=Path,
                    help="parquet files, or directories: per target/band/variant the "
                         "*_recal.parquet is used if present, else the plain one")
@@ -733,6 +825,10 @@ def main():
     p.add_argument("--ref-pass-wait", type=float, default=120.0, metavar="S",
                    help="pause before each extra pass (default 120 s; once per pass, not per target)")
     p.add_argument("--tmpdir", default=None, help="parent dir for the temporary base dir")
+    p.add_argument("--image-dir", action="append", default=None, metavar="DIR",
+                   help="pipeline base dir whose Science/ and Reference/ images are reused "
+                        "instead of downloaded (repeatable); the base dir recorded in the "
+                        "parquet metadata is also checked")
     p.add_argument("--keep-temp", action="store_true")
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
@@ -771,8 +867,8 @@ def main():
         requeue = []
         for g in queue:
             try:
-                st = update_target(g, a, auth)
-            except Exception as exc:
+                st = update_target(g, a, auth, legacy)
+            except (Exception, SystemExit) as exc:
                 logger.exception(f"FAIL {g[0].name}: {exc}")
                 st = "fail"
             status[g[0].name] = st

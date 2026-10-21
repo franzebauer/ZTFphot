@@ -44,7 +44,7 @@ def _load_epoch_headers(cal_dir: Path) -> "pd.DataFrame":
     from astropy.io import fits
     keys = ["OBSMJD", "SEEING", "MAGLIM", "num_stars", "NC_N",
             "NC_RMS0", "NC_RMS1", "NC_RMS2", "NC_RMSFC", "NC_RMS3", "NC_RMS4",
-            "CALIB_N", "CALIB_M", "CALIB_ZP", "APCORR46",
+            "CALIB_N", "CALIB_M", "CALIB_ZP", "APCORR46", "APCORR410",
             "TGT_MRAW", "TGT_DCLIN", "TGT_DCPOL", "TGT_DCFF",
             "NC_FC_00", "NC_FC_01", "NC_FC_02", "NC_FC_03",
             "NC_FC_04", "NC_FC_05", "NC_FC_06"]
@@ -281,12 +281,12 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
         s   = see[idx].values
         mlv = ml[idx].values
         zpc = (cn[idx].values + cm[idx].values * 17.0) * 1000
-        # APCORR46 (mmag) was absorbed into CALIB_N; add it back so zpc is
-        # centred on the true photometric ZP variation, not the aperture offset.
-        apcorr_vals = df["APCORR46"].reindex(idx).values if "APCORR46" in df.columns else np.zeros(len(idx))
-        apcorr_vals = np.where(np.isfinite(apcorr_vals), apcorr_vals, 0.0)
-        zpc = zpc + apcorr_vals
-        med_apcorr  = float(np.nanmedian(apcorr_vals))
+        # Catalogs carrying APCORR46 (mmag) have it absorbed into CALIB_N; add it
+        # back so zpc is centred on the true photometric ZP variation. APCORR410 is
+        # applied after the fit, so CALIB_N does not contain it.
+        apcorr46 = df["APCORR46"].reindex(idx).values
+        zpc = zpc + np.where(np.isfinite(apcorr46), apcorr46, 0.0)
+        med_apcorr  = float(np.nanmedian(df["APCORR410"].reindex(idx).values))
         sc  = ax.scatter(s, zpc, c=mlv, cmap="plasma", s=10, alpha=0.7,
                          vmin=np.nanpercentile(mlv, 5), vmax=np.nanpercentile(mlv, 95))
         plt.colorbar(sc, ax=ax, label="MAGLIM (mag)")
@@ -296,7 +296,7 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
                 transform=ax.transAxes, va="top", fontsize=8,
                 bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
         ax.text(0.03, 0.03,
-                f"AperCorr 4→6px = {med_apcorr:.1f} {u}",
+                f"AperCorr 4→10px = {med_apcorr:.1f} {u}",
                 transform=ax.transAxes, ha="left", va="bottom", fontsize=8,
                 bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"))
     ax.set_xlabel("Seeing (arcsec)")

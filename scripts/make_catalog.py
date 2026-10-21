@@ -55,16 +55,11 @@ def make_catalog(save_path, refcats):
                   f"{os.path.basename(catalog)} (retried once the reference image exists)")
             continue
         if os.path.exists(tmp):
-            hdul = fits.open(tmp)
-            for i, line in enumerate(hdul[0].header):
-                if 'INFOBITS' in line:
-                    infobits_ref = hdul[0].header[i]
-                if 'MAGZPRMS' in line:
-                    magzprms_ref = hdul[0].header[i]
-                if 'MAGZP' in line:
-                    magzp_ref = hdul[0].header[i]
-
-            hdul.close()
+            # Exact keywords: the refimg header also has MAGZPUNC / MAGZPMIN / MAGZPMAX
+            hdr = fits.getheader(tmp)
+            infobits_ref = hdr.get('INFOBITS', int(np.iinfo(np.uint32).max))
+            magzp_ref    = hdr.get('MAGZP', np.nan)
+            magzprms_ref = hdr.get('MAGZPRMS', np.nan)
         else:
             infobits_ref = int(np.iinfo(np.uint32).max)
             magzp_ref = np.nan

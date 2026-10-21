@@ -87,13 +87,17 @@ def _calibrate_one(args: tuple) -> tuple[str, bool, str]:
     try:
         from calib_catalogs import calib_catalog
         Path(out_cal).parent.mkdir(parents=True, exist_ok=True)
+        before = Path(out_cal).stat().st_mtime_ns if Path(out_cal).exists() else None
         with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             calib_catalog(str(ref_csv), str(in_ldac), str(out_cal), img_kind,
                           vet_catalog=vet_catalog, **extra_kw)
-        ok  = Path(out_cal).exists()
-        msg = "" if ok else "too few calibrators — calib_catalog wrote nothing"
-        return str(out_cal), ok, msg
+        if not Path(out_cal).exists():
+            return str(out_cal), False, "too few calibrators — calib_catalog wrote nothing"
+        if before is not None and Path(out_cal).stat().st_mtime_ns == before:
+            # Too few calibrators on this pass: the previous calibration is kept
+            return str(out_cal), True, "too few calibrators — previous calibration kept"
+        return str(out_cal), True, ""
     except Exception as exc:
         return str(out_cal), False, str(exc)
 
@@ -178,12 +182,15 @@ def step_calibrate(
         return 0
 
     logger.info(f"calibrate: {len(tasks)} epochs with {workers} workers")
-    n_done = n_sparse = n_fail = 0
+    n_done = n_sparse = n_fail = n_kept = 0
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_calibrate_one, t): t for t in tasks}
         for i, fut in enumerate(as_completed(futures), 1):
             out_cal, ok, msg = fut.result()
-            if ok:
+            if ok and msg:
+                n_kept += 1
+                logger.warning(f"calibrate: {Path(out_cal).name}: {msg}")
+            elif ok:
                 n_done += 1
             elif "too few" in msg:
                 n_sparse += 1
@@ -194,8 +201,12 @@ def step_calibrate(
                 logger.info(f"calibrate: {i}/{len(tasks)} — "
                             f"{n_done} done, {n_sparse} sparse, {n_fail} failed")
 
-    logger.info(f"calibrate: {n_done} written, {n_sparse} sparse, {n_fail} failures")
-    return n_done
+    logger.info(f"calibrate: {n_done} written, {n_sparse} sparse, {n_fail} failures"
+                + (f", {n_kept} kept from the previous pass (too few calibrators now)"
+                   if n_kept else ""))
+    if n_kept:
+        logger.warning(f"calibrate: {n_kept} epoch(s) keep their previous calibration")
+    return n_done + n_kept
 
 
 # ── Step: build spatial flatfield ─────────────────────────────────────────────
@@ -230,6 +241,7 @@ def step_build_flatfield(
     Returns dict keyed by (field, fc, ccd, qid) → flatfield dict.
     """
     from scipy.stats import binned_statistic_2d
+    from calib_catalogs import _unwrap_ra
 
     flatfields = {}
 
@@ -269,6 +281,7 @@ def step_build_flatfield(
             continue
 
         all_ra, all_dec, all_dm = all_ra[finite], all_dec[finite], all_dm[finite]
+        all_ra = _unwrap_ra(all_ra, all_ra[0])          # continuous across RA = 0/360
         # Full spatial range (was 1–99 pct): ref-pos positions are exact
         # reference-catalog coordinates — no astrometric outliers to clip — and the
         # extreme edge rows/columns are exactly where the vignetting correction is

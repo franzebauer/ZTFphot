@@ -16,14 +16,21 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _catalog_zp_ok(csv: Path) -> bool:
-    """False for a reference CSV whose MAGZP_REF is all NaN (no reference zero-point)
-    — such a catalog must be rebuilt."""
+def _catalog_zp_ok(csv: Path, refimg: Path | None = None) -> bool:
+    """False for a reference CSV that must be rebuilt: MAGZP_REF all NaN (no reference
+    zero-point), or different from the MAGZP keyword of `refimg` when that exists."""
     import pandas as pd
     try:
         zp = pd.to_numeric(pd.read_csv(csv, usecols=["MAGZP_REF"], nrows=5)["MAGZP_REF"],
-                           errors="coerce")
-        return bool(zp.notna().any())
+                           errors="coerce").dropna()
+        if zp.empty:
+            return False
+        if refimg is not None and refimg.exists():
+            from astropy.io import fits
+            hzp = fits.getheader(refimg).get("MAGZP")
+            if hzp is not None and abs(float(zp.iloc[0]) - float(hzp)) > 1e-6:
+                return False
+        return True
     except Exception:
         return True
 
@@ -45,12 +52,13 @@ def step_make_catalog(base_dir: Path, quadrants: list[dict], force: bool = False
         ccd = q["ccdid"]; qid_ = q["qid"]
         cat_name = f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}"
         out_csv  = cat_dir / f"{cat_name}(REFERENCE)[OBJECTS].csv"
+        refimg   = Path(q["ref_dir"]) / f"ztf_{cat_name}_refimg.fits"
         if out_csv.exists() and not force:
-            if _catalog_zp_ok(out_csv):
+            if _catalog_zp_ok(out_csv, refimg):
                 n_skip += 1
                 continue
-            logger.warning(f"{out_csv.name}: no reference zero-point (built without the "
-                           f"reference image) — rebuilding")
+            logger.warning(f"{out_csv.name}: MAGZP_REF missing or not the reference "
+                           f"image's MAGZP — rebuilding")
         logger.info(f"Building reference catalog for {cat_name}")
         try:
             make_catalog(save_path=str(cat_dir), refcats=str(q["ref_dir"]))

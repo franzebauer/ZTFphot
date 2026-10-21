@@ -323,6 +323,11 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
     """
     if skip_if_exists and dest.exists() and dest.stat().st_size > 0:
         return (url, "skipped", "exists")
+    # A .fits.fz is deleted by funpack after unpacking: the .fits counts as present
+    unpacked = dest.with_name(dest.name.replace(".fits.fz", ".fits"))
+    if (skip_if_exists and unpacked != dest and unpacked.exists()
+            and unpacked.stat().st_size > 0):
+        return (url, "skipped", "exists (unpacked)")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")

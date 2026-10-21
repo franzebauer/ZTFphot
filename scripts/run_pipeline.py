@@ -812,7 +812,7 @@ def main() -> None:
 
             _dl_kw = dict(
                 base_dir=base_dir, bands=bands,
-                max_workers=args.workers,
+                max_workers=args.download_workers,
                 skip_flagged=args.skip_flagged,
                 max_seeing=args.max_seeing,
                 min_maglim=args.min_maglim,
