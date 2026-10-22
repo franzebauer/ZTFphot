@@ -79,14 +79,15 @@ _PHOT_COLS = {
              'FLUX_4_DIF_uJy', 'FERR_4_DIF_uJy', 'APCORR410', 'MAG_4_REF'],
 }
 _PHOT_COLS['full'] = _PHOT_COLS['slim'] + [
-    'MAG_10_TOT_AB', 'MERR_10_TOT_AB', 'FLUX_10_TOT_uJy', 'FERR_10_TOT_uJy',
-    'FLUX_10_DIF_uJy', 'FERR_10_DIF_uJy']
+    c for k in ('3', '6', '10')
+    for c in (f'MAG_{k}_TOT_AB', f'MERR_{k}_TOT_AB', f'FLUX_{k}_TOT_uJy', f'FERR_{k}_TOT_uJy',
+              f'FLUX_{k}_DIF_uJy', f'FERR_{k}_DIF_uJy')]
 
 
 def _photometry_columns(df: pd.DataFrame, preset: str) -> pd.DataFrame:
     """Rename the calibrated fluxes to μJy names, convert the raw difference fluxes
     (counts) to μJy with MAGZP_DIF, and keep only the preset's photometric columns."""
-    for k in ('4', '10'):
+    for k in ('3', '4', '6', '10'):
         df = df.rename(columns={f'FLUX_{k}_TOT_AB': f'FLUX_{k}_TOT_uJy',
                                 f'FERR_{k}_TOT_AB': f'FERR_{k}_TOT_uJy'})
         if f'FLUX_{k}_DIF' in df.columns:

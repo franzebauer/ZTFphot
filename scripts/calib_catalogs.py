@@ -596,11 +596,15 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         pf.Column(name='CLASS_STAR',        format='D', array=class_star),
         pf.Column(name='MAG_4_TOT_AB_org',  format='D', array=magQi[1]),
         pf.Column(name='MERR_4_TOT_AB_org', format='D', array=errmagQi[1]),
-        # Raw 4 px and 10 px difference-image flux and error (counts, MAGZP_DIF units) —
+        # Raw difference-image flux and error per aperture (counts, MAGZP_DIF units) —
         # the pre-calibration input, kept so a light curve can be recalibrated (or
         # extended with new epochs) from the parquet alone, negative-flux epochs included.
         pf.Column(name='FLUX_4_DIF',        format='E', array=np.asarray(flux_dif[:, 1])[pos]),
         pf.Column(name='FERR_4_DIF',        format='E', array=np.asarray(flux_dif_err[:, 1])[pos]),
+        pf.Column(name='FLUX_3_DIF',        format='E', array=np.asarray(flux_dif[:, 0])[pos]),
+        pf.Column(name='FERR_3_DIF',        format='E', array=np.asarray(flux_dif_err[:, 0])[pos]),
+        pf.Column(name='FLUX_6_DIF',        format='E', array=np.asarray(flux_dif[:, 2])[pos]),
+        pf.Column(name='FERR_6_DIF',        format='E', array=np.asarray(flux_dif_err[:, 2])[pos]),
         pf.Column(name='FLUX_10_DIF',       format='E', array=np.asarray(flux_dif[:, 3])[pos]),
         pf.Column(name='FERR_10_DIF',       format='E', array=np.asarray(flux_dif_err[:, 3])[pos]),
         pf.Column(name='ALPHA_J2000',       format='D', array=alpfin),

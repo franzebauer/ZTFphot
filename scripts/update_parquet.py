@@ -22,8 +22,8 @@ when both exist):
      as the original run); download ONLY the missing/new epochs.
   3. Old epochs become per-epoch catalogs again (same LDAC layout the photometry step
      writes) from the parquet's raw difference flux FLUX_4_DIF_uJy / FERR_4_DIF_uJy
-     (converted back to counts with MAGZP_DIF), and FLUX_10_DIF_uJy for the 10 px
-     aperture in --lc-columns full files; the output keeps the input's preset.
+     (converted back to counts with MAGZP_DIF), and FLUX_k_DIF_uJy for the 3/6/10 px
+     apertures in --lc-columns full files; the output keeps the input's preset.
   4. run_pipeline (current code) on the temp dir: forced photometry of the new epochs,
      then vet -> calibrate -> flatfield -> recalibrate -> lightcurves -> merge over
      old + new epochs together.
@@ -358,9 +358,12 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
         is_t = ci == len(ref)
         q_mag = np.where(is_t, np.nan, ref["q_mag"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
         f, e = raw_flux(rows, q_mag, is_t, ref)
-        f10, e10 = _dif_counts(rows, "10")              # 10 px slot (full preset)
+        # the other aperture slots from their own raw flux (full preset); NaN where the
+        # parquet has none, so that aperture is simply not calibrated for these epochs
+        other = {slot: _dif_counts(rows, k) for slot, k in ((0, "3"), (2, "6"), (3, "10"))}
         keep = (ci >= 0) & np.isfinite(f) & np.isfinite(e)
-        rows, ci, f, e, f10, e10 = rows[keep], ci[keep], f[keep], e[keep], f10[keep], e10[keep]
+        rows, ci, f, e = rows[keep], ci[keep], f[keep], e[keep]
+        other = {slot: (fo[keep], eo[keep]) for slot, (fo, eo) in other.items()}
         if sci:
             if {"ALPHA_SCI", "DELTA_SCI"} <= set(rows.columns):
                 ra = pd.to_numeric(rows["ALPHA_SCI"], errors="coerce").to_numpy(float)
@@ -396,8 +399,8 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
             n = len(idx)
             fa = np.repeat(f[idx, None], 4, axis=1).astype(np.float32)
             ea = np.repeat(e[idx, None], 4, axis=1).astype(np.float32)
-            fa[:, 3] = np.where(np.isfinite(f10[idx]), f10[idx], f[idx])
-            ea[:, 3] = np.where(np.isfinite(e10[idx]), e10[idx], e[idx])
+            for slot, (fo, eo) in other.items():
+                fa[:, slot], ea[:, slot] = fo[idx], eo[idx]
             name = catalog_name(f"ztf_{ffd_of(q, mjd)}_{q[0]:06d}_{q[1]}_c{q[2]:02d}_o_q{q[3]}"
                                 f"_scimrefdiffimg")
             _write_ldac(cat_dir / name, h, {
@@ -485,6 +488,10 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
     variants = {("_sci" if _is_sci(p) else ""): p for p in paths}
     first = next(iter(variants.values()))
     frames = {s: _load(p) for s, p in variants.items()}
+    if legacy is not None and all(_is_current(df) for df in frames.values()):
+        logger.info(f"SKIP {', '.join(p.name for p in variants.values())}: already in the current "
+                    f"format — refresh it with update_parquet.py")
+        return "current"
     if legacy is not None:
         frames = {s: legacy.prepare(df, variants[s], a.target_match_radius) for s, df in frames.items()}
         # epochs the conversion removed count as missing (measured again)
@@ -895,8 +902,10 @@ def main(legacy=None):
         queue = requeue
         if not queue:
             break
-    bad = {n: st for n, st in status.items() if st != "ok"}
-    logger.info(f"done: {len(status) - len(bad)}/{len(status)} target groups"
+    n_cur = sum(st == "current" for st in status.values())
+    bad = {n: st for n, st in status.items() if st not in ("ok", "current")}
+    logger.info(f"done: {len(status) - len(bad) - n_cur}/{len(status)} target groups"
+                + (f"; {n_cur} already current format (skipped)" if n_cur else "")
                 + (f"; FAILED: {', '.join(f'{n} ({st})' for n, st in bad.items())}" if bad else "")
                 + (" — reference failures are retried on the next run" if "refs" in bad.values() else ""))
 

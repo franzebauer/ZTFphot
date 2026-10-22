@@ -35,7 +35,7 @@ def _needed(names: set, columns: list[str]) -> list[str]:
     for c in columns:
         if c in names:
             want.add(c)
-        for k in ("4", "6", "10"):
+        for k in ("3", "4", "6", "10"):
             for kind in ("FLUX", "FERR"):
                 if c == f"{kind}_{k}_TOT_uJy" and f"{kind}_{k}_TOT_AB" in names:
                     want |= {f"{kind}_{k}_TOT_AB", "norm_offset"}
@@ -54,7 +54,7 @@ def read_lc(path, columns: list[str] | None = None) -> pd.DataFrame:
         df = pd.read_parquet(path, columns=_needed(set(pq.read_schema(path).names), columns))
     else:
         df = pd.read_parquet(path)
-    for k in ("4", "6", "10"):
+    for k in ("3", "4", "6", "10"):
         for kind in ("FLUX", "FERR"):
             old = f"{kind}_{k}_TOT_AB"
             if old in df.columns and f"{kind}_{k}_TOT_uJy" not in df.columns:

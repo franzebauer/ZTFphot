@@ -783,7 +783,7 @@ def main() -> None:
                    help="photometric columns of the light-curve parquets: slim (default) = "
                         "4 px calibrated magnitude and μJy flux (aperture-corrected to "
                         "10 px), raw 4 px difference flux, APCORR410, MAG_4_REF; full = "
-                        "slim + the same for the 10 px aperture")
+                        "slim + the same for the 3, 6 and 10 px apertures")
     p.add_argument("--lc-bin-days", type=float, default=50.0,
                    help="Bin width (days) for the binned light-curve overlay in the "
                         "lightcurves plot (default: 50).")
