@@ -100,27 +100,32 @@ def lookup_target(
                 f"radius={search_radius_deg:.4f} deg ...")
 
     import time
-    _max_attempts = 5
+    # One short retry; if IRSA still fails the target fails (and is retried in a later
+    # run) rather than waiting out an outage here
+    _max_attempts, _wait, err = 2, 5, None
     for _attempt in range(1, _max_attempts + 1):
-        zquery = ztfquery.ZTFQuery()
-        zquery.load_metadata(radec=[ra, dec], size=search_radius_deg)
-        meta = zquery.metatable
+        try:
+            zquery = ztfquery.ZTFQuery()
+            zquery.load_metadata(radec=[ra, dec], size=search_radius_deg)
+            meta = zquery.metatable
+            err = None
+        except Exception as exc:                 # connection / SSL / server errors
+            meta, err = None, exc
         # An HTML/XML page parsed as a table is an IRSA error (retried); a well-formed
         # empty table is returned as is (no coverage, or an IRSA-side problem)
         if meta is not None and not any(
                 str(c).strip().startswith(("<!", "<?")) for c in meta.columns):
             break
         if _attempt < _max_attempts:
-            _wait = 30 * _attempt
-            logger.warning(f"IRSA returned error page (attempt {_attempt}/{_max_attempts}) "
-                           f"— retrying in {_wait}s ...")
+            logger.warning(f"IRSA lookup failed (attempt {_attempt}/{_max_attempts}"
+                           f"{': ' + str(err)[:120] if err else ', error page'}) — retrying in {_wait}s")
             time.sleep(_wait)
     else:
         raise RuntimeError(
-            "IRSA returned an error page (HTML/XML) after 5 attempts. "
-            "This is usually a transient server error (502/503) or rate-limiting. "
-            "If it persists, check credentials: "
-            "python -c \"from ztfquery import io; io.set_account('irsa')\""
+            f"IRSA lookup failed after {_max_attempts} attempts"
+            f"{' (' + str(err)[:200] + ')' if err else ' (error page)'} — usually a transient "
+            "IRSA problem: the target is retried in a later run. If it persists, check "
+            "credentials: python -c \"from ztfquery import io; io.set_account('irsa')\""
         )
 
     if meta.empty:

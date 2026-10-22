@@ -203,16 +203,15 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     else:
         vector_assoc = np.zeros(len(table), dtype=int)
 
-    # VECTOR_ASSOC is 1-based; ASSOCSELEC_TYPE=MATCHED guarantees all rows > 0.
-    matched_mask = vector_assoc > 0
+    # VECTOR_ASSOC is 1-based; every row indexes the reference catalog (injected
+    # targets are catalog rows too). Rows beyond it (a catalog measured with another
+    # reference catalog) are dropped.
+    matched_mask = (vector_assoc > 0) & (vector_assoc <= len(table_ref))
+    if (vector_assoc > len(table_ref)).any():
+        print(f"  {int((vector_assoc > len(table_ref)).sum())} row(s) beyond the reference "
+              f"catalog dropped (photometry catalog made with another reference catalog)")
     n   = vector_assoc[matched_mask] - 1  # 0-based ref catalog indices
     pos = np.where(matched_mask)[0]        # sexout row indices
-
-    # Target row: ASSOC entry at 0-based index len(table_ref) has no ref catalog entry.
-    # Use n_safe for all ref-catalog lookups; override results for the target row after.
-    _is_tgt = (n == len(table_ref))
-    n_safe  = n.copy()
-    n_safe[_is_tgt] = 0
 
     # Reference frame centre for polynomial normalisation
     ra0  = float(np.mean(_unwrap_ra(raref, raref[0])))
@@ -262,6 +261,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         (mag_ref_tot_err[1] < 0.3) &
         is_good_calib & ref_clean       # unblended: a neighbour would bias the 10 px flux
     )
+    if tgt_in_matched >= 0:
+        _ac_mask[n[tgt_in_matched]] = False       # nor the target
     if _ac_mask.sum() >= 5:
         _apcorr_4_10 = float(np.median(
             mag_ref_tot[1][_ac_mask] - mag_ref_tot[3][_ac_mask]))
@@ -275,8 +276,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         flagsfin  = flags_tmp
         alphafin  = alpha[pos]
         deltafin  = delta[pos]
-        class_star = clas[n_safe]
-        class_star[_is_tgt] = 0.0  # target not a calibration star
+        class_star = clas[n]
         alpfin    = alp[pos]
         vector_assoc_fin = vector_assoc[pos]
         dltfin    = dlt[pos]
@@ -284,13 +284,10 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         flux_dif_tmp     = flux_dif[:, k][pos]
         flux_dif_err_tmp = flux_dif_err[:, k][pos]
 
-        q_mag = mag_ref_tot[k][n_safe]
-        q_err = mag_ref_tot_err[k][n_safe]
-        q_mag[_is_tgt] = np.nan  # target has no reference magnitude
-        q_err[_is_tgt] = np.nan
+        q_mag = mag_ref_tot[k][n]
+        q_err = mag_ref_tot_err[k][n]
 
         flux_ref_tot[k] = 10.0**(0.4 * (np.float64(magzp_dif) - np.float64(q_mag)))
-        flux_ref_tot[k][_is_tgt] = 0.0  # target has no reference flux; use diff-image flux only
         flux_tot[k]     = np.float64(flux_ref_tot[k]) + np.float64(flux_dif_tmp)
 
         maginst  = np.where(
@@ -309,8 +306,9 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         q_mag_all    = q_mag.copy()
 
         # ── Calibrator selection ────────────────────────────────────────────
-        good_ref_mask = is_good_calib[n_safe] & ref_clean[n_safe]
-        good_ref_mask[_is_tgt] = False  # target excluded from calibrator selection
+        good_ref_mask = is_good_calib[n] & ref_clean[n]
+        if tgt_in_matched >= 0:         # the target is never a calibrator
+            good_ref_mask[tgt_in_matched] = False
         fn = np.where(
             (class_star >= 0.7) & ((np.asarray(flags_tmp).astype(int) & cal_reject) == 0) &
             (q_mag > 14.) & (q_mag < 19.0) & (q_err < 0.3) &

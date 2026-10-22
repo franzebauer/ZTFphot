@@ -12,11 +12,15 @@ Algorithm
     (matched within MAX_SEP arcsec, N_clean >= MIN_EPOCHS in both quadrants).
 4.  Measure
         delta_mag(mag) = median_mag_dominant - median_mag_minority
-    as a function of magnitude over all common sources, in bins of width
-    MAG_BIN with a 3σ MAD clip per bin.  Apply the magnitude-dependent
+    (median_mag: the magnitude of the source's median FLUX_4_TOT_uJy over its clean
+    epochs, no error cut, so faint sources are not biased bright) as a function of
+    the reference magnitude MAG_4_REF over the common sources with MAG_4_REF in
+    [MAG_BRIGHT, MAG_FAINT] = [14, 19] (the calibrator range), in bins of width
+    MAG_BIN: per bin the inverse-variance weighted mean after a 3σ clip (each
+    difference weighted by the errors of the two median magnitudes).  Apply the magnitude-dependent
     correction to the MAG_k_TOT_AB columns (and the equivalent factor to the calibrated
-    FLUX/FERR_*_TOT_uJy) by interpolating the curve at each source's median
-    MAG_4_TOT_AB in its quadrant (one offset per source).  Falls back to a scalar
+    FLUX/FERR_*_TOT_uJy) by interpolating the curve at each source's MAG_4_REF in its
+    quadrant (one offset per source; without a reference source, at its median_mag).  Falls back to a scalar
     median offset if too few bins.  A quadrant that cannot be cross-calibrated
     (too few common sources) is merged with offset 0 and flagged: FLAGS bit
     NOT_CROSS_CALIBRATED, metadata not_cross_calibrated.
@@ -62,44 +66,55 @@ MIN_COMMON     = 10       # min number of common sources required for any offset
 MAG_BIN        = 0.1      # width of magnitude bins for the inter-quadrant correction
 MIN_BIN        = 5        # min common sources required to trust a magnitude bin
 MAG_BRIGHT     = 14.0
-MAG_FAINT      = 21.5
-MAX_ERR        = 0.1      # max MERR_4_TOT_AB for a clean epoch
+MAG_FAINT      = 19.0      # the calibrator limit: fainter sources get the 19 mag offset
 
 
 _MAG_COLS = [f'MAG_{k}_TOT_AB' for k in ('3', '4', '6', '10')]
 # calibrated fluxes only; the raw difference fluxes (*_DIF_uJy) stay uncorrected
 _FLUX_COLS = [f'{c}_{k}_TOT_uJy' for k in ('3', '4', '6', '10') for c in ('FLUX', 'FERR')]
 # Per-quadrant metadata kept in the merged file as {key}_{field}_{fc}_c{ccd}_q{qid}
-_PER_QUAD_META = (b'target_sep_arcsec', b'target_ref_mag', b'ztfphot_run', b'ztfphot_download')
+_PER_QUAD_META = (b'target_sep_arcsec', b'target_ref_mag', b'ztfphot_run', b'ztfphot_download',
+                  b'epochs_deferred', b'deferred_filefracdays')
 _QUAD_ID_META = (b'field', b'filtercode', b'ccdid', b'qid')
 
 
 def _per_source_stats(df: pd.DataFrame, min_epochs: int = MIN_EPOCHS) -> pd.DataFrame:
     """
-    Return one row per object_index with ra, dec, n_clean, median_mag.
-    Only sources with n_clean >= min_epochs are returned.
+    Return one row per object_index with ra, dec, n_clean, median_mag, median_err,
+    ref_mag. Only sources with n_clean >= min_epochs and a reference source are returned.
 
-    Uses MAG_4_TOT_AB over the clean rows (ztfphot_flags.clean_rows: no INFOBITS_DIF,
-    no EDGE / MASKED; the selection the plots use) with magnitude in [MAG_BRIGHT,
-    MAG_FAINT] and error < MAX_ERR, over the full magnitude range so the
-    inter-quadrant offset can be measured as a function of magnitude.
+    median_mag is the magnitude of the median FLUX_4_TOT_uJy over the clean rows
+    (ztfphot_flags.clean_rows: no INFOBITS_DIF, no EDGE / MASKED; the selection the
+    plots use), without an error or magnitude cut: censoring the faint, noisy epochs
+    would bias faint sources bright. median_err is its uncertainty, 1.2533 sigma / sqrt(n)
+    with sigma the larger of the robust flux scatter (1.4826 MAD, which includes any
+    variability) and the median FERR_4_TOT_uJy (flux errors: background-only, independent
+    of the source's own fluctuations, so weighting by them does not bias). ref_mag
+    (MAG_4_REF) is the binning axis.
     """
     from ztfphot_flags import clean_rows
-    mag_col = 'MAG_4_TOT_AB'
     df = clean_rows(df)
-    mask = df[mag_col].notna() & (df[mag_col] > MAG_BRIGHT) & (df[mag_col] < MAG_FAINT)
-    if 'MERR_4_TOT_AB' in df.columns:
-        mask &= df['MERR_4_TOT_AB'].fillna(999) < MAX_ERR
-    clean = df[mask]
-    stats = (clean.groupby('object_index')
-             .agg(
+    flux = pd.to_numeric(df['FLUX_4_TOT_uJy'], errors='coerce')
+    mref = pd.to_numeric(df['MAG_4_REF'], errors='coerce')
+    ferr = pd.to_numeric(df['FERR_4_TOT_uJy'], errors='coerce')
+    clean = df.assign(_flux=flux, _ferr=ferr, _mref=mref)[flux.notna() & (mref < 90)]
+    g = clean.groupby('object_index')
+    stats = (g.agg(
                  ra        =('ALPHAWIN_REF', 'first'),
                  dec       =('DELTAWIN_REF', 'first'),
-                 n_clean   =(mag_col, 'count'),
-                 median_mag=(mag_col, 'median'),
+                 n_clean   =('_flux', 'count'),
+                 med_flux  =('_flux', 'median'),
+                 med_ferr  =('_ferr', 'median'),
+                 ref_mag   =('_mref', 'first'),
              )
+             .join(1.4826 * (clean['_flux'] - g['_flux'].transform('median')).abs()
+                   .groupby(clean['object_index']).median().rename('mad_flux'))
              .reset_index())
-    return stats[stats['n_clean'] >= min_epochs]
+    stats = stats[(stats['n_clean'] >= min_epochs) & (stats['med_flux'] > 0)]
+    sig = np.fmax(stats['mad_flux'], stats['med_ferr'])
+    err = 1.0857 * 1.2533 * sig / np.sqrt(stats['n_clean']) / stats['med_flux']
+    stats = stats.assign(median_mag=23.9 - 2.5 * np.log10(stats['med_flux']), median_err=err)
+    return stats[np.isfinite(stats['median_err']) & (stats['median_err'] > 0)]
 
 
 def _compute_mag_correction(
@@ -112,8 +127,8 @@ def _compute_mag_correction(
     """
     Match dominant and minority sources by position and measure
         delta_mag(mag) = median_mag_dominant - median_mag_minority
-    as a function of (dominant) magnitude, in bins of width `mag_bin` with a
-    3σ MAD clip per bin.  Returns (centers, deltas, n_common) suitable for
+    as a function of the dominant reference magnitude, in bins of width `mag_bin` with a
+    3σ clip per bin and inverse-variance weights.  Returns (centers, deltas, n_common) suitable for
     np.interp.
 
     Falls back to a single-element (scalar) curve when fewer than two bins
@@ -137,27 +152,31 @@ def _compute_mag_correction(
     dom_mag = stats_dom['median_mag'].values[idx[matched]]
     sec_mag = stats_min['median_mag'].values[matched]
     diff    = dom_mag - sec_mag           # dominant - minority
-    mag_axis = dom_mag                    # the more reliable magnitude
+    err     = np.hypot(stats_dom['median_err'].values[idx[matched]],
+                       stats_min['median_err'].values[matched])
+    mag_axis = stats_dom['ref_mag'].values[idx[matched]]   # the more reliable magnitude
 
-    def _clip_median(d: np.ndarray) -> float:
-        med  = float(np.median(d))
-        mad  = float(np.median(np.abs(d - med)))
-        sig  = 1.4826 * mad
-        keep = np.abs(d - med) < 3.0 * sig if sig > 0 else np.ones(len(d), bool)
-        return float(np.median(d[keep]))
+    def _clip_wmean(d: np.ndarray, e: np.ndarray) -> float:
+        # inverse-variance weighted mean after a 3-sigma clip of the normalised
+        # residuals about the median (robust width: 1.4826 MAD)
+        z    = (d - np.median(d)) / e
+        sig  = 1.4826 * float(np.median(np.abs(z - np.median(z))))
+        keep = np.abs(z - np.median(z)) < 3.0 * sig if sig > 0 else np.ones(len(d), bool)
+        w    = 1.0 / e[keep] ** 2
+        return float(np.sum(w * d[keep]) / np.sum(w))
 
-    edges = np.arange(MAG_BRIGHT, MAG_FAINT + mag_bin, mag_bin)
+    edges = np.arange(MAG_BRIGHT, MAG_FAINT + 0.5 * mag_bin, mag_bin)
     centers, deltas = [], []
     for lo, hi in zip(edges[:-1], edges[1:]):
-        d = diff[(mag_axis >= lo) & (mag_axis < hi)]
-        if len(d) < MIN_BIN:
+        sel = (mag_axis >= lo) & (mag_axis < hi)
+        if sel.sum() < MIN_BIN:
             continue
         centers.append(0.5 * (lo + hi))
-        deltas.append(_clip_median(d))
+        deltas.append(_clip_wmean(diff[sel], err[sel]))
 
     if len(centers) < 2:
         # too few populated bins → single scalar curve (flat with magnitude)
-        return np.array([17.0]), np.array([_clip_median(diff)]), n_common
+        return np.array([17.0]), np.array([_clip_wmean(diff, err)]), n_common
 
     return np.asarray(centers), np.asarray(deltas), n_common
 
@@ -264,17 +283,15 @@ def merge_band(
                 f"faint={deltas[-1]:+.4f}@{centers[-1]:.2f}  "
                 f"median={float(np.median(deltas)):+.4f} mag"
             )
-            # One offset per source, evaluated at its median calibrated magnitude in this
-            # quadrant (the curve's axis); without one, at its reference magnitude on the
-            # same aperture-corrected scale; else the curve's median
-            mag = pd.to_numeric(df['MAG_4_TOT_AB'], errors='coerce')
-            src_mag = mag.groupby(df['object_index']).transform('median').to_numpy(float)
-            if 'MAG_4_REF' in df.columns:
-                mref = pd.to_numeric(df['MAG_4_REF'], errors='coerce').to_numpy(float)
-                apc = (float(np.nanmedian(pd.to_numeric(df['APCORR410'], errors='coerce'))) / 1000.0
-                       if 'APCORR410' in df.columns else 0.0)
-                src_mag = np.where(np.isfinite(src_mag), src_mag,
-                                   np.where(mref < 90, mref - apc, np.nan))
+            # One offset per source, evaluated at its reference magnitude (the curve's
+            # axis); without a reference source, at the magnitude of its median
+            # calibrated flux in this quadrant; else the curve's median
+            mref = pd.to_numeric(df['MAG_4_REF'], errors='coerce').to_numpy(float)
+            med_flux = (pd.to_numeric(df['FLUX_4_TOT_uJy'], errors='coerce')
+                        .groupby(df['object_index']).transform('median').to_numpy(float))
+            with np.errstate(divide='ignore', invalid='ignore'):
+                flux_mag = np.where(med_flux > 0, 23.9 - 2.5 * np.log10(med_flux), np.nan)
+            src_mag = np.where(mref < 90, mref, flux_mag)
             correction = np.interp(src_mag, centers, deltas)  # flat extrapolation
             correction[~np.isfinite(src_mag)] = float(np.median(deltas))
             correction = correction.astype(np.float32)
@@ -311,8 +328,12 @@ def merge_band(
     # secondary quadrant is matched against all quadrants linked so far (dominant first),
     # so overlaps between secondaries are linked too; only mutual nearest neighbours
     # within max_sep_arcsec are linked, so two distinct sources never share an index.
+    # A source without a reference source (difference flux only) is never linked to
+    # one with a reference source: their fluxes are not on the same scale.
     def _positions(df):
-        return (df.groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']]
+        mref = pd.to_numeric(df['MAG_4_REF'], errors='coerce')
+        return (df.assign(_noref=~(mref < 90))
+                .groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF', '_noref']]
                 .first().reset_index())
 
     linked = _positions(frames[dom_idx])
@@ -328,7 +349,8 @@ def merge_band(
                               dec=linked['DELTAWIN_REF'].values * u.deg)
             fwd, sep, _ = c_sec.match_to_catalog_sky(c_lnk)
             back, _, _ = c_lnk.match_to_catalog_sky(c_sec)
-            mutual = (sep.arcsec < max_sep_arcsec) & (back[fwd] == np.arange(len(sec)))
+            mutual = ((sep.arcsec < max_sep_arcsec) & (back[fwd] == np.arange(len(sec)))
+                      & (sec['_noref'].to_numpy() == linked['_noref'].to_numpy()[fwd]))
             remap = {int(sec['object_index'].iloc[j]): int(linked['object_index'].iloc[fwd[j]])
                      for j in np.where(mutual)[0]}
         if remap:
@@ -364,6 +386,8 @@ def merge_band(
     for k_ in _QUAD_ID_META + (b'ztfphot_run', b'ztfphot_download'):
         if k_ in metas[dom_idx]:
             all_meta[k_] = metas[dom_idx][k_]
+    all_meta[b'epochs_deferred'] = str(sum(int(fm.get(b'epochs_deferred', b'0') or 0)
+                                           for fm in metas)).encode()
     seps = np.array([float(fm.get(b'target_sep_arcsec', b'nan')) for fm in metas])
     if np.isfinite(seps).any():
         j = int(np.nanargmin(seps))

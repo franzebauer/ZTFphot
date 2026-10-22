@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import json
 import pandas as pd
 from astropy.table import Table as AstropyTable
 
@@ -100,6 +101,48 @@ def _photometry_columns(df: pd.DataFrame, preset: str) -> pd.DataFrame:
     return df.drop(columns=[c for c in phot if c not in keep])
 
 
+def _deferred_epochs(base_dir: Path, field, fc, ccd, qid, suffix: str) -> list[str]:
+    """Filefracdays recorded in Epochs/deferred_epochs.log for this quadrant that still
+    have no photometry catalog (and are not permanent IRSA 404s)."""
+    log = Path(base_dir) / "Epochs" / "deferred_epochs.log"
+    if not log.exists():
+        return []
+    from aperture_photometry import catalog_dir, catalog_name, catalog_ok
+    from download_coordinator import load_permanent_404s
+    gone = load_permanent_404s(base_dir, max_age_days=0)
+    out = set()
+    for line in log.read_text().splitlines():
+        p = line.split("\t")
+        if len(p) != 5 or (int(p[1]), p[2], int(p[3]), int(p[4])) != (field, fc, ccd, qid):
+            continue
+        stem = f"ztf_{p[0]}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid}_scimrefdiffimg"
+        if catalog_ok(catalog_dir(base_dir, suffix, field, fc, ccd, qid) / catalog_name(stem)):
+            continue
+        if any(stem in u for u in gone):
+            continue
+        out.add(p[0])
+    return sorted(out)
+
+
+def _deferred_quadrants(base_dir: Path, fc: str, suffix: str) -> list[str]:
+    """Quadrants of band `fc` recorded in Epochs/deferred_quadrants.log (not completed by
+    a run: reference products unavailable) that still have no photometry catalog."""
+    log = Path(base_dir) / "Epochs" / "deferred_quadrants.log"
+    if not log.exists():
+        return []
+    import re
+    from aperture_photometry import catalog_dir, CATALOG_SUFFIX
+    out = set()
+    for tag in log.read_text().split():
+        m = re.fullmatch(r"(\d{6})_(z[gri])_c(\d\d)_q(\d)", tag)
+        if not m or m.group(2) != fc:
+            continue
+        d = catalog_dir(base_dir, suffix, int(m.group(1)), fc, int(m.group(3)), int(m.group(4)))
+        if not (d.exists() and any(d.glob(f"*{CATALOG_SUFFIX}"))):
+            out.add(tag)
+    return sorted(out)
+
+
 def step_lightcurves(
     base_dir: Path, quadrants: list[dict],
     force: bool = False,
@@ -123,6 +166,9 @@ def step_lightcurves(
       target_sep_arcsec  (nearest ref source to target; NaN if target not given)
       target_ref_mag     (reference AB mag of the target's matched source, or NaN if
                           reference-less — then FLUX_4_TOT_uJy is difference flux)
+      epochs_deferred, deferred_filefracdays
+                         epochs of this quadrant not measured (IRSA failures; JSON list)
+      quadrants_deferred JSON list of the band's quadrants the run could not complete
       epoch_summary_{field}_{fc}_c{ccd}_q{qid}
                          JSON, from the data: n_epochs, MJD range, min MAGLIM, max
                          SEEING, epochs with INFOBITS set — the effective epoch cuts
@@ -190,27 +236,15 @@ def step_lightcurves(
                 + pd.to_numeric(ref['MAGZP_REF'], errors='coerce').values
             )
 
-        # Append one sentinel row for the target ASSOC entry (index = len(ref), 0-based).
-        # Needed when the target is appended to the ASSOC catalog beyond the ref catalog.
-        if target_ra is not None and target_dec is not None:
-            _tgt_extra = {
-                'ALPHAWIN_REF': np.float64(target_ra),
-                'DELTAWIN_REF': np.float64(target_dec),
-                'FLAG_SE_REF':  np.int32(0),
-                'INFOBITS_REF': np.int32(0),
-                'MAG_4_REF':    np.float64('nan'),   # target has no reference magnitude
-            }
-            for dst in list(ref_cols):
-                ref_cols[dst] = np.append(ref_cols[dst], _tgt_extra[dst])
-
         # Extract MAGZP_REF / MAGZPRMS_REF as scalars for parquet metadata
         magzp_ref_val    = float(pd.to_numeric(ref['MAGZP_REF'],    errors='coerce').iloc[0]) if 'MAGZP_REF'    in ref.columns else float('nan')
         magzprms_ref_val = float(pd.to_numeric(ref['MAGZPRMS_REF'], errors='coerce').iloc[0]) if 'MAGZPRMS_REF' in ref.columns else float('nan')
 
-        # Nearest ref source to target — stored as metadata for downstream diagnostics.
-        # target_ref_mag = that source's reference AB mag if it is within the match
-        # radius (i.e. the target HAS a reference detection); NaN when reference-less
-        # (then FLUX_4_TOT_uJy is bipolar difference flux, not total — see README).
+        # Nearest real (not injected) ref source to target — stored as metadata for
+        # downstream diagnostics. target_ref_mag = that source's reference AB mag if it
+        # is within the match radius (i.e. the target HAS a reference detection); NaN
+        # when reference-less (then the target is an injected catalog entry and its
+        # FLUX_4_TOT_uJy is bipolar difference flux, not total — see README).
         target_sep_val = float('nan')
         target_ref_mag = float('nan')
         if target_ra is not None and target_dec is not None:
@@ -219,6 +253,8 @@ def step_lightcurves(
             _ra  = pd.to_numeric(ref['ALPHAWIN_J2000'], errors='coerce').values
             _dec = pd.to_numeric(ref['DELTAWIN_J2000'], errors='coerce').values
             _ok  = np.isfinite(_ra) & np.isfinite(_dec)
+            if 'MAG_APER_4px' in ref.columns:
+                _ok &= ~(pd.to_numeric(ref['MAG_APER_4px'], errors='coerce').values > 90)
             if _ok.any():
                 _tgt  = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
                 _cats = SkyCoord(ra=_ra[_ok] * u.deg,  dec=_dec[_ok] * u.deg)
@@ -259,14 +295,15 @@ def step_lightcurves(
                 logger.warning(f"  {cal_path.name}: header lacks {_missing} (NaN in the light curve)")
             for key in _EPOCH_KEYS:
                 ep_rows[key] = hdr.get(key, np.nan)
+            ep_rows['_CALPREV'] = bool(hdr.get('CALPREV', False))
 
-            # Reference catalog properties. A row beyond the catalog (the --ra/--dec target
-            # injected by the photometry) needs that target here too.
+            # Reference catalog properties (every photometry row indexes the catalog; a row
+            # beyond it comes from a catalog measured with another reference catalog)
             n_ref = len(next(iter(ref_cols.values()))) if ref_cols else 0
             beyond = ep_ref_idx >= n_ref
             if beyond.any():
                 logger.warning(f"  {cal_path.name}: {int(beyond.sum())} row(s) beyond the reference "
-                               f"catalog (injected target; run lightcurves with --ra/--dec) — skipped")
+                               f"catalog (photometry made with another catalog; re-run phot) — skipped")
                 ep_rows, ep_ref_idx = ep_rows[~beyond].reset_index(drop=True), ep_ref_idx[~beyond]
             for dst, arr in ref_cols.items():
                 ep_rows[dst] = arr[ep_ref_idx]
@@ -288,14 +325,19 @@ def step_lightcurves(
             continue
 
         all_lcs = pd.concat(frames, ignore_index=True)
-        # A target without a reference source is measured only if the photometry injected
-        # it (catalogs made for another target in a reused base dir do not contain it)
-        if (target_ra is not None and np.isfinite(target_sep_val)
-                and target_sep_val > target_match_radius
-                and not (all_lcs['object_index'] == len(ref)).any()):
-            logger.warning(f"  {tag}: the target has no reference source and is not in the "
-                           f"photometry catalogs (made for another target?) — re-run the phot "
-                           f"step with --force to measure it")
+        # A target without a reference source is measured only as an injected catalog
+        # entry, which the catalog step adds
+        if target_ra is not None and not (target_sep_val <= target_match_radius):
+            _dra = ((pd.to_numeric(ref['ALPHAWIN_J2000'], errors='coerce').values - target_ra
+                     + 180.0) % 360.0 - 180.0) * np.cos(np.radians(target_dec))
+            _sep = np.hypot(_dra, pd.to_numeric(ref['DELTAWIN_J2000'], errors='coerce').values
+                            - target_dec) * 3600.0
+            _ddec = pd.to_numeric(ref['DELTAWIN_J2000'], errors='coerce').values - target_dec
+            _inside = (np.nanmin(_dra) < 0 < np.nanmax(_dra)) and (np.nanmin(_ddec) < 0 < np.nanmax(_ddec))
+            if _inside and not (np.nan_to_num(_sep, nan=np.inf) < target_match_radius).any():
+                logger.warning(f"  {tag}: the target has no reference source and is not in the "
+                               f"reference catalog — run the catalog step with --ra/--dec "
+                               f"(then phot) to measure it")
 
         # One quality bitmask, FLAGS (ztfphot_flags.py): per-epoch aperture bits +
         # reference-source flag + no-reference marker + cautionary INFOBITS summaries.
@@ -306,10 +348,11 @@ def step_lightcurves(
         _ep_flags = (pd.to_numeric(all_lcs['_EPOCH_FLAGS'], errors='coerce').fillna(0)
                      .astype('int64').to_numpy() if '_EPOCH_FLAGS' in all_lcs
                      else np.full(len(all_lcs), _F.AP_UNKNOWN, dtype='int64'))
-        all_lcs['FLAGS'] = _compose_flags(all_lcs, epoch_flags=_ep_flags)
+        all_lcs['FLAGS'] = (_compose_flags(all_lcs, epoch_flags=_ep_flags)
+                            | np.where(all_lcs['_CALPREV'].astype(bool), _F.CAL_PREVIOUS_PASS, 0))
         _infobits_ref = (int(pd.to_numeric(all_lcs['INFOBITS_REF'], errors='coerce').fillna(0).max())
                          if 'INFOBITS_REF' in all_lcs else None)
-        all_lcs = all_lcs.drop(columns=[c for c in ('_EPOCH_FLAGS', 'FLAG_SE_REF', 'INFOBITS_REF')
+        all_lcs = all_lcs.drop(columns=[c for c in ('_EPOCH_FLAGS', '_CALPREV', 'FLAG_SE_REF', 'INFOBITS_REF')
                                         if c in all_lcs.columns])
 
         # Drop redundant / removed columns
@@ -353,6 +396,12 @@ def step_lightcurves(
         }
         if _infobits_ref is not None:
             extra_meta[f'INFOBITS_REF_{tag}'.encode()] = str(_infobits_ref).encode()
+        # epochs deferred by the photometry run (IRSA failures) still without a catalog
+        _def = _deferred_epochs(base_dir, field, fc, ccd, qid_, suffix)
+        extra_meta[b'epochs_deferred'] = str(len(_def)).encode()
+        extra_meta[b'deferred_filefracdays'] = json.dumps(_def).encode()
+        # quadrants of this band the run could not complete (added by update_parquet)
+        extra_meta[b'quadrants_deferred'] = json.dumps(_deferred_quadrants(base_dir, fc, suffix)).encode()
         # Effective epoch selection, measured from the epochs actually present
         _ep = all_lcs.drop_duplicates('OBSMJD')
         _num = lambda c: pd.to_numeric(_ep[c], errors='coerce') if c in _ep.columns else pd.Series(dtype=float)

@@ -74,7 +74,7 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
 
     OK means the target has a light curve, i.e. at least one finite FLUX measurement —
     positive OR negative (a fainter-than-reference detection is still a detection).
-    LACKS_REFIMG_DETECTION is OK but with no reference source (MAG_4_REF NaN), so its
+    LACKS_REFIMG_DETECTION is OK but with no reference source (MAG_4_REF > 90), so its
     FLUX_4_TOT_uJy is bipolar *difference* flux, not total — treat with care (blends).
     NOT_RECOVERED means it was measurable ("painted": in frame, unmasked) in >= 1 epoch
     but no row reached the light curve.
@@ -97,12 +97,13 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
             n_in_frame += int(bool(d.get("in_frame")))
             n_painted  += int(bool(d.get("painted")))
 
-    # OK if the target (real neighbour or injected sentinel) is in a light curve.
-    # Also record whether the target has a reference-image detection: a NaN MAG_4_REF
-    # means no reference source, so FLUX_4_TOT_uJy is the (bipolar) *difference* flux,
-    # not a total — the user must treat it accordingly (and watch for blends).
+    # OK if the target (real neighbour or injected catalog entry) is in a light curve.
+    # Also record whether the target has a reference-image detection in any quadrant: a
+    # MAG_4_REF NaN or > 90 (injected) means no reference source, so FLUX_4_TOT_uJy is
+    # the (bipolar) *difference* flux, not a total — the user must treat it accordingly
+    # (and watch for blends). All quadrants are checked.
     found = False
-    tgt_has_ref = True
+    tgt_has_ref = False
     for q in quadrants:
         _qd = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
                / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}")
@@ -134,12 +135,11 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
         if sep.values[j] <= match_radius:
             oi = pos.index[j]
             _trow = df.loc[df['object_index'] == oi]
-            if 'MAG_4_REF' in df.columns:
-                tgt_has_ref = bool(np.isfinite(
-                    pd.to_numeric(_trow['MAG_4_REF'], errors='coerce')).any())
             if np.isfinite(pd.to_numeric(_trow[_meas], errors='coerce')).any():
                 found = True
-                break
+                if 'MAG_4_REF' not in df.columns or (
+                        pd.to_numeric(_trow['MAG_4_REF'], errors='coerce') < 90).any():
+                    tgt_has_ref = True
 
     if found and not tgt_has_ref:
                            reason = "LACKS_REFIMG_DETECTION"  # has flux, but no reference source
@@ -238,6 +238,28 @@ def _inject_targets_into_quadrants(base_dir: Path, quadrants: list[dict],
     logger.info(f"inject-targets: augmented {n_quad} quadrant catalog(s)")
 
 
+def _injection_pending(ref_csv: Path, transients: list, match_radius: float) -> bool:
+    """True if a source to inject lies within the reference catalog's extent but has no
+    catalog row (real or injected) within match_radius, i.e. the catalog must be rebuilt."""
+    if not transients:
+        return False
+    import pandas as pd
+    if not ref_csv.exists():
+        return True
+    ref = pd.read_csv(ref_csv, usecols=["ALPHAWIN_J2000", "DELTAWIN_J2000"])
+    ra, dec = ref["ALPHAWIN_J2000"].to_numpy(float), ref["DELTAWIN_J2000"].to_numpy(float)
+    ok = np.isfinite(ra) & np.isfinite(dec)
+    if not ok.any():
+        return True
+    ra, dec = ra[ok], dec[ok]
+    for t in transients:
+        dra = (((ra - t.ra) + 180.0) % 360.0 - 180.0) * np.cos(np.radians(t.dec))
+        inside = (dra.min() < 0 < dra.max()) and (dec.min() < t.dec < dec.max())
+        if inside and np.hypot(dra, dec - t.dec).min() * 3600.0 >= match_radius:
+            return True
+    return False
+
+
 def _epoch_cache_path(base_dir: Path, args) -> Path:
     """The epoch cache the lookup step writes for --ra/--dec/--bands."""
     from ztf_field_lookup import _cache_path
@@ -245,8 +267,15 @@ def _epoch_cache_path(base_dir: Path, args) -> Path:
 
 
 def _injection_list(args, base_dir: Path) -> list:
-    """Sources to inject (--grabTNSobjs, --inject-targets); empty if neither is given."""
+    """Sources to inject: the --ra/--dec target (unless --no-target), --grabTNSobjs and
+    --inject-targets. Each becomes a reference-catalog row (MAG_APER = 99) wherever no
+    reference source lies within --target-match-radius, so every target is an ordinary
+    catalog source with a fixed index and several targets can share a base dir."""
     _transients = []
+    if args.ra is not None and args.dec is not None and not args.no_target:
+        from transient_catalog import TransientSource
+        _transients.append(TransientSource(ra=float(args.ra), dec=float(args.dec),
+                                           name="TARGET", source="target"))
     if args.grabTNSobjs:
         from transient_catalog import load_tns_catalog
         _transients += load_tns_catalog(
@@ -287,6 +316,8 @@ def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
         ra  = pd.to_numeric(ref[ra_col],  errors='coerce').values
         dec = pd.to_numeric(ref[dec_col], errors='coerce').values
         ok  = np.isfinite(ra) & np.isfinite(dec)
+        if 'MAG_APER_4px' in ref.columns:            # real sources only, not injected ones
+            ok &= ~(pd.to_numeric(ref['MAG_APER_4px'], errors='coerce').values > 90)
         if not ok.any():
             logger.warning(f"  {tag}: ref catalog empty — target coverage unknown")
             continue
@@ -298,6 +329,48 @@ def _warn_target_coverage(base_dir: Path, quadrants: list[dict],
                 f"forced photometry will produce no light curve")
         else:
             logger.info(f"  {tag}: nearest ref source {sep:.2f}\" from target — OK")
+
+
+# Quadrants this run could not complete (reference products unavailable, no reference
+# catalog): main() then exits with code 3. They are also logged to
+# Epochs/deferred_quadrants.log, from which the light curves record them in their metadata
+# (quadrants_deferred) for update_parquet to add later.
+_INCOMPLETE: list[str] = []
+
+
+def _defer_quadrant(base_dir: Path, field, fc, ccd, qid) -> None:
+    """Record a quadrant not completed this run (_INCOMPLETE + deferred_quadrants.log)."""
+    tag = f"{int(field):06d}_{fc}_c{int(ccd):02d}_q{int(qid)}"
+    _INCOMPLETE.append(tag)
+    log = base_dir / "Epochs" / "deferred_quadrants.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "a") as f:
+        f.write(tag + "\n")
+
+
+class _QuadrantIncomplete(RuntimeError):
+    """A quadrant cannot be completed this run (recorded in _INCOMPLETE)."""
+
+_FFD_RE = __import__("re").compile(r"ztf_(\d+)_(\d{6})_(z[gri])_c(\d\d)_o_q(\d)_")
+
+
+def _record_deferred(base_dir: Path, urls_or_keys) -> None:
+    """Append epochs not measured this run (download failures / given up) to
+    Epochs/deferred_epochs.log as `filefracday field filtercode ccdid qid`; the light
+    curves report those still without a photometry catalog as epochs_deferred, which
+    update_parquet --retry-deferred fills in later."""
+    rows = set()
+    for u in urls_or_keys:
+        if isinstance(u, tuple):
+            rows.add(u)
+        elif (m := _FFD_RE.search(str(u))):
+            rows.add((m.group(1), int(m.group(2)), m.group(3), int(m.group(4)), int(m.group(5))))
+    if rows:
+        log = base_dir / "Epochs" / "deferred_epochs.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a") as f:
+            for r in sorted(rows):
+                f.write("\t".join(map(str, r)) + "\n")
 
 
 def _refs_ok(ref_dir: Path, field, fc, ccd, qid) -> bool:
@@ -378,8 +451,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
     if not steps & {"phot", "phot_sci"}:
         logger.info("purge-batch without a photometry step: no epoch images are downloaded "
                     "(they would be deleted unused); only the reference catalogs are built")
-    _transients = (_injection_list(args, base_dir)
-                   if "catalog" in steps and (args.inject_targets or args.grabTNSobjs) else [])
+    _transients = _injection_list(args, base_dir) if "catalog" in steps else []
 
     # Load epochs from cache if not already in memory (e.g. lookup not in steps)
     if epochs is None and args.ra is not None and args.dec is not None:
@@ -431,9 +503,9 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
         # Resume: a quadrant whose photometry is already complete (reference CSV and every
         # epoch's catalog; no pending injection) needs no reference download or check
         _wanted = [sfx for sfx, st in (("", "phot"), ("_sci", "phot_sci")) if st in steps]
-        _complete = (not args.force and not _transients and bool(_wanted)
-                     and (base_dir / "Catalogs" /
-                          f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(REFERENCE)[OBJECTS].csv").exists()
+        _q_csv = base_dir / "Catalogs" / f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(REFERENCE)[OBJECTS].csv"
+        _complete = (not args.force and bool(_wanted) and _q_csv.exists()
+                     and not _injection_pending(_q_csv, _transients, args.target_match_radius)
                      and all(catalog_ok(catalog_dir(base_dir, sfx, field, fc, ccd, qid_) / catalog_name(
                                  f"ztf_{int(float(v))}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"))
                              for v in q_epochs["filefracday"] for sfx in _wanted))
@@ -461,6 +533,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 and not _refs_ok(q["ref_dir"], field, fc, ccd, qid_)):
             logger.warning(f"{tag}: reference products unavailable (download failed) — "
                            f"quadrant skipped this run; it is retried on the next run")
+            _defer_quadrant(base_dir, field, fc, ccd, qid_)
             continue
 
         n_batches = math.ceil(len(q_epochs) / N)
@@ -516,7 +589,9 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 # before this batch's purge deletes the reference products
                 if "catalog" in steps and not catalog_done:
                     step_make_catalog(base_dir, [q], force=args.force or _injected)
-                    catalog_done = True
+                    catalog_done = cat_csv.exists()
+                    if not catalog_done:
+                        raise _QuadrantIncomplete("no reference catalog could be built")
                 purge_images(base_dir, [q], sci=True, ref=is_first,
                              filefracdays=ffds_set, dry_run=args.dry_run)
                 return set()
@@ -526,7 +601,11 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             failed = set()
             if "download" in steps or args.purge_batch:
                 band = fc[1:]   # zg→g, zr→r, zi→i
+                # reference products come from the footprint gate (target mode) or, without
+                # a target, with the first batch; later batches fetch science products only
                 res = download_all(this_batch, base_dir=base_dir, bands=[band],
+                                   products=("all" if is_first and (args.ra is None or args.dec is None)
+                                             else "sci"),
                                    max_workers=args.download_workers,
                                    retry_404=args.retry_404,
                                    perm404_max_age_days=args.perm404_max_age)
@@ -537,16 +616,21 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
 
             if "catalog" in steps and not catalog_done:
                 step_make_catalog(base_dir, [q], force=args.force or _injected)
-                catalog_done = True
+                catalog_done = cat_csv.exists()
+                if not catalog_done:             # e.g. a truncated refsexcat
+                    raise _QuadrantIncomplete("no reference catalog could be built")
 
             _run_phot(steps, step_phot, step_phot_sci, base_dir, [q], args,
                       filefracdays=ffds_set)
 
-            # Purge: always remove sci products; ref only after first batch. Failed
-            # epochs were never downloaded, so there is nothing of theirs to purge.
+            # Purge the measured epochs (sci products; refs after the first batch).
+            # Downloaded but unmeasured ones (funpack / photometry failure) keep their
+            # images and are retried in the next cycle, like download failures.
+            measured = {f for f in ffds_set if _epoch_done(f)}
+            failed |= ffds_set - measured
             purge_images(base_dir, [q],
                          sci=True, ref=is_first,
-                         filefracdays=ffds_set, dry_run=args.dry_run)
+                         filefracdays=measured, dry_run=args.dry_run)
             return failed
 
         def _update_carry(this_batch, failed, fail_count):
@@ -559,8 +643,11 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                     fail_count[ffd] = fail_count.get(ffd, 0) + 1
                     if fail_count[ffd] >= _MAX_DL_RETRIES:
                         logger.warning(f"  {field:06d}/{fc}/c{ccd:02d}/q{qid_} ffd {ffd}: "
-                                       f"discarded after {_MAX_DL_RETRIES} consecutive "
-                                       f"download-failure cycles")
+                                       f"deferred after {_MAX_DL_RETRIES} failed cycles "
+                                       f"(recorded; fill in later with update_parquet --retry-deferred)")
+                        _record_deferred(base_dir, [(ffd, field, fc, ccd, qid_)])
+                        purge_images(base_dir, [q], sci=True, ref=False,
+                                     filefracdays={ffd}, dry_run=args.dry_run)
                     else:
                         keep.append(row)
                 else:
@@ -572,21 +659,26 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
         # attempts. An epoch is only given up after _MAX_DL_RETRIES cycles in a row.
         carry = q_epochs.iloc[0:0]
         fail_count: dict[str, int] = {}
-        for bi, start in enumerate(range(0, len(q_epochs), N)):
-            batch      = q_epochs.iloc[start:start + N]
-            this_batch = pd.concat([carry, batch]).drop_duplicates(subset="filefracday")
-            failed     = _process_batch(this_batch, is_first=(bi == 0),
-                                        label=f"batch {bi+1}/{n_batches}"
-                                              + (f" (+{len(carry)} carried)" if len(carry) else ""))
-            carry = _update_carry(this_batch, failed, fail_count)
+        try:
+            for bi, start in enumerate(range(0, len(q_epochs), N)):
+                batch      = q_epochs.iloc[start:start + N]
+                this_batch = pd.concat([carry, batch]).drop_duplicates(subset="filefracday")
+                failed     = _process_batch(this_batch, is_first=(bi == 0),
+                                            label=f"batch {bi+1}/{n_batches}"
+                                                  + (f" (+{len(carry)} carried)" if len(carry) else ""))
+                carry = _update_carry(this_batch, failed, fail_count)
 
-        # Drain any epochs still failing from the final batches, giving each its
-        # remaining retry cycles before it is discarded.
-        drain = 0
-        while len(carry) > 0:
-            drain += 1
-            failed = _process_batch(carry, is_first=False, label=f"retry-drain {drain}")
-            carry = _update_carry(carry, failed, fail_count)
+            # Drain any epochs still failing from the final batches, giving each its
+            # remaining retry cycles (back to back) before it is deferred.
+            drain = 0
+            while len(carry) > 0:
+                drain += 1
+                failed = _process_batch(carry, is_first=False, label=f"retry-drain {drain}")
+                carry = _update_carry(carry, failed, fail_count)
+        except _QuadrantIncomplete as exc:
+            logger.error(f"{tag}: {exc} — quadrant not completed this run")
+            _defer_quadrant(base_dir, field, fc, ccd, qid_)
+            purge_images(base_dir, [q], sci=True, ref=False, dry_run=args.dry_run)
 
 
 RUN_LOG = Path("Epochs") / "ztfphot_runs.jsonl"
@@ -917,13 +1009,17 @@ def main() -> None:
             if _noref:
                 logger.warning(f"reference products unavailable for {sorted(_noref)} — "
                                f"skipping their science download this run (retried next run)")
+                for _q in sorted(_noref):
+                    _defer_quadrant(base_dir, *_q)
                 epochs = epochs[np.array([(int(f), str(fc), int(c), int(qd)) not in _noref
                                           for f, fc, c, qd in zip(epochs["field"], epochs["filtercode"],
                                                                   epochs["ccdid"], epochs["qid"])],
                                          dtype=bool)]
 
             logger.info("─── download: science products ───")
-            download_all(epochs, products="sci", **_dl_kw)
+            _res = download_all(epochs, products="sci", **_dl_kw)
+            _record_deferred(base_dir, [u for u in _res.get("failed_urls", [])
+                                        if "scimrefdiffimg" in u])
 
     # ── Discover quadrants on disk ────────────────────────────────────────────
     quadrants = find_quadrants(base_dir, bands=args.bands,
@@ -1022,8 +1118,9 @@ def main() -> None:
     else:
         if "catalog"    in steps:
             _injected = False
-            if args.inject_targets or args.grabTNSobjs:
-                _inject_targets_into_quadrants(base_dir, quadrants, _injection_list(args, base_dir),
+            _transients = _injection_list(args, base_dir)
+            if _transients:
+                _inject_targets_into_quadrants(base_dir, quadrants, _transients,
                                                args.target_match_radius)
                 _injected = True
             # injecting changes the source list, so the reference CSV must be rebuilt
@@ -1206,6 +1303,9 @@ def main() -> None:
 
     logger.info(f"Done in {time.time() - t0:.1f}s")
     _print_status(base_dir, quadrants)
+    if _INCOMPLETE:
+        logger.error(f"incomplete this run (retried by the next run): {sorted(set(_INCOMPLETE))}")
+        sys.exit(3)
 
 
 if __name__ == "__main__":

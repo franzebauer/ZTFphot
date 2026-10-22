@@ -115,9 +115,10 @@ from ztfphot_flags import CAUTIONARY_INFOBITS as CAUTIONARY_MASK     # noqa: E40
 # under load. Read timeout is long because diff images can be ~100 MB.
 REQUEST_TIMEOUT = (30, 300)
 
-# Short retry rounds for failed reference downloads inside download_all (wait n x s)
-REF_RETRY_ROUNDS = 4
-REF_RETRY_WAIT = 15.0
+# One short retry for failed reference downloads inside download_all; what still fails
+# is reported, and a later run (retry of the failed target) fetches it
+REF_RETRY_ROUNDS = 1
+REF_RETRY_WAIT = 5.0
 
 # Age (days) after which a recorded 404 is retried; 0 = never expire
 PERM404_MAX_AGE_DAYS = 30.0
@@ -309,9 +310,13 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
 
     try:
         with session.get(url, timeout=REQUEST_TIMEOUT, stream=True) as resp:
-            # 404 → permanent absence; distinguish from retriable server errors
+            # 404 → permanent absence, but only with IRSA's standard 404 page; any other
+            # page served with a 404 (e.g. maintenance) is a retriable failure
             if resp.status_code == 404:
-                return (url, "404", f"404 Not Found")
+                body = resp.raw.read(4096, decode_content=True) or b""
+                if b"<title>404 Not Found</title>" in body:
+                    return (url, "404", "404 Not Found")
+                return (url, "failed", "HTTP 404 without IRSA's standard 404 page")
 
             resp.raise_for_status()
 
@@ -321,11 +326,18 @@ def download_file(url: str, dest: Path, auth: tuple[str, str],
             if "text/html" in content_type:
                 return (url, "failed", "HTML response instead of FITS (IRSA error page)")
 
+            expected = (resp.headers.get("Content-Length")
+                        if resp.headers.get("Content-Encoding", "identity") == "identity" else None)
             with open(tmp, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB chunks
                     f.write(chunk)
 
-        # Any other non-FITS body (error text, XML, truncated) is retriable, not cached
+        # A body shorter than announced, or any non-FITS body (error text, XML), is
+        # retriable, never cached
+        if expected is not None and expected.isdigit() and tmp.stat().st_size != int(expected):
+            got = tmp.stat().st_size
+            tmp.unlink()
+            return (url, "failed", f"truncated download ({got} of {expected} bytes)")
         if not _is_fits(tmp):
             tmp.unlink()
             return (url, "failed", f"response is not a FITS file ({content_type or 'no Content-Type'})")

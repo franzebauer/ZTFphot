@@ -117,7 +117,13 @@ def _calibrate_one(args: tuple) -> tuple[str, bool, str]:
         if not Path(out_cal).exists():
             return str(out_cal), False, "too few calibrators — calib_catalog wrote nothing"
         if before is not None and Path(out_cal).stat().st_mtime_ns == before:
-            # Too few calibrators on this pass: the previous calibration is kept
+            # Too few calibrators on this pass: the previous calibration is kept, marked
+            # CALPREV so lightcurves sets FLAGS bit CAL_PREVIOUS_PASS
+            from astropy.io import fits
+            with fits.open(out_cal) as hdul:
+                hdul[0].header['CALPREV'] = (True, 'previous-pass calibration kept')
+                hdul.writeto(str(out_cal) + '.tmp', overwrite=True)
+            Path(str(out_cal) + '.tmp').replace(out_cal)
             return str(out_cal), True, "too few calibrators — previous calibration kept"
         return str(out_cal), True, ""
     except Exception as exc:

@@ -4,15 +4,21 @@ ztfphot_flags.py
 The single quality-flag bitmask carried in every light-curve parquet as FLAGS (Int32),
 next to ZTF's own raw per-epoch image bits (INFOBITS_DIF, kept verbatim).
 
-Bits 0-7: per epoch, from the aperture photometry (bit values follow the SExtractor
-flag convention: 1 neighbour, 8 truncated, 16 incomplete aperture data)
+Bits 0-7: per epoch, from the aperture photometry (64: from the calibration; bit values
+follow the SExtractor flag convention: 1 neighbour, 8 truncated, 16 incomplete aperture data)
      1  NEIGHBOUR         another catalog source within the largest aperture radius
      8  EDGE              the primary 4 px aperture extends beyond the image edge   [corrupts]
     16  MASKED            masked / saturated (NaN) pixels in the 4 px aperture      [corrupts]
     32  OUTER_APERTURES   edge or masked pixels only in the larger 6 / 10 px apertures
-Bits 8-15: per source, from the reference image
-   256  REF_BLEND         reference neighbour / blend (IRSA refsexcat FLAGS != 0)
+    64  CAL_PREVIOUS_PASS too few calibrators on the last calibration pass: the epoch
+                          keeps its previous-pass calibration (no flatfield correction)
+Bits 8-15: per source, from the reference image (IRSA refsexcat FLAGS)
+   256  REF_NEIGHBOUR     bright neighbour in the reference (refsexcat FLAGS & 1)
+   512  REF_DEBLENDED     deblended in the reference (refsexcat FLAGS & 2)
+                          (REF_BLEND = REF_NEIGHBOUR | REF_DEBLENDED; files written
+                          before the split carry 256 for any refsexcat FLAGS != 0)
   1024  NO_REFERENCE      no reference source (injected target): FLUX is difference flux
+ 32768  REF_BAD           saturated / truncated / other in the reference (refsexcat FLAGS >= 4)
 Bits 11-14: provenance / summaries
   2048  AP_UNKNOWN        aperture flags not measured for this epoch (rebuilt from an older
                           parquet by update_parquet.py)
@@ -43,14 +49,19 @@ class F:
     EDGE = 8
     MASKED = 16
     OUTER_APERTURES = 32
-    REF_BLEND = 256
+    CAL_PREVIOUS_PASS = 64
+    REF_NEIGHBOUR = 256
+    REF_DEBLENDED = 512
+    REF_BLEND = REF_NEIGHBOUR | REF_DEBLENDED
     NO_REFERENCE = 1024
     AP_UNKNOWN = 2048
     CAUTIONARY_EPOCH = 4096
     REF_INFOBITS = 8192
     NOT_CROSS_CALIBRATED = 16384
+    REF_BAD = 32768
+    REF_ANY = REF_BLEND | REF_BAD                        # any refsexcat FLAGS
 
-    EPOCH_BITS = 0xFF                                  # bits written by the photometry step
+    EPOCH_BITS = 0x3F                                  # bits written by the photometry step
     DEFAULT_REJECT = EDGE | MASKED                      # corrupt the 4 px measurement
     CAL_REJECT = EDGE | MASKED | OUTER_APERTURES        # calibrators: all apertures clean
 
@@ -94,7 +105,10 @@ def compose(df: pd.DataFrame, epoch_flags=None) -> np.ndarray:
     ep = (np.asarray(epoch_flags, dtype="int64") if epoch_flags is not None
           else _int("FLAG_AP", df))
     f = ep.copy()
-    f |= np.where(_int("FLAG_SE_REF", df) != 0, F.REF_BLEND, 0)
+    se = _int("FLAG_SE_REF", df)
+    f |= np.where(se & 1, F.REF_NEIGHBOUR, 0)
+    f |= np.where(se & 2, F.REF_DEBLENDED, 0)
+    f |= np.where(se & ~3, F.REF_BAD, 0)
     if "MAG_4_REF" in df:
         mref = pd.to_numeric(df["MAG_4_REF"], errors="coerce").to_numpy(float)
         f |= np.where(~np.isfinite(mref) | (mref > 90), F.NO_REFERENCE, 0)

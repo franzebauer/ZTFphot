@@ -13,7 +13,7 @@ variables that dip fainter than the reference.
 
 Sources must pass all calibration eligibility criteria to be considered:
   CLASS_STAR_REF >= 0.7  (stellar morphology)
-  FLAGS & REF_BLEND == 0 (clean in the reference image — same cut as calib_catalog)
+  FLAGS & REF_ANY == 0 (clean in the reference image — same cut as calib_catalog)
   14 < q_mag < 19        (calibration magnitude range)
   N >= min_epochs        (enough epochs for a reliable std estimate)
 
@@ -103,9 +103,9 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
         std_flux  = ('flux', 'std'),
     ).reset_index()
 
-    # Reference-image neighbour/blend flag: FLAGS bit REF_BLEND (older parquets:
+    # Reference-image flag: any refsexcat FLAGS bit, F.REF_ANY (older parquets:
     # FLAG_SE_REF; flags_of handles both)
-    clean = clean.assign(_ref_blend=((flags_of(clean) & F.REF_BLEND) != 0).astype(int))
+    clean = clean.assign(_ref_blend=((flags_of(clean) & F.REF_ANY) != 0).astype(int))
     stats = stats.join(clean.groupby('object_index')['_ref_blend'].max()
                        .rename('flag_se'), on='object_index')
 

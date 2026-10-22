@@ -14,7 +14,8 @@ Per target and band (a ref-pos parquet and its `_sci` sibling are updated togeth
 when both exist):
 
   1. Inventory: quadrants and epochs in the parquet(s); IRSA epoch list for the
-     target; epoch cuts from the parquet metadata (ztfphot_download) or, for older
+     target (quadrants the parquet lacks are added unless its quadrant set is fixed);
+     epoch cuts from the parquet metadata (ztfphot_download) or, for older
      files, inferred from the epochs present (--infer-cuts) — see epoch_inventory.py.
      Missing = passes the cuts, not in the parquet; new = after the parquet's last
      epoch (skipped with --no-new).
@@ -37,8 +38,8 @@ Usage (ztf env, IRSA credentials in ~/.netrc):
     python update_parquet.py TARGET_zg_merged.parquet [more.parquet ...]
            [--infer-cuts] [--no-new] [--dry-run] [--outdir DIR] [--keep-temp]
     python update_parquet.py RESULTS_DIR --infer-cuts [--plan] [--recursive] [--redo]
-      (directory: per target/band/variant uses X_recal.parquet if present, else X.parquet;
-       skips targets already updated)
+      (directory: per target/band/variant uses whichever of X_recal.parquet / X.parquet
+       has more epochs; skips targets already updated)
 """
 from __future__ import annotations
 
@@ -255,8 +256,8 @@ def _complete_catalog(dc, base: Path, q, positions: np.ndarray, target, match_ra
     curve: one in IRSA's refsexcat (removed by make_catalog's selection) with its
     reference photometry; otherwise (injected in the original run) as an injected
     entry, as transient_catalog writes them (99 mag sentinel; FLAG_SE_REF = 1 with a
-    reference neighbour within 3"). The --ra/--dec target is left to the pipeline,
-    which injects it itself. Returns (from refsexcat, injected)."""
+    reference neighbour within 3"). The --ra/--dec target is not added here: it is
+    injected like the pipeline's catalog step does (before make_catalog). Returns (from refsexcat, injected)."""
     from astropy.coordinates import SkyCoord
     from astropy.io import fits
     tag = f"{q[0]:06d}_{q[1]}_c{q[2]:02d}_q{q[3]}"
@@ -300,9 +301,9 @@ def _complete_catalog(dc, base: Path, q, positions: np.ndarray, target, match_ra
 
 
 def _csv_index(ra, dec, ref: pd.DataFrame, target, match_radius, tol=0.5) -> np.ndarray:
-    """Reference-catalog row (0-based) for each (ra, dec); the injected target gets
-    len(ref) (no reference source within match_radius), as in the photometry step.
-    Unmatched -> -1. Positions repeat for every epoch of a source, so the match is done
+    """Reference-catalog row (0-based) for each (ra, dec), within tol; positions within
+    match_radius of the target that match no row get the row nearest the target (its
+    injected entry, or its reference source). Unmatched -> -1. Positions repeat for every epoch of a source, so the match is done
     once per distinct position."""
     from astropy.coordinates import SkyCoord
     ra, dec = np.asarray(ra, float), np.asarray(dec, float)
@@ -318,10 +319,11 @@ def _csv_index(ra, dec, ref: pd.DataFrame, target, match_radius, tol=0.5) -> np.
         out[np.where(ok)[0][sep.arcsec < tol]] = j[sep.arcsec < tol]
         if target is not None:
             t = SkyCoord(target[0], target[1], unit="deg")
-            injected = t.separation(rc).arcsec.min() >= match_radius
             near_t = sc.separation(t).arcsec < match_radius
             fill = np.where(ok)[0][near_t & (sep.arcsec >= tol)]
-            out[fill] = len(ref) if injected else int(t.match_to_catalog_sky(rc)[0])
+            jt, st, _ = t.match_to_catalog_sky(rc)
+            if float(np.min(st.arcsec)) < match_radius:
+                out[fill] = int(jt)
     return out
 
 
@@ -342,7 +344,7 @@ def _dif_counts(rows: pd.DataFrame, k: str):
 
 
 def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_of,
-                      target, match_radius, raw_flux=_raw_flux) -> tuple[int, pd.Index]:
+                      raw_flux=_raw_flux) -> tuple[int, pd.Index]:
     """Write one LDAC catalog per old epoch and quadrant; return (n catalogs, index of
     the parquet rows written)."""
     from astropy.io import fits
@@ -355,7 +357,9 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
             continue
         ref = refs[q]
         ci = rows["_csv"].to_numpy()
-        is_t = ci == len(ref)
+        # injected entries (the target among them) have no reference magnitude
+        is_t = (pd.to_numeric(ref["MAG_APER_4px"], errors="coerce").to_numpy()
+                [np.clip(ci, 0, len(ref) - 1)] > 90)
         q_mag = np.where(is_t, np.nan, ref["q_mag"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
         f, e = raw_flux(rows, q_mag, is_t, ref)
         # the other aperture slots from their own raw flux (full preset); NaN where the
@@ -375,10 +379,8 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
                       / 3600.0 / np.cos(np.radians(d0)))
                 dec = d0 + pd.to_numeric(rows["DDEC_SCI"], errors="coerce").to_numpy(float) / 3600.0
         else:
-            ra = np.where(ci == len(ref), target[0] if target else np.nan,
-                          ref["ALPHAWIN_J2000"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
-            dec = np.where(ci == len(ref), target[1] if target else np.nan,
-                           ref["DELTAWIN_J2000"].to_numpy()[np.clip(ci, 0, len(ref) - 1)])
+            ra = ref["ALPHAWIN_J2000"].to_numpy()[ci]
+            dec = ref["DELTAWIN_J2000"].to_numpy()[ci]
         # per-epoch aperture bits of the old epochs, carried into the rebuilt FLAGS
         from ztfphot_flags import F
         flags = (pd.to_numeric(rows["FLAGS"], errors="coerce").fillna(0).astype("int64")
@@ -447,10 +449,13 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
     old = old.assign(_mjd=old["OBSMJD"].round(6))
     new = new.assign(_mjd=new["OBSMJD"].round(6))
     # Same object set as the original file: drop sources the parquet never had (the
-    # reference catalog may list more, e.g. if make_catalog's selection changed since)
+    # reference catalog may list more, e.g. if make_catalog's selection changed since);
+    # quadrants the parquet did not have (added by this update) keep all their sources
     if not all_sources:
         known = pd.MultiIndex.from_frame(old[QKEY + ["_csv"]].drop_duplicates())
-        in_old = pd.MultiIndex.from_frame(new[QKEY + ["_csv"]]).isin(known)
+        in_old = (pd.MultiIndex.from_frame(new[QKEY + ["_csv"]]).isin(known)
+                  | ~pd.MultiIndex.from_frame(new[QKEY]).isin(
+                      pd.MultiIndex.from_frame(old[QKEY].drop_duplicates())))
         if (~in_old).any():
             logger.info(f"    dropping {int((~in_old).sum()):,} new rows of "
                         f"{new.loc[~in_old, QKEY + ['_csv']].drop_duplicates().shape[0]} sources "
@@ -476,6 +481,39 @@ def _assemble(old: pd.DataFrame, new: pd.DataFrame, refs, target, match_radius,
 
 
 # ── driver ───────────────────────────────────────────────────────────────────
+
+def _qtag(q) -> str:
+    return f"{int(q[0]):06d}_{q[1]}_c{int(q[2]):02d}_q{int(q[3])}"
+
+
+def _tag_q(tag: str):
+    f, fc, c, q = tag.split("_")
+    return (int(f), fc, int(c[1:]), int(q[1:]))
+
+
+def _fixed_quadrants(path: Path, meta: dict) -> bool:
+    """True if the file's quadrant set was chosen on purpose and must not grow: a
+    quadrant-mode batch output ({field}_{fc}_c{ccd}_q{qid}_… name) or a run restricted
+    with --field / --ccdid / --qid."""
+    import re
+    if re.match(r"\d{6}_z[gri]_c\d\d_q\d_", path.name):
+        return True
+    for k in ("ztfphot_download", "ztfphot_run"):
+        try:
+            args = (json.loads(meta.get(k) or "null") or {}).get("args") or {}
+        except (ValueError, AttributeError):
+            continue
+        if any(args.get(x) is not None for x in ("field", "ccdid", "qid")):
+            return True
+    return False
+
+
+def _json_list(meta: dict, key: str) -> list:
+    try:
+        return list(json.loads(meta.get(key) or "[]"))
+    except ValueError:
+        return []
+
 
 def update_target(paths: list[Path], a, auth, legacy=None) -> str:
     """Returns "ok", "refs" (reference products unavailable — worth retrying later in
@@ -545,9 +583,21 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
 
         quads_in = sorted({(int(f), str(c), int(cc), int(qq)) for f, c, cc, qq
                            in pd.concat([d[QKEY] for d in frames.values()]).drop_duplicates().to_numpy()})
+        # Quadrants IRSA lists for the target that the file lacks (e.g. deferred by the
+        # original run, or lost by an older version) are added — all their epochs are
+        # new — unless the file's quadrant set is fixed; quadrants already known to miss
+        # the target's reference footprint (quadrants_off_footprint) are not tried again.
+        off_known = set(_json_list(meta, "quadrants_off_footprint"))
+        quads_extra = [] if _fixed_quadrants(first, meta) else sorted(
+            q for q in {(int(r.field), str(r.filtercode), int(r.ccdid), int(r.qid))
+                        for r in possible.itertuples()}
+            if q not in quads_in and _qtag(q) not in off_known)
+        if quads_extra:
+            logger.info(f"  quadrant(s) not in the parquet, to add: {[_qtag(q) for q in quads_extra]}")
         t_end = have["OBSMJD"].max()
         todo = possible[~possible["in_parquet"]]
-        todo = todo[np.array([(int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in quads_in
+        todo = todo[np.array([(int(r.field), r.filtercode, int(r.ccdid), int(r.qid))
+                              in set(quads_in) | set(quads_extra)
                               for r in todo.itertuples()], dtype=bool)]
         n_new = int((todo["obsmjd"] > t_end + a.tol).sum())
         if a.no_new:
@@ -574,11 +624,20 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
             n_s, n_r = _reuse_local(dc, base, todo, quads_in, src_dirs)
             logger.info(f"  reused from {', '.join(map(str, src_dirs))}: {n_s}/{len(todo)} epoch "
                         f"image(s), {n_r} reference product(s) — not downloaded")
-        quads = _fetch_references(base, quads_in, auth, max(a.download_retries, 3), a.retry_wait)
-        if len(quads) < len(quads_in):
+        quads = _fetch_references(base, quads_in + quads_extra, auth,
+                                  max(a.download_retries, 3), a.retry_wait)
+        if not set(quads_in) <= set(quads):
             logger.warning(f"FAIL {first.name}: reference products unavailable for "
                            f"{sorted(set(quads_in) - set(quads))} — target re-queued for later")
             return "refs"
+        # an added quadrant without reference products is deferred again (recorded in
+        # the output as quadrants_deferred), not a failure of the target
+        quads_deferred = sorted(set(quads_extra) - set(quads))
+        if quads_deferred:
+            logger.warning(f"  reference products unavailable for the added quadrant(s) "
+                           f"{[_qtag(q) for q in quads_deferred]} — deferred (--retry-deferred)")
+            todo = todo[np.array([(int(r.field), r.filtercode, int(r.ccdid), int(r.qid))
+                                  not in quads_deferred for r in todo.itertuples()], dtype=bool)]
         # Same reference-footprint check run_pipeline applies: quadrants whose reference
         # image does not contain the target are dropped by the pipeline anyway, so don't
         # download their epochs (science exposures dither and can cover the target while
@@ -589,6 +648,7 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
               for q in quads]
         on_ref = {(d["field"], d["filtercode"], d["ccdid"], d["qid"])
                   for d in _filter_quadrants_by_wcs(base, qd, ra, dec, margin=a.footprint_margin_px)}
+        off_known |= {_qtag(q) for q in quads_extra if q in quads and q not in on_ref}
         if len(on_ref) < len(quads):
             off = sorted(set(quads) - on_ref)
             n_skip = sum((int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in off
@@ -598,6 +658,16 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
             todo = todo[np.array([(int(r.field), r.filtercode, int(r.ccdid), int(r.qid)) in on_ref
                                   for r in todo.itertuples()], dtype=bool)]
         (base / "Catalogs").mkdir(exist_ok=True)
+        # the target is an injected catalog entry wherever no reference source lies
+        # within the match radius, as in run_pipeline's catalog step
+        from run_pipeline import _inject_targets_into_quadrants
+        from transient_catalog import TransientSource
+        _inject_targets_into_quadrants(
+            base, [dict(d, sci_dir=base / "Science" / f"{d['field']:06d}" / d["filtercode"]
+                        / f"ccd{d['ccdid']:02d}" / f"q{d['qid']}") for d in qd
+                   if (d["field"], d["filtercode"], d["ccdid"], d["qid"]) in on_ref],
+            [TransientSource(ra=float(ra), dec=float(dec), name="TARGET", source="target")],
+            a.target_match_radius)
         make_catalog(str(base / "Catalogs"), str(base / "Reference"))
         old_pos = pd.concat([df[QKEY + ["ALPHAWIN_REF", "DELTAWIN_REF"]] for df in frames.values()])
         for q in quads:
@@ -632,8 +702,7 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
                     df.loc[idx, "_csv"] = _csv_index(sel["ALPHAWIN_REF"].to_numpy(float),
                                                      sel["DELTAWIN_REF"].to_numpy(float),
                                                      refs[q], target, a.target_match_radius)
-            n_cat, used = _write_old_epochs(base, df, bool(s), refs, ffd_of, target,
-                                            a.target_match_radius,
+            n_cat, used = _write_old_epochs(base, df, bool(s), refs, ffd_of,
                                             raw_flux=legacy.raw_flux if legacy else _raw_flux)
             logger.info(f"  {variants[s].name}: {n_cat} old-epoch catalogs from "
                         f"{len(used):,}/{len(df):,} rows (unmatched {int((df['_csv'] < 0).sum())})")
@@ -690,11 +759,15 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
                             all_sources=a.all_sources or not catalog_changed)
             out_path = _output_path(path, a)
             out_path.parent.mkdir(parents=True, exist_ok=True)
+            new_meta[b"quadrants_deferred"] = json.dumps([_qtag(q) for q in quads_deferred]).encode()
+            new_meta[b"quadrants_off_footprint"] = json.dumps(sorted(off_known)).encode()
             new_meta[b"ztfphot_update"] = json.dumps({
                 "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "source": str(path), "cuts": cuts, "cuts_recorded": recorded,
                 "epochs_added": int(len(todo) - len(deferred) - len(unavailable)),
                 "epochs_deferred": int(len(deferred)), "deferred_filefracdays": deferred,
+                "quadrants_added": [_qtag(q) for q in quads_extra
+                                    if q in on_ref and (out[QKEY] == list(q)).all(axis=1).any()],
                 "rows": int(len(out)),
             }, default=str).encode()
             table = pa.Table.from_pandas(out, preserve_index=False)
@@ -743,8 +816,8 @@ def _made_by_this_code(path: Path) -> bool:
 
 def _plan_directory(d: Path, a) -> list[list[Path]]:
     """Target groups from a directory of light-curve parquets. Per target, band and
-    variant (ref-pos / _sci) the input is X_recal.parquet if it exists, else X.parquet
-    (*_updated outputs are never inputs); ref + sci of the same target form one group,
+    variant (ref-pos / _sci) the input is whichever of X_recal.parquet and X.parquet has
+    more epochs (ties: the newer file; *_updated outputs are never inputs); ref + sci of the same target form one group,
     whichever version each one is. Groups whose outputs all exist are skipped (--redo)."""
     files = sorted(d.rglob("*.parquet") if a.recursive else d.glob("*.parquet"))
     pick: dict[tuple, dict] = {}
@@ -765,7 +838,16 @@ def _plan_directory(d: Path, a) -> list[list[Path]]:
         slot[tail] = f
     groups: dict[str, list[Path]] = {}
     for (gkey, sci), versions in sorted(pick.items()):
-        chosen = versions.get("_recal", versions.get(""))
+        cands = [versions[t] for t in ("_recal", "") if t in versions]
+        if len(cands) > 1:
+            def _rank(f):
+                try:
+                    n = len(pq.read_table(f, columns=["OBSMJD"]).column(0).unique())
+                except Exception:
+                    n = -1
+                return (n, f.stat().st_mtime)
+            cands.sort(key=_rank, reverse=True)
+        chosen = cands[0] if cands else None
         if chosen is not None:
             groups.setdefault(gkey, []).append(chosen)
     out = []
@@ -786,6 +868,8 @@ def _plan_directory(d: Path, a) -> list[list[Path]]:
             # input (all other epochs already in them) and are refreshed in place
             if done and any(_n_deferred(o) for o in outs):
                 out.append(outs)
+            elif not done and any(_n_deferred(m) for m in members):
+                out.append(members)               # e.g. a batch output with deferred epochs
             continue
         if not a.redo and done:
             logger.info(f"  skip {Path(gkey).name}: already updated ({', '.join(o.name for o in outs)})")
@@ -802,9 +886,12 @@ def _clear_deferred(p: Path) -> None:
         return
     t = pq.read_table(p)
     md = dict(t.schema.metadata or {})
-    u = json.loads(md[b"ztfphot_update"])
-    u.update(epochs_deferred=0, deferred_filefracdays=[])
-    md[b"ztfphot_update"] = json.dumps(u, default=str).encode()
+    if b"ztfphot_update" in md:
+        u = json.loads(md[b"ztfphot_update"])
+        u.update(epochs_deferred=0, deferred_filefracdays=[])
+        md[b"ztfphot_update"] = json.dumps(u, default=str).encode()
+    md.update({b"epochs_deferred": b"0", b"deferred_filefracdays": b"[]",
+               b"quadrants_deferred": b"[]"})
     tmp = p.with_name(p.name + ".tmp")
     pq.write_table(t.replace_schema_metadata(md), tmp)
     os.replace(tmp, p)
@@ -812,9 +899,14 @@ def _clear_deferred(p: Path) -> None:
 
 
 def _n_deferred(p: Path) -> int:
+    """Deferred epochs recorded by an update (ztfphot_update) or by the photometry run
+    that made the light curves (top-level epochs_deferred, e.g. batch outputs), plus
+    deferred quadrants (quadrants_deferred)."""
     try:
         meta = pq.read_schema(p).metadata or {}
-        return int(json.loads(meta.get(b"ztfphot_update", b"{}")).get("epochs_deferred", 0))
+        upd = int(json.loads(meta.get(b"ztfphot_update", b"{}")).get("epochs_deferred", 0))
+        return (max(upd, int(meta.get(b"epochs_deferred", b"0") or 0))
+                + len(json.loads(meta.get(b"quadrants_deferred", b"[]") or b"[]")))
     except Exception:
         return 0
 
@@ -866,9 +958,9 @@ def main(legacy=None):
     p.add_argument("--retry-deferred", action="store_true",
                    help="directory mode: only targets whose earlier update deferred epochs; "
                         "re-run on their _updated files (downloads just those epochs)")
-    p.add_argument("--ref-passes", type=int, default=2,
+    p.add_argument("--ref-passes", type=int, default=0,
                    help="extra passes at the end of the batch for targets whose reference "
-                        "products were unavailable (default 2)")
+                        "products were unavailable (default 0: they are reported, and the next run retries them)")
     p.add_argument("--ref-pass-wait", type=float, default=120.0, metavar="S",
                    help="pause before each extra pass (default 120 s; once per pass, not per target)")
     p.add_argument("--tmpdir", default=None, help="parent dir for the temporary base dir")

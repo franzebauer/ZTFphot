@@ -5,9 +5,10 @@ Forced circular-aperture photometry on ZTF difference images (photutils) — the
 pipeline's photometry step (`phot` / `phot_sci`).
 
 Positions are forced, not detected:
-  ref-pos  — every reference-catalog source (Catalogs/*(REFERENCE)[OBJECTS].csv), plus
-             the --ra/--dec target appended as index N+1 when no reference source lies
-             within the target match radius (it is then "injected": no reference flux).
+  ref-pos  — every reference-catalog source (Catalogs/*(REFERENCE)[OBJECTS].csv),
+             including injected ones: the --ra/--dec target and --inject-targets sources
+             with no reference source within the target match radius are added to the
+             catalog by the catalog step (MAG_APER = 99: no reference flux).
   sci-pos  — every source of the epoch's ZTF science catalog (*_sexcat.fits), tied to
              the nearest reference entry within --assoc-radius-sci (unmatched dropped).
 
@@ -165,33 +166,66 @@ def catalog_ok(path: Path) -> bool:
         return False
 
 
+def _catalog_card(path: Path, key: str):
+    """Value of header card `key` of an existing catalog (None when absent)."""
+    from astropy.io import fits
+    try:
+        with fits.open(path) as h:
+            for c in h[1].data["Field Header Card"][0]:
+                c = c.decode() if isinstance(c, bytes) else str(c)
+                if c.startswith(f"{key:<8}="):
+                    return fits.Card.fromstring(c).value
+    except Exception:
+        pass
+    return None
+
+
 @functools.lru_cache(maxsize=4)
 def _ref_positions(ref_csv: str, mtime: float):
-    """Reference catalog read once per worker process (the same file for every epoch)."""
+    """Reference catalog read once per worker process (the same file for every epoch):
+    positions, and the 4 px reference magnitude (> 90: injected source)."""
     import pandas as pd
-    return pd.read_csv(ref_csv, usecols=["ALPHAWIN_J2000", "DELTAWIN_J2000"])
+    cols = pd.read_csv(ref_csv, nrows=0).columns
+    return pd.read_csv(ref_csv, usecols=["ALPHAWIN_J2000", "DELTAWIN_J2000"]
+                       + (["MAG_APER_4px"] if "MAG_APER_4px" in cols else []))
 
 
-def _assoc_entries(ref_csv: Path, target_ra, target_dec, match_radius):
-    """(index, ra, dec, injected): reference sources (1-based index) plus the target as
-    the last entry (index N+1) when it is injected."""
+def _ref_fingerprint(ref_csv: Path) -> str:
+    """REFCAT header value: number of catalog rows and a checksum of their positions.
+    A photometry catalog's VECTOR_ASSOC indexes this catalog, so it is valid only for
+    the catalog it was measured with."""
+    import zlib
+    ref = _ref_positions(str(ref_csv), Path(ref_csv).stat().st_mtime)
+    pos = np.round(ref[["ALPHAWIN_J2000", "DELTAWIN_J2000"]].to_numpy(float), 7)
+    return f"{len(ref)} {zlib.crc32(np.ascontiguousarray(pos).tobytes()):08x}"
+
+
+def _assoc_entries(ref_csv: Path):
+    """(index, ra, dec): every reference-catalog row, 1-based index."""
     import pandas as pd
     ref = _ref_positions(str(ref_csv), Path(ref_csv).stat().st_mtime)
     ra = pd.to_numeric(ref["ALPHAWIN_J2000"], errors="coerce").to_numpy(float)
     dec = pd.to_numeric(ref["DELTAWIN_J2000"], errors="coerce").to_numpy(float)
-    idx = np.arange(1, len(ref) + 1)
-    injected = False
-    if target_ra is not None and target_dec is not None:
-        from astropy.coordinates import SkyCoord
-        ok = np.isfinite(ra) & np.isfinite(dec)
-        sep = (SkyCoord(target_ra, target_dec, unit="deg")
-               .separation(SkyCoord(ra[ok], dec[ok], unit="deg")).arcsec) if ok.any() else np.array([np.inf])
-        if sep.min() >= match_radius:
-            idx = np.append(idx, len(ref) + 1)
-            ra = np.append(ra, target_ra)
-            dec = np.append(dec, target_dec)
-            injected = True
-    return idx, ra, dec, injected
+    return np.arange(1, len(ref) + 1), ra, dec
+
+
+def _target_row(ref_csv: Path, target_ra, target_dec, match_radius):
+    """(matched, injected row): whether a real reference source lies within
+    match_radius of the target, and otherwise the 0-based row of the target's injected
+    entry (None if the catalog has none — the catalog step was not run for it)."""
+    import pandas as pd
+    ref = _ref_positions(str(ref_csv), Path(ref_csv).stat().st_mtime)
+    ra = pd.to_numeric(ref["ALPHAWIN_J2000"], errors="coerce").to_numpy(float)
+    dec = pd.to_numeric(ref["DELTAWIN_J2000"], errors="coerce").to_numpy(float)
+    mag = (pd.to_numeric(ref["MAG_APER_4px"], errors="coerce").to_numpy(float)
+           if "MAG_APER_4px" in ref else np.zeros(len(ref)))
+    dra = (((ra - target_ra) + 180.0) % 360.0 - 180.0) * np.cos(np.radians(target_dec))
+    sep = np.nan_to_num(np.hypot(dra, dec - target_dec) * 3600.0, nan=np.inf)
+    inj = mag > 90
+    if (sep[~inj] < match_radius).any():
+        return True, None
+    j = np.where(inj & (sep < match_radius))[0]
+    return False, (int(j[np.argmin(sep[j])]) if len(j) else None)
 
 
 def _write_ldac(out_cat: Path, header, cols: dict) -> None:
@@ -298,7 +332,8 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
     nrows, ncols = ep.data.shape
     fwhm = ep.fwhm
 
-    idx, ra, dec, injected = _assoc_entries(ref_csv, target_ra, target_dec, match_radius)
+    idx, ra, dec = _assoc_entries(ref_csv)
+    ref_card = _ref_fingerprint(ref_csv)
     if sexcat_path is not None:                               # sci-pos
         from astropy.io import fits
         from astropy.coordinates import SkyCoord, match_coordinates_sky
@@ -330,11 +365,13 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
         t = aperture_photometry(ep.fin, ap_v, method="center", error=_ones(ep.fin.shape))
         good[on] = np.asarray(t["aperture_sum"]) > 0.5 * np.asarray(t["aperture_sum_err"]) ** 2
 
-    # Target fate (read by run_pipeline's target status): matched = has a reference source
+    # Target fate (read by run_pipeline's target status): matched = has a reference
+    # source; in_frame / painted for its injected catalog entry
     fate = None
     if target_ra is not None and target_dec is not None and sexcat_path is None:
-        fate = {"matched": not injected, "in_frame": bool(injected and on[-1]),
-                "painted": bool(injected and good[-1])}
+        matched, j = _target_row(ref_csv, target_ra, target_dec, match_radius)
+        fate = {"matched": matched, "in_frame": bool(j is not None and on[j]),
+                "painted": bool(j is not None and good[j])}
 
     idx, ra, dec, x, y = idx[good], ra[good], dec[good], x[good], y[good]
     radii = _aperture_radii()
@@ -387,6 +424,7 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
     header = ep.header.copy()
     header["PHOTCODE"] = (PHOTCODE, "forced aperture photometry (photutils)")
     header["APBKG"] = (bkg, "aperture background mode")
+    header["REFCAT"] = (ref_card, "reference catalog measured with: rows crc32")
     if bkg == "mesh":
         header["APBKGBOX"] = (ep.bkg_mesh, "background mesh box [px]")
     _write_ldac(out_cat, header, {
@@ -450,6 +488,19 @@ def _run(base_dir: Path, quadrants: list[dict], *, ref: bool, sci: bool, workers
             continue
         sub = Path(f"{field:06d}") / fc / f"{ccd:02d}" / str(qid_)
         status_dir = base_dir / "TargetStatus" / tag if ref else None
+        # A catalog measured with another reference catalog (e.g. before a target was
+        # injected into it) indexes the wrong rows: re-measured. Catalogs written before
+        # the REFCAT card are kept unless this run's target is an injected entry (older
+        # versions appended it as a temporary row N+1).
+        ref_card = _ref_fingerprint(ref_csv)
+        tgt_injected = (target_ra is not None and target_dec is not None
+                        and _target_row(ref_csv, target_ra, target_dec, match_radius)[1] is not None)
+
+        def _stale(out):
+            if force or not catalog_ok(out):
+                return True
+            card = _catalog_card(out, "REFCAT")
+            return card != ref_card if card is not None else tgt_injected
         for diff_path in sorted(q["sci_dir"].glob("*_scimrefdiffimg.fits")):
             if filefracdays is not None and _ffd_from_path(diff_path) not in filefracdays:
                 continue
@@ -457,7 +508,7 @@ def _run(base_dir: Path, quadrants: list[dict], *, ref: bool, sci: bool, workers
             jobs = []
             if ref:
                 out = base_dir / CATALOG_DIRS[""] / sub / name
-                if force or not catalog_ok(out):
+                if _stale(out):
                     jobs.append((out, None, None))
             if sci:
                 out = base_dir / CATALOG_DIRS["_sci"] / sub / name
@@ -465,7 +516,7 @@ def _run(base_dir: Path, quadrants: list[dict], *, ref: bool, sci: bool, workers
                                                                     "_sexcat.fits"))
                 if not sexcat.exists():
                     logger.debug(f"sexcat missing: {sexcat.name} — no sci-pos catalog")
-                elif force or not catalog_ok(out):
+                elif _stale(out):
                     jobs.append((out, sexcat, assoc_radius_sci))
             if jobs:
                 tasks.append((diff_path, jobs, ref_csv, target_ra, target_dec,

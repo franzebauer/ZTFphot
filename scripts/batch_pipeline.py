@@ -367,6 +367,7 @@ def main():
     base_dir = Path(args.base_dir)
     n_ok = n_fail = n_skip = 0
     failed: list[str] = []
+    deferred: list[str] = []
 
     for i, target in enumerate(targets, 1):
         sep = "=" * 70
@@ -433,7 +434,7 @@ def main():
                 both=args.both,
                 extra_args=extra,
             )
-            ok = rc == 0 and save_results_quad(work_dir, field, fc, ccdid, qid, ra, dec,
+            ok = rc in (0, 3) and save_results_quad(work_dir, field, fc, ccdid, qid, ra, dec,
                                                results_dir, both=args.both)
         else:
             rc = run_pipeline(
@@ -449,12 +450,20 @@ def main():
                 both=args.both,
                 extra_args=extra,
             )
-            ok = rc == 0 and save_results(work_dir, ra, dec, args.bands, results_dir,
-                                          both=args.both)
+            ok = rc in (0, 3) and save_results(work_dir, ra, dec, args.bands, results_dir,
+                                               both=args.both)
             append_status(work_dir, results_dir, ra, dec, ok,
-                          reason="PIPELINE_FAILED" if rc != 0 else None)
+                          reason=(None if rc == 0 else "QUADRANTS_DEFERRED" if rc == 3 and ok
+                                  else "PIPELINE_FAILED"))
 
-        if rc != 0:
+        if rc == 3 and ok:
+            # Complete except for quadrants IRSA could not deliver (no reference products):
+            # saved like a complete run. The parquet records them (quadrants_deferred), and
+            # update_parquet adds them later — no work dir needs to be kept.
+            print(f"  quadrant(s) deferred — recorded in the parquet (quadrants_deferred); "
+                  f"add them later with update_parquet.py --retry-deferred")
+            deferred.append(tag)
+        elif rc != 0:
             # A failed run's outputs may be intermediate (e.g. pass-1 light curves
             # without flatfield): nothing is saved, and the work dir is kept so that
             # re-running the batch resumes it (all steps skip completed outputs).
@@ -482,6 +491,11 @@ def main():
     if failed:
         print("Failed (work dirs kept; re-run the same command to resume them):")
         for w in failed:
+            print(f"  {w}")
+    if deferred:
+        print(f"Saved with deferred quadrants ({len(deferred)}; add them later with "
+              f"update_parquet.py {results_dir} --retry-deferred):")
+        for w in deferred:
             print(f"  {w}")
     print(f"Results in:  {results_dir.resolve()}")
     print(f"{'=' * 70}")
