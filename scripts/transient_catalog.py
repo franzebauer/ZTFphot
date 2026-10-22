@@ -13,7 +13,8 @@ AGN flares, etc.) is absent from the reference catalog (refsexcat.fits), which
 defines the positions the photometry measures.
 
 This module:
-  1. Loads a list of additional positions (from a user CSV or TNS API query).
+  1. Loads a list of additional positions (from a user CSV, or the TNS public
+     objects catalog via run_pipeline --grabTNSobjs).
   2. Converts them into rows compatible with the refsexcat.fits binary table.
   3. Writes an augmented catalog (*_refsexcat_augmented.fits), which make_catalog
      prefers over refsexcat.fits when building the reference CSV.
@@ -24,42 +25,22 @@ Injected sources are marked with:
   - FLAGS = 1 if a reference neighbour lies within 3 arcsec (neighbour bit), else 0;
     this surfaces as FLAGS bit REF_BLEND in the light curves.
 
-Modes
------
-Mode A — User-supplied CSV
-    A CSV with at minimum 'ra' and 'dec' columns (decimal degrees, J2000).
-    Optional columns: 'name', 'mag_estimate', 'redshift', 'classification'.
+Command line
+------------
+A CSV with at minimum 'ra' and 'dec' columns (decimal degrees, J2000), optional 'name':
 
-    python transient_catalog.py --mode user \\
+    python transient_catalog.py \\
         --input my_targets.csv \\
         --refsexcat ../data/Reference/000443/zr/ccd16/q2/ztf_000443_zr_c16_q2_refsexcat.fits \\
         --diffimg   ../data/Science/000443/zr/ccd16/q2/ztf_20210101123456_000443_zr_c16_o_q2_scimrefdiffimg.fits \\
         --output    ztf_000443_zr_c16_q2_refsexcat_augmented.fits
 
-Mode B — TNS (Transient Name Server) query
-    Queries the TNS Bot API for all reported transients within the quadrant
-    footprint and injects them.  Requires a TNS Bot API key (free registration
-    at https://www.wis-tns.org/bots).
-
-    Set env var TNS_API_KEY=<your key> or pass --tns-api-key.
-
-    python transient_catalog.py --mode tns \\
-        --ra 330.34158 --dec 0.72143 --radius 0.35 \\
-        --refsexcat ../data/Reference/000443/zr/ccd16/q2/ztf_000443_zr_c16_q2_refsexcat.fits \\
-        --diffimg   ../data/Science/000443/zr/ccd16/q2/ztf_20210101123456_000443_zr_c16_o_q2_scimrefdiffimg.fits \\
-        --output    ztf_000443_zr_c16_q2_refsexcat_augmented.fits \\
-        --tns-api-key $TNS_API_KEY
-
 Programmatic API
 ----------------
-    from transient_catalog import load_user_catalog, query_tns, augment_sexcat
+    from transient_catalog import load_user_catalog, load_tns_catalog, augment_sexcat
 
-    # Mode A
     transients = load_user_catalog("my_targets.csv")
-
-    # Mode B
-    transients = query_tns(ra_center=330.34158, dec_center=0.72143,
-                           radius_deg=0.35, api_key="...")
+    # or: load_tns_catalog(cred_file, key_file, cache_dir)  (TNS public objects)
 
     augmented_path = augment_sexcat(
         refsexcat_path = "ztf_000443_zr_c16_q2_refsexcat.fits",
@@ -72,9 +53,8 @@ Notes
 -----
 - The augmented catalog is a drop-in replacement for the original refsexcat.fits:
   all existing rows are preserved unchanged; injected rows are appended.
-- Injected rows carry MAG_APER = 99 as their only marker (no extra column).
-- Injection flux is derived from the sky noise of the *difference* image, not
-  the reference image, because that is what the photometry measures.
+- Injected rows carry MAG_APER = 99 as their only marker (no extra column); only
+  their positions are used.
 - If a user CSV row already matches a reference catalog source within 1 arcsec,
   it is not injected (the source is already in the catalog).
 """
@@ -83,8 +63,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -109,23 +88,15 @@ class TransientSource:
     ra, dec     : J2000 decimal degrees
     name        : human-readable identifier (e.g. "SN 2021xyz", "AT 2021abc")
     source      : provenance — "user" or "tns"
-    mag_estimate: rough r/g magnitude for reference; used only to set injection
-                  flux when no diff-image noise estimate is available.
-                  Set None to use the default sigma-based flux.
-    redshift    : optional; carried through for bookkeeping
-    classification: e.g. "SN Ia", "TDE", "AGN"
     """
     ra: float
     dec: float
     name: str = "INJECTED"
     source: str = "user"
-    mag_estimate: Optional[float] = None
-    redshift: Optional[float] = None
-    classification: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
-# Mode A — user CSV
+# User CSV
 # ---------------------------------------------------------------------------
 
 def load_user_catalog(csv_path: str | Path) -> list[TransientSource]:
@@ -133,7 +104,7 @@ def load_user_catalog(csv_path: str | Path) -> list[TransientSource]:
     Load transient positions from a user-supplied CSV file.
 
     Required columns : ra, dec  (decimal degrees, J2000)
-    Optional columns : name, mag_estimate, redshift, classification
+    Optional column  : name
 
     Returns a list of TransientSource objects.
     """
@@ -163,9 +134,6 @@ def load_user_catalog(csv_path: str | Path) -> list[TransientSource]:
             dec=float(row["dec"]),
             name=str(row.get("name", f"USER_{i}")),
             source="user",
-            mag_estimate=float(row["mag_estimate"]) if "mag_estimate" in row and not pd.isna(row.get("mag_estimate")) else None,
-            redshift=float(row["redshift"]) if "redshift" in row and not pd.isna(row.get("redshift")) else None,
-            classification=str(row["classification"]) if "classification" in row and not pd.isna(row.get("classification")) else None,
         )
         sources.append(src)
 
@@ -190,10 +158,8 @@ def download_tns_public_catalog(cred_file: str | Path, key_file: str | Path,
     cred_file : JSON with keys 'tns_id', 'type', 'name' (the TNS marker identity)
     key_file  : text file containing the TNS API key
     """
-    import json
     import zipfile
     import pandas as pd
-    import requests
 
     cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
     csv_path = cache_dir / "tns_public_objects.csv"
@@ -205,13 +171,22 @@ def download_tns_public_catalog(cred_file: str | Path, key_file: str | Path,
                   % (cred["tns_id"], cred["type"], cred["name"]))
         logger.info("Downloading TNS public objects bulk catalog ...")
         resp = requests.post(TNS_PUBLIC_URL, headers={"User-Agent": marker},
-                             data={"api_key": api_key})
+                             data={"api_key": api_key}, timeout=(30, 300))
         resp.raise_for_status()
         zip_path = cache_dir / "tns_public_objects.csv.zip"
         zip_path.write_bytes(resp.content)
+        # extract to a temporary name and rename, so an interrupted run never leaves a
+        # truncated catalog that later runs would take as complete
         with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(cache_dir)
+            member = next(n for n in zf.namelist() if n.endswith(".csv"))
+            tmp = csv_path.with_name(csv_path.name + ".part")
+            tmp.write_bytes(zf.read(member))
         zip_path.unlink()
+        head = tmp.read_text(errors="ignore").splitlines()[:2]
+        if not any("ra" in h and "declination" in h for h in head):
+            tmp.unlink()
+            raise RuntimeError("TNS download is not the public objects catalog (no ra/declination header)")
+        tmp.replace(csv_path)
         logger.info(f"TNS catalog cached at {csv_path}")
 
     # The bulk CSV carries a one-line title above the header row.
@@ -245,165 +220,7 @@ def load_tns_catalog(cred_file: str | Path, key_file: str | Path,
 
 
 # ---------------------------------------------------------------------------
-# Mode B — TNS cone-search query (Bot API)
-# ---------------------------------------------------------------------------
-
-TNS_BASE_URL = "https://www.wis-tns.org/api/get"
-TNS_SEARCH_URL = f"{TNS_BASE_URL}/search"
-TNS_REQUEST_TIMEOUT = (10, 60)  # (connect, read) seconds
-
-
-def query_tns(
-    ra_center: float,
-    dec_center: float,
-    radius_deg: float = 0.35,
-    api_key: Optional[str] = None,
-    tns_bot_id: Optional[str] = None,
-    tns_bot_name: Optional[str] = None,
-    max_results: int = 500,
-) -> list[TransientSource]:
-    """
-    Query the Transient Name Server (TNS) for objects within a circular region.
-
-    Parameters
-    ----------
-    ra_center, dec_center : float
-        Centre of the search cone (J2000 decimal degrees).
-    radius_deg : float
-        Search radius in degrees.  A ZTF quadrant is ~0.26°×0.26°; use 0.35
-        to cover the full diagonal.
-    api_key : str
-        TNS Bot API key.  If not provided, falls back to the TNS_API_KEY
-        environment variable.
-    tns_bot_id, tns_bot_name : str
-        Bot credentials from your TNS bot registration page.
-        Falls back to env vars TNS_BOT_ID and TNS_BOT_NAME.
-    max_results : int
-        Maximum number of objects to retrieve (TNS default page size is 100;
-        this function handles pagination automatically).
-
-    Returns
-    -------
-    list of TransientSource
-
-    Notes
-    -----
-    You need a free TNS account and a Bot registration to get an API key.
-    See https://www.wis-tns.org/bots for instructions.
-
-    TNS search radius is in arcseconds; we convert radius_deg internally.
-    """
-    # Resolve credentials
-    key = api_key or os.environ.get("TNS_API_KEY")
-    bot_id = tns_bot_id or os.environ.get("TNS_BOT_ID", "")
-    bot_name = tns_bot_name or os.environ.get("TNS_BOT_NAME", "ZTF_pipeline")
-
-    if not key:
-        raise ValueError(
-            "TNS API key is required for Mode B. "
-            "Provide --tns-api-key, or set the TNS_API_KEY environment variable. "
-            "Register a free bot at https://www.wis-tns.org/bots"
-        )
-
-    radius_arcsec = radius_deg * 3600.0
-
-    headers = {
-        "User-Agent": f'tns_marker{{"tns_id":{bot_id!r},"type":"bot","name":{bot_name!r}}}',
-    }
-
-    all_sources: list[TransientSource] = []
-    page = 1
-
-    while True:
-        search_params = {
-            "ra": ra_center,
-            "dec": dec_center,
-            "radius": radius_arcsec,
-            "units": "arcsec",
-            "num_page": min(100, max_results - len(all_sources)),
-            "page": page,
-        }
-
-        payload = {
-            "api_key": key,
-            "data": json.dumps(search_params),
-        }
-
-        logger.debug(f"TNS query page {page}: cone({ra_center:.5f}, {dec_center:.5f}, "
-                     f"{radius_arcsec:.0f}\")")
-
-        try:
-            resp = requests.post(
-                TNS_SEARCH_URL,
-                headers=headers,
-                data=payload,
-                timeout=TNS_REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            raise RuntimeError(f"TNS API request failed: {exc}") from exc
-
-        try:
-            result = resp.json()
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"TNS returned non-JSON response (HTTP {resp.status_code}): "
-                f"{resp.text[:200]}"
-            ) from exc
-
-        # TNS wraps data in {"data": {"reply": [...]}} or similar
-        data = result.get("data", {})
-        if isinstance(data, dict):
-            reply = data.get("reply", [])
-        else:
-            reply = data if isinstance(data, list) else []
-
-        if not reply:
-            break
-
-        for obj in reply:
-            try:
-                src = TransientSource(
-                    ra=float(obj.get("ra", 0)),
-                    dec=float(obj.get("dec", 0)),
-                    name=obj.get("name_prefix", "") + obj.get("name", "UNKNOWN"),
-                    source="tns",
-                    mag_estimate=_tns_mag(obj),
-                    redshift=float(obj["redshift"]) if obj.get("redshift") else None,
-                    classification=obj.get("type", {}).get("name") if isinstance(obj.get("type"), dict) else obj.get("type"),
-                )
-                all_sources.append(src)
-            except (KeyError, TypeError, ValueError) as exc:
-                logger.debug(f"Skipping malformed TNS object {obj.get('name', '?')}: {exc}")
-
-        logger.info(f"TNS: retrieved {len(reply)} objects on page {page} "
-                    f"(total so far: {len(all_sources)})")
-
-        # Stop if we got fewer than a full page or reached the limit
-        if len(reply) < 100 or len(all_sources) >= max_results:
-            break
-        page += 1
-
-    logger.info(f"TNS query complete: {len(all_sources)} transients within "
-                f"{radius_arcsec:.0f}\" of ({ra_center:.5f}, {dec_center:.5f})")
-    return all_sources
-
-
-def _tns_mag(obj: dict) -> Optional[float]:
-    """Extract a representative magnitude from a TNS object dict, if available."""
-    # TNS may provide discovery magnitude or last-non-detection magnitude
-    for key in ("discoveryabsmag", "discoverymag", "lastnondetlimit"):
-        val = obj.get(key)
-        if val is not None:
-            try:
-                return float(val)
-            except (ValueError, TypeError):
-                pass
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Reference catalog augmentation
+# Catalog augmentation
 # ---------------------------------------------------------------------------
 
 def _filter_already_in_catalog(
@@ -447,13 +264,13 @@ def _filter_in_footprint(sources, image_path):
     """Keep only sources whose sky position falls inside the image frame.
     Cheap even for a full TNS dump. Avoids injecting a target into a quadrant whose
     footprint does not contain it (which would otherwise bloat every quadrant's
-    catalog with sources that are never painted)."""
+    catalog with sources that are never measured)."""
     from astropy.wcs import WCS
     if not sources:
         return sources
-    with fits.open(image_path) as h:
-        wcs = WCS(h[0].header)
-        ny, nx = h[0].data.shape
+    hdr = fits.getheader(image_path)                 # WCS and size only (no pixel data)
+    wcs = WCS(hdr)
+    ny, nx = int(hdr["NAXIS2"]), int(hdr["NAXIS1"])
     ra  = np.array([s.ra  for s in sources], dtype=float)
     dec = np.array([s.dec for s in sources], dtype=float)
 
@@ -574,8 +391,6 @@ def augment_sexcat(
     # injected source has a reference neighbour within _BLEND_ARCSEC, FLAGS bit 0
     # (value 1, close neighbour) is set, so it is flagged like a real crowded source
     # (FLAGS bit REF_BLEND in the light curves).
-    from astropy.coordinates import SkyCoord
-    import astropy.units as u
     _ref_coords = SkyCoord(ra=np.asarray(orig_table["ALPHAWIN_J2000"], float) * u.deg,
                            dec=np.asarray(orig_table["DELTAWIN_J2000"], float) * u.deg)
     _BLEND_ARCSEC = 3.0
@@ -747,26 +562,8 @@ if __name__ == "__main__":
             "forced aperture photometry measures them in the difference images."
         )
     )
-    parser.add_argument(
-        "--mode", choices=["user", "tns"], required=True,
-        help="Source of transient positions: 'user' (CSV file) or 'tns' (TNS API query)"
-    )
-
-    # Mode A arguments
-    parser.add_argument("--input", type=Path,
-                        help="[Mode A] CSV file with ra, dec columns")
-
-    # Mode B arguments
-    parser.add_argument("--ra",     type=float, help="[Mode B] Field centre RA (deg)")
-    parser.add_argument("--dec",    type=float, help="[Mode B] Field centre Dec (deg)")
-    parser.add_argument("--radius", type=float, default=0.35,
-                        help="[Mode B] Search radius in degrees (default: 0.35)")
-    parser.add_argument("--tns-api-key", type=str, default=None,
-                        help="[Mode B] TNS Bot API key (or set TNS_API_KEY env var)")
-    parser.add_argument("--tns-bot-id",  type=str, default=None,
-                        help="[Mode B] TNS Bot ID (or set TNS_BOT_ID env var)")
-    parser.add_argument("--tns-bot-name", type=str, default=None,
-                        help="[Mode B] TNS Bot name (or set TNS_BOT_NAME env var)")
+    parser.add_argument("--input", type=Path, required=True,
+                        help="CSV file with ra, dec (and optional name) columns")
 
     # Catalog / image arguments
     parser.add_argument("--refsexcat", type=Path, required=False,
@@ -785,22 +582,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # ---- Load transient list ----
-    if args.mode == "user":
-        if not args.input:
-            parser.error("--input is required for --mode user")
-        transients = load_user_catalog(args.input)
-
-    elif args.mode == "tns":
-        if args.ra is None or args.dec is None:
-            parser.error("--ra and --dec are required for --mode tns")
-        transients = query_tns(
-            ra_center=args.ra,
-            dec_center=args.dec,
-            radius_deg=args.radius,
-            api_key=args.tns_api_key,
-            tns_bot_id=args.tns_bot_id,
-            tns_bot_name=args.tns_bot_name,
-        )
+    transients = load_user_catalog(args.input)
 
     if not transients:
         print("No transients found. Nothing to inject.")

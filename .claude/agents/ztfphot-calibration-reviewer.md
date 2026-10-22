@@ -10,8 +10,8 @@ scripts/aperture_photometry.py, scripts/calib_catalogs.py, scripts/calibrate.py,
 # Look for
 - Apertures: diameter vs radius; exact overlap; NaN masking; flag bits (8/16 primary aperture only, 32 outer-only, 1 neighbour); the box background via integral images (off-by-one at array edges, annulus inner/outer bounds, clipping); error = bkg RMS × sqrt(unmasked area).
 - Positions: WCS pixel origin (0 vs 1), the target injection index N+1, sci-pos tie to the nearest reference within assoc-radius-sci, VECTOR_ASSOC 1-based.
-- Calibration chain: linear ZP fit → 3σ clip → 2D polynomial → flatfield → faint correction (applied last); calibrator selection (14–19 mag, CLASS_STAR, ref_clean FLAG_SE_REF==0, CAL_REJECT 8|16|32, err cut); degenerate cases (too few calibrators, a singular polynomial fit, an empty flatfield bin); flatfield clamping; whether the faint correction leaves <18.5 mag untouched.
-- Flux ↔ mag consistency: bipolar flux, reference flux added for total flux, the MAGZP_REF vs MAGZP_DIF zero points, negative total flux → NaN mag; APCORR46 units.
+- Calibration chain: linear ZP fit → 3σ clip → 2D polynomial → flatfield, then the 4→10 px aperture correction (APCORR410) of the primary aperture; calibrator selection (14–19 mag, CLASS_STAR, ref_clean FLAG_SE_REF==0, CAL_REJECT 8|16|32, err cut); degenerate cases (too few calibrators, a singular polynomial fit, an empty flatfield bin); flatfield clamping.
+- Flux ↔ mag consistency: bipolar flux, reference flux added for total flux, the MAGZP_REF vs MAGZP_DIF zero points, negative total flux → NaN mag; APCORR410 units and that MAG_4/FLUX_4 carry it consistently.
 - Vetting: circularity (calibrators vetted on light curves calibrated with themselves), IS_GOOD semantics, minimum epochs.
 - ztfphot_flags: compose()/flags_of() with older column sets; Int32 NA handling.
 - LDAC read/write: `_read_ldac` header parsing (cards without a comment), the PHOTCODE check that zeroes FLAGS on foreign catalogs.
@@ -28,7 +28,11 @@ scripts/aperture_photometry.py, scripts/calib_catalogs.py, scripts/calibrate.py,
 - "Done" checks using `exists()` where a partial/corrupt file could be left behind; non-atomic writes.
 - Writer ↔ reader contracts: column/header names, units (mag vs mmag, μJy), sign conventions, 0- vs 1-based indices.
 
+## Also look for (every reviewer)
+- **Speed-ups** with a real payoff on large runs (1e6+ rows per light curve, hundreds of epochs, thousands of targets): Python loops over rows/sources that could be vectorised, repeated file reads or SkyCoord builds inside loops, recomputation that could be cached, needless full-file loads, serial work that is trivially parallel. Estimate the gain.
+- **Dead or redundant code**: unused functions/parameters/imports/variables, branches that can no longer trigger, duplicated logic that should share one helper, compatibility code for formats no longer produced (keep only what the retrofit path update_old_parquet.py or ztfphot_lc.read_lc needs), stale comments that describe removed behaviour.
+
 ## Output format (strict, terse)
-At most 15 findings, ranked by severity, no preamble and no praise. Each one:
-`[HIGH|MED|LOW] path:line — defect (one sentence). Scenario: concrete input/state → wrong result. Fix: one line.`
+At most 20 findings, ranked by severity within each kind, no preamble and no praise. Each one:
+`[BUG-HIGH|BUG-MED|BUG-LOW|SPEED|DEAD] path:line — issue (one sentence). Scenario/gain: concrete input → wrong result, or estimated saving. Fix: one line.`
 Only report something you have confirmed in the code; mark anything uncertain `(unverified)`. Then add one line: `Checked, no issue:` followed by a comma-separated list of the checklist items you cleared.

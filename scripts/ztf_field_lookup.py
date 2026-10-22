@@ -44,11 +44,7 @@ FILTERCODE_TO_BAND = {"zg": "g", "zr": "r", "zi": "i"}
 DEFAULT_CACHE_DIR   = Path("data") / "Epochs"
 DEFAULT_SEARCH_DEG  = 0.0005
 
-_HARD_REJECT = (1 << 0) | (1 << 1) | (1 << 25)
-_CAUTIONARY  = (
-    (1 << 2)  | (1 << 3)  | (1 << 4)  | (1 << 5)  | (1 << 6)
-  | (1 << 11) | (1 << 21) | (1 << 22) | (1 << 26) | (1 << 27)
-)
+from ztfphot_flags import HARD_REJECT_INFOBITS as _HARD_REJECT, CAUTIONARY_INFOBITS as _CAUTIONARY  # noqa: E402
 
 
 # ── Core lookup ───────────────────────────────────────────────────────────────
@@ -294,7 +290,7 @@ def plot_coverage(
 
         # Compact table as text in upper-left of infobits panel
         # Reserve top ~40% for text by boosting y-limit
-        ax_bits.set_ylim(0, max_bar * 2.6)
+        ax_bits.set_ylim(0, max(max_bar, 1) * 2.6)
         ax_bits.text(
             0.02, 0.98, table_text,
             transform=ax_bits.transAxes,
@@ -305,9 +301,10 @@ def plot_coverage(
 
         # ── Seeing histogram ──────────────────────────────────────────────────
         all_see  = band_ep["seeing"].dropna()
-        see_bins = np.linspace(np.percentile(all_see, 1), np.percentile(all_see, 99), 30)
+        see_bins = (np.linspace(np.percentile(all_see, 1), np.percentile(all_see, 99), 30)
+                    if len(all_see) else None)
 
-        for _, row in quads.iterrows():
+        for _, row in (quads.iterrows() if see_bins is not None else []):
             key  = (int(row.field), int(row.ccdid), int(row.qid))
             col  = colors[key]
             mask = ((band_ep["field"]  == row.field) &
@@ -317,6 +314,8 @@ def plot_coverage(
             if sub.empty:
                 continue
             see = sub["seeing"].dropna().values
+            if see.size == 0:
+                continue
             med = float(np.median(see))
             ax_see.hist(see, bins=see_bins, alpha=0.5, color=col)
             ax_see.axvline(med, color=col, lw=1.8, ls="--",
@@ -332,9 +331,10 @@ def plot_coverage(
 
         # ── MAGLIM histogram ──────────────────────────────────────────────────
         all_mag  = band_ep["maglimit"].dropna()
-        mag_bins = np.linspace(np.percentile(all_mag, 1), np.percentile(all_mag, 99), 30)
+        mag_bins = (np.linspace(np.percentile(all_mag, 1), np.percentile(all_mag, 99), 30)
+                    if len(all_mag) else None)
 
-        for _, row in quads.iterrows():
+        for _, row in (quads.iterrows() if mag_bins is not None else []):
             key  = (int(row.field), int(row.ccdid), int(row.qid))
             col  = colors[key]
             mask = ((band_ep["field"]  == row.field) &
@@ -344,6 +344,8 @@ def plot_coverage(
             if sub.empty:
                 continue
             mag = sub["maglimit"].dropna().values
+            if mag.size == 0:
+                continue
             med = float(np.median(mag))
             ax_mag.hist(mag, bins=mag_bins, alpha=0.5, color=col)
             ax_mag.axvline(med, color=col, lw=1.8, ls="--",

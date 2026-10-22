@@ -93,31 +93,25 @@ def _make_no_target_plot(out_path: Path, tag: str,
     logger.info(f"  no-target placeholder → {out_path}")
 
 
-def _load_vet_good_indices(vet_catalog: Path, clean: pd.DataFrame) -> set:
-    """Return set of object_index for sources marked IS_GOOD=True in the vet catalog."""
+def _vet_indices(vet_catalog: Path, df: pd.DataFrame, good: bool = True) -> set:
+    """object_index of the sources with IS_GOOD == `good` in the vet catalog (matched by
+    their reference position, identical in both)."""
     if vet_catalog is None or not vet_catalog.exists():
         return set()
     try:
         from astropy.io import fits
         with fits.open(str(vet_catalog)) as h:
             vd = h[1].data
-        vet_ra   = vd["ALPHAWIN_J2000"].astype(float)
-        vet_dec  = vd["DELTAWIN_J2000"].astype(float)
-        vet_good = vd["IS_GOOD"].astype(bool)
-        good_ra  = vet_ra[vet_good]
-        good_dec = vet_dec[vet_good]
-        ok = np.isfinite(good_ra) & np.isfinite(good_dec)
-        if not ok.any():
+        sel = vd["IS_GOOD"].astype(bool) == good
+        ra, dec = vd["ALPHAWIN_J2000"].astype(float)[sel], vd["DELTAWIN_J2000"].astype(float)[sel]
+        ok = np.isfinite(ra) & np.isfinite(dec)
+        srcs = df.groupby("object_index")[["ALPHAWIN_REF", "DELTAWIN_REF"]].first().dropna()
+        if not ok.any() or srcs.empty:
             return set()
-        srcs = clean.groupby("object_index")[["ALPHAWIN_REF", "DELTAWIN_REF"]].first().dropna()
-        if srcs.empty:
-            return set()
-        cat_src  = SkyCoord(ra=srcs["ALPHAWIN_REF"].values * u.deg,
-                            dec=srcs["DELTAWIN_REF"].values * u.deg)
-        cat_good = SkyCoord(ra=good_ra[ok] * u.deg, dec=good_dec[ok] * u.deg)
-        idx, sep, _ = cat_good.match_to_catalog_sky(cat_src)
-        matched = sep.arcsec < TARGET_RADIUS     # same reference positions: exact match
-        return set(srcs.index[idx[matched]].tolist())
+        cat_src = SkyCoord(ra=srcs["ALPHAWIN_REF"].values * u.deg,
+                           dec=srcs["DELTAWIN_REF"].values * u.deg)
+        idx, sep, _ = SkyCoord(ra=ra[ok] * u.deg, dec=dec[ok] * u.deg).match_to_catalog_sky(cat_src)
+        return set(srcs.index[idx[sep.arcsec < TARGET_RADIUS]].tolist())
     except Exception as e:
         logger.warning(f"Could not load vet catalog {vet_catalog}: {e}")
         return set()
@@ -159,7 +153,9 @@ def _pick_comps(clean: pd.DataFrame, tgt_obj, tgt_med: float,
         logger.warning("  _pick_comps: no candidates found")
         return []
 
-    cands["delta"] = (cands["med_mag"] - tgt_med).abs()
+    # a target without any magnitude: comparison stars at the quadrant's median magnitude
+    ref_mag = tgt_med if np.isfinite(tgt_med) else float(per_src["med_mag"].median())
+    cands["delta"] = (cands["med_mag"] - ref_mag).abs()
     return cands.sort_values("delta").index[:n_comp].tolist()
 
 
@@ -209,11 +205,12 @@ def make_lightcurves(lc_path: Path, out_path: Path,
     Two-panel light curve figure for one quadrant.
 
     Top panel:    target LC coloured by MAGLIM
-    Bottom panel: n_comp stellar (CLASS_STAR > 0.7) comparison objects,
-                  excluding any source in the vet calibration catalog
+    Bottom panel: the n_comp IS_GOOD calibration stars nearest in magnitude to the
+                  target (CLASS_STAR > 0.7 sources without a vetting catalog)
     """
     try:
-        df = pd.read_parquet(lc_path)
+        from ztfphot_lc import read_lc
+        df = read_lc(lc_path)                 # any pipeline version, current names
     except Exception as e:
         logger.warning(f"  cannot read {lc_path}: {e}")
         return
@@ -249,7 +246,7 @@ def make_lightcurves(lc_path: Path, out_path: Path,
                     f"or are out of range) — magnitude light curve skipped; see the flux plot")
         return
 
-    vet_good  = _load_vet_good_indices(vet_catalog, clean)
+    vet_good  = _vet_indices(vet_catalog, clean, good=True)
     comp_idxs = _pick_comps(clean, tgt_obj, tgt_med, vet_good, n_comp)
 
     # ── shared y-axis range ───────────────────────────────────────────────────
@@ -357,7 +354,7 @@ def make_lightcurves(lc_path: Path, out_path: Path,
         ax_bot.set_ylabel("Calibrated magnitude (AB)", fontsize=10)
         ax_bot.set_xlabel("MJD", fontsize=10)
         ax_bot.set_title(
-            f"Nearest {len(comp_idxs)} IS_GOOD calibration stars  "
+            f"Nearest {len(comp_idxs)} {'IS_GOOD calibration stars' if vet_good else 'stellar sources (no vetting catalog)'}  "
             f"(excl. σ > 4× median)", fontsize=10)
         ax_bot.tick_params(labelsize=9)
         ax_bot.legend(fontsize=8, loc="upper right")
@@ -404,7 +401,8 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
     reference flux).
     """
     try:
-        df = pd.read_parquet(lc_path)
+        from ztfphot_lc import read_lc
+        df = read_lc(lc_path)                 # any pipeline version, current names
     except Exception as e:
         logger.warning(f"  cannot read {lc_path}: {e}")
         return
@@ -428,7 +426,7 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
     if tgt_rows.empty:
         return
 
-    vet_good  = _load_vet_good_indices(vet_catalog, clean)
+    vet_good  = _vet_indices(vet_catalog, clean, good=True)
     comp_idxs = _pick_comps(clean, tgt_obj, tgt_med, vet_good, n_comp)
 
     fig = plt.figure(figsize=(14, 10))
@@ -514,7 +512,9 @@ def make_lightcurves_flux(lc_path: Path, out_path: Path,
             ax_top.set_ylim(c_t - _h, c_t + _h)
         ax_bot.set_ylabel("Flux (μJy)", fontsize=10)
         ax_bot.set_xlabel("MJD", fontsize=10)
-        ax_bot.set_title(f"Nearest {len(comp_idxs)} IS_GOOD calibration stars", fontsize=10)
+        ax_bot.set_title(f"Nearest {len(comp_idxs)} "
+                         f"{'IS_GOOD calibration stars' if vet_good else 'stellar sources (no vetting catalog)'}",
+                         fontsize=10)
         ax_bot.tick_params(labelsize=9)
         ax_bot.legend(fontsize=8, loc="upper right")
         ax_bot.grid(True, alpha=0.2)

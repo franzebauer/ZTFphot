@@ -32,7 +32,7 @@ Usage
 -----
     python vet_calibration_stars.py \\
         --field 443 --band zg --ccd 16 --qid 2 \\
-        [--base-dir ../data] [--threshold 2.0] [--min-epochs 20]
+        [--base-dir ../data] [--threshold 1.5] [--min-epochs 20]
 """
 
 import argparse
@@ -42,11 +42,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from astropy.io import fits
-
-
-def _flux_to_mag(flux):
-    with np.errstate(divide='ignore', invalid='ignore'):
-        return np.where(flux > 0, -2.5 * np.log10(flux) - 48.6, np.nan)
 
 
 def fit_locus(q_mag, std_vals, bin_width=0.5, mag_lo=14.0, mag_hi=19.0):
@@ -174,11 +169,10 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
     for c, m in zip(bin_centers, bin_medians):
         print(f"    {c:.1f} mag  →  {m:.3f} μJy")
 
-    # ── Flag ALL well-sampled sources against the calibrator locus ────────────
+    # ── Flag ALL well-sampled sources against the locus ───────────────────────
     # Extends variability detection beyond the 14–19 calibrator range (and beyond
-    # stellar sources): the locus is fit on clean calibrators above, but every
-    # source with enough epochs is tested, using the locus extrapolated flat past
-    # 14–19. Safe for calibration — calib_catalog re-applies its own 14–19 /
+    # stellar sources): every source with enough epochs is tested against the
+    # population locus above (flat beyond its fitted range). Safe for calibration — calib_catalog re-applies its own 14–19 /
     # CLASS_STAR cuts, so flags on out-of-range sources don't affect the zero-point.
     flag_src = stats[(stats['n'] >= min_epochs) &
                      stats['std_flux'].notna() &
@@ -228,7 +222,8 @@ def vet_stars(field, band, ccd, qid, base_dir, threshold, min_epochs):
         fits.Column(name='IS_GOOD', format='L',
                     array=ref_out['IS_GOOD'].values),
     ])
-    hdu.writeto(str(out_path), overwrite=True)
+    hdu.writeto(str(out_path) + ".tmp", overwrite=True)      # atomic: no truncated vet file
+    Path(str(out_path) + ".tmp").replace(out_path)
     print(f"  Saved → {out_path}\n")
 
 
@@ -242,7 +237,7 @@ if __name__ == '__main__':
     p.add_argument('--base-dir',    default=Path("data"),
                    help="Data directory (default: ./data in current working directory)")
     p.add_argument('--threshold',   type=float, default=1.5,
-                   help='Flag sources with std > THRESHOLD × local locus (default: 2.0)')
+                   help='Flag sources with std > THRESHOLD × local locus (default: 1.5)')
     p.add_argument('--min-epochs',  type=int,   default=20,
                    help='Min clean epochs required (default: 20 for reliable std)')
     args = p.parse_args()

@@ -32,12 +32,14 @@ if len(sys.argv) < 2:
     sys.exit("Usage: python lc_viewer.py <merged_parquet.parquet>")
 
 import pyarrow.parquet as _pq
-_pf = _pq.read_table(sys.argv[1])
-_meta = {k.decode(): v.decode() for k, v in (_pf.schema.metadata or {}).items()}
-df = _pf.to_pandas()
+_meta = {k.decode(): v.decode() for k, v in (_pq.read_schema(sys.argv[1]).metadata or {}).items()}
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+from ztfphot_lc import read_lc
+df = read_lc(sys.argv[1])                     # any pipeline version, current names
 from ztfphot_flags import clean_rows
 df = clean_rows(df).dropna(subset=['MAG_4_TOT_AB', 'OBSMJD']).copy()
+if df.empty:
+    sys.exit("no clean epochs with a 4 px magnitude in this file")
 
 # For single-quadrant parquets the origin columns live in file metadata, not data.
 for _col, _key in [('field', 'field'), ('filtercode', 'filtercode'),
@@ -57,22 +59,14 @@ else:
     df['_qlabel'] = Path(sys.argv[1]).stem
 all_quads = sorted(df['_qlabel'].unique())
 
-# Per-object stats for overview
-def _stats(g):
-    mag = g['MAG_4_TOT_AB']
-    if len(mag) < 5:
-        return None
-    return pd.Series({
-        'med_mag': float(np.median(mag)),
-        'rms':     float(np.std(mag)),
-        'n':       len(mag),
-        'ra':      float(g['ALPHAWIN_REF'].iloc[0]),
-        'dec':     float(g['DELTAWIN_REF'].iloc[0]),
-    })
-
-stats = (df.groupby('object_index', group_keys=False)
-           .apply(_stats, include_groups=False)
-           .dropna())
+# Per-object stats for overview (population std, as before)
+stats = df.groupby('object_index').agg(
+    med_mag=('MAG_4_TOT_AB', 'median'),
+    rms=('MAG_4_TOT_AB', lambda m: float(np.std(m))),
+    n=('MAG_4_TOT_AB', 'size'),
+    ra=('ALPHAWIN_REF', 'first'),
+    dec=('DELTAWIN_REF', 'first'),
+)
 stats = stats[stats['n'] >= 5].sort_values('rms', ascending=False)
 ranked = stats.index.tolist()   # ordered by RMS descending
 
@@ -128,8 +122,6 @@ ax_ov.grid(True, color=GRID, lw=0.5)
 
 # ── MAGLIM colorbar ───────────────────────────────────────────────────────────
 
-if df.empty:
-    sys.exit("no clean epochs with a 4 px magnitude in this file")
 ml_lo = float(df['MAGLIM'].quantile(0.02)) if df['MAGLIM'].notna().any() else 15.0
 ml_hi = float(df['MAGLIM'].quantile(0.98)) if df['MAGLIM'].notna().any() else 22.0
 ml_norm = Normalize(vmin=ml_lo, vmax=ml_hi)
@@ -165,10 +157,15 @@ for lbl in chk.labels:
     lbl.set_color(FG)
     lbl.set_fontsize(7)
 
-sml_slider = mw.Slider(ax_sml, 'MAGLIM ≥', ml_lo, ml_hi, valinit=ml_lo,
-                       color='#aaaacc', valstep=(ml_hi - ml_lo) / 200)
-ssee_slider = mw.Slider(ax_ssee, 'SEEING ≤', see_lo, see_hi, valinit=see_hi,
-                        color='#aaccaa', valstep=(see_hi - see_lo) / 200)
+# sliders span the full data range and start there (no epoch hidden by default)
+_ml_min = float(df['MAGLIM'].min()) if df['MAGLIM'].notna().any() else ml_lo
+_ml_max = float(df['MAGLIM'].max()) if df['MAGLIM'].notna().any() else ml_hi
+_see_min = float(_see.min()) if len(_see) > 0 else see_lo
+_see_max = float(_see.max()) if len(_see) > 0 else see_hi
+sml_slider = mw.Slider(ax_sml, 'MAGLIM ≥', _ml_min, _ml_max, valinit=_ml_min,
+                       color='#aaaacc', valstep=max(_ml_max - _ml_min, 1e-3) / 200)
+ssee_slider = mw.Slider(ax_ssee, 'SEEING ≤', _see_min, _see_max, valinit=_see_max,
+                        color='#aaccaa', valstep=max(_see_max - _see_min, 1e-3) / 200)
 for sl in [sml_slider, ssee_slider]:
     sl.label.set_fontsize(8)
     sl.label.set_color(FG)

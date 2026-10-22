@@ -42,20 +42,13 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_parquet(args.parquet)
-
-    quadrants = (df[["field", "filtercode", "ccdid", "qid"]]
-                 .drop_duplicates()
-                 .sort_values(["field", "filtercode", "ccdid", "qid"])
-                 .itertuples(index=False))
+    from ztfphot_lc import read_lc
+    df = read_lc(args.parquet)                # any pipeline version, current names
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        for row in quadrants:
-            f, fc, ccd, qid_ = int(row.field), row.filtercode, int(row.ccdid), int(row.qid)
+        for (f, fc, ccd, qid_), subset in df.groupby(["field", "filtercode", "ccdid", "qid"]):
+            f, ccd, qid_ = int(f), int(ccd), int(qid_)
             tag = f"{f:06d}_{fc}_c{ccd:02d}_q{qid_}"
-
-            subset = df[(df["field"] == f) & (df["filtercode"] == fc) &
-                        (df["ccdid"] == ccd) & (df["qid"] == qid_)].copy()
 
             tmp_pq = Path(tmpdir) / f"{tag}.parquet"
             pq.write_table(pa.Table.from_pandas(subset, preserve_index=False), tmp_pq)

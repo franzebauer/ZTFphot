@@ -10,14 +10,10 @@ Thin re-export shim — actual implementations live in:
 
 from __future__ import annotations
 
-import logging
-
 from plot_spatial     import make_spatial_rms, make_spatial_iqr
 from plot_rms         import make_rms
 from plot_precision   import make_precision, make_position
 from plot_lightcurve  import make_lightcurves, make_lightcurves_flux
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "make_spatial_rms", "make_spatial_iqr",

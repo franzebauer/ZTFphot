@@ -22,8 +22,7 @@ def _cast_lc_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     Cast light-curve columns to correct numeric types before writing Parquet.
     FITS LDAC header keywords are parsed as raw strings; this coerces them.
 
-    float64: OBSMJD (MJD precision), ALPHAWIN_REF, DELTAWIN_REF, ALPHA_OBJ,
-             DELTA_OBJ (astrometric precision at RA~330 deg)
+    float64: OBSMJD (MJD precision), ALPHAWIN_REF, DELTAWIN_REF (astrometric precision)
     float32: all photometric quantities and per-epoch scalars, plus the sci-pos
              epoch offsets DRA_SCI/DDEC_SCI (arcsec from the reference position,
              2 dp — absolute degrees would need float64 to hold 0.01")
@@ -103,7 +102,6 @@ def _photometry_columns(df: pd.DataFrame, preset: str) -> pd.DataFrame:
 def step_lightcurves(
     base_dir: Path, quadrants: list[dict],
     force: bool = False,
-    use_calibrated: bool = True,
     suffix: str = "",
     target_ra: float | None = None,
     target_dec: float | None = None,
@@ -217,10 +215,8 @@ def step_lightcurves(
         if target_ra is not None and target_dec is not None:
             from astropy.coordinates import SkyCoord
             import astropy.units as u
-            ra_col  = 'ALPHAWIN_J2000' if 'ALPHAWIN_J2000' in ref.columns else 'RA'
-            dec_col = 'DELTAWIN_J2000' if 'DELTAWIN_J2000' in ref.columns else 'DEC'
-            _ra  = pd.to_numeric(ref[ra_col],  errors='coerce').values
-            _dec = pd.to_numeric(ref[dec_col], errors='coerce').values
+            _ra  = pd.to_numeric(ref['ALPHAWIN_J2000'], errors='coerce').values
+            _dec = pd.to_numeric(ref['DELTAWIN_J2000'], errors='coerce').values
             _ok  = np.isfinite(_ra) & np.isfinite(_dec)
             if _ok.any():
                 _tgt  = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
@@ -257,6 +253,9 @@ def step_lightcurves(
             ep_ref_idx = (assoc_id[matched].values - 1)  # 1-based to 0-based
 
             # Epoch metadata (broadcast to all sources)
+            _missing = [k for k in _EPOCH_KEYS if k not in hdr]
+            if _missing:
+                logger.warning(f"  {cal_path.name}: header lacks {_missing} (NaN in the light curve)")
             for key in _EPOCH_KEYS:
                 ep_rows[key] = hdr.get(key, np.nan)
 
@@ -301,9 +300,11 @@ def step_lightcurves(
         # reference-source flag + no-reference marker + cautionary INFOBITS summaries.
         # FLAG_SE_REF / INFOBITS_REF are folded in; INFOBITS_REF (constant per quadrant)
         # goes to the file metadata. INFOBITS_DIF stays as ZTF's raw per-epoch bits.
-        from ztfphot_flags import compose as _compose_flags
+        from ztfphot_flags import compose as _compose_flags, F as _F
+        # per-epoch aperture bits; calibrated catalogs without a FLAGS column: unknown
         _ep_flags = (pd.to_numeric(all_lcs['_EPOCH_FLAGS'], errors='coerce').fillna(0)
-                     .astype('int64').to_numpy() if '_EPOCH_FLAGS' in all_lcs else None)
+                     .astype('int64').to_numpy() if '_EPOCH_FLAGS' in all_lcs
+                     else np.full(len(all_lcs), _F.AP_UNKNOWN, dtype='int64'))
         all_lcs['FLAGS'] = _compose_flags(all_lcs, epoch_flags=_ep_flags)
         _infobits_ref = (int(pd.to_numeric(all_lcs['INFOBITS_REF'], errors='coerce').fillna(0).max())
                          if 'INFOBITS_REF' in all_lcs else None)
@@ -391,7 +392,7 @@ def step_merge(base_dir: Path, quadrants: list[dict], force: bool = False,
     The quadrant with the most clean detection-epochs is adopted as the
     photometric reference. All others are corrected with a magnitude-dependent
     offset (per-mag-bin median of dominant - secondary, bin width=mag_bin)
-    against common sources, then merged into LightCurves/merged/{band}/.
+    against common sources, then merged into LightCurves/merged/{ra}_{dec}/{band}{suffix}/.
     """
     import sys
     _scripts = Path(__file__).parent

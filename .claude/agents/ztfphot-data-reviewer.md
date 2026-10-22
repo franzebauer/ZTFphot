@@ -30,7 +30,11 @@ scripts/download_coordinator.py, scripts/ztf_field_lookup.py, scripts/make_catal
 - "Done" checks using `exists()` where a partial/corrupt file could be left behind; non-atomic writes.
 - Writer ↔ reader contracts: column/header names, units (mag vs mmag, μJy), sign conventions, 0- vs 1-based indices.
 
+## Also look for (every reviewer)
+- **Speed-ups** with a real payoff on large runs (1e6+ rows per light curve, hundreds of epochs, thousands of targets): Python loops over rows/sources that could be vectorised, repeated file reads or SkyCoord builds inside loops, recomputation that could be cached, needless full-file loads, serial work that is trivially parallel. Estimate the gain.
+- **Dead or redundant code**: unused functions/parameters/imports/variables, branches that can no longer trigger, duplicated logic that should share one helper, compatibility code for formats no longer produced (keep only what the retrofit path update_old_parquet.py or ztfphot_lc.read_lc needs), stale comments that describe removed behaviour.
+
 ## Output format (strict, terse)
-At most 15 findings, ranked by severity, no preamble and no praise. Each one:
-`[HIGH|MED|LOW] path:line — defect (one sentence). Scenario: concrete input/state → wrong result. Fix: one line.`
+At most 20 findings, ranked by severity within each kind, no preamble and no praise. Each one:
+`[BUG-HIGH|BUG-MED|BUG-LOW|SPEED|DEAD] path:line — issue (one sentence). Scenario/gain: concrete input → wrong result, or estimated saving. Fix: one line.`
 Only report something you have confirmed in the code; mark anything uncertain `(unverified)`. Then add one line: `Checked, no issue:` followed by a comma-separated list of the checklist items you cleared.

@@ -48,6 +48,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import functools
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -69,8 +70,16 @@ _STAGES = [
 
 
 def _load_resid_npz(resid_dir: Path) -> list[dict]:
+    """All residual NPZs of a quadrant, loaded once for both figures (rms and IQR)."""
+    files = tuple((str(p), p.stat().st_mtime) for p in sorted(Path(resid_dir).glob("*_resid.npz")))
+    return _load_resid_cached(files)
+
+
+@functools.lru_cache(maxsize=1)
+def _load_resid_cached(files: tuple) -> list[dict]:
     epochs = []
-    for p in sorted(resid_dir.glob("*_resid.npz")):
+    for p, _ in files:
+        p = Path(p)
         try:
             d = np.load(str(p))
             epochs.append({k: d[k] for k in d.files})
@@ -111,17 +120,23 @@ def _bin_grid(ra, dec, dm, nbins, stat_fn):
     Bin dm values into a (nbins × nbins) RA/Dec grid applying stat_fn per cell.
     Returns (grid, ra_edges, dec_edges).
     """
-    ra_edges  = np.linspace(ra.min(),  ra.max(),  nbins + 1)
-    dec_edges = np.linspace(dec.min(), dec.max(), nbins + 1)
+    ra, dec, dm = np.asarray(ra, float), np.asarray(dec, float), np.asarray(dm, float)
+    if len(ra):                                   # continuous across RA = 0/360
+        d = ra - ra[np.isfinite(ra)][0] if np.isfinite(ra).any() else 0.0
+        ra = np.where(d >= 180, ra - 360, np.where(d < -180, ra + 360, ra))
+    ra_edges  = np.linspace(np.nanmin(ra),  np.nanmax(ra),  nbins + 1)
+    dec_edges = np.linspace(np.nanmin(dec), np.nanmax(dec), nbins + 1)
     grid = np.full((nbins, nbins), np.nan)
-    ri = np.clip(np.digitize(ra,  ra_edges)  - 1, 0, nbins - 1)
-    di = np.clip(np.digitize(dec, dec_edges) - 1, 0, nbins - 1)
-    for i in range(nbins):
-        for j in range(nbins):
-            sel = dm[(ri == i) & (di == j)]
-            sel = sel[np.isfinite(sel)]
-            if len(sel) >= 1:
-                grid[j, i] = stat_fn(sel)
+    ok = np.isfinite(dm) & np.isfinite(ra) & np.isfinite(dec)
+    ri = np.clip(np.digitize(ra[ok],  ra_edges)  - 1, 0, nbins - 1)
+    di = np.clip(np.digitize(dec[ok], dec_edges) - 1, 0, nbins - 1)
+    # one sort, then each cell's values as a contiguous slice (grid[j, i], j = Dec bin)
+    cell = di * nbins + ri
+    order = np.argsort(cell, kind="stable")
+    c, v = cell[order], dm[ok][order]
+    starts = np.flatnonzero(np.r_[True, c[1:] != c[:-1]]) if len(c) else np.array([], int)
+    for a, b in zip(starts, np.r_[starts[1:], len(c)]):
+        grid.flat[c[a]] = stat_fn(v[a:b])
     return grid, ra_edges, dec_edges
 
 
@@ -158,7 +173,7 @@ def _panel(ax, ra, dec, dm, label, nbins, stat_fn, cmap, symmetric, unit="mmag",
 
     sig_samp_str = f"{sig_samp:.1f}" if np.isfinite(sig_samp) else "—"
     sig_map_str  = f"{sig_map:.1f}"  if np.isfinite(sig_map)  else "—"
-    _u = r"\%" if unit == "%" else r"\mathrm{mmag}"
+    _u = r"\mathrm{mmag}"
     subtitle = (
         f"$\\sigma_{{\\mathrm{{sample}}}}={sig_samp_str}\\,{_u}\\quad "
         f"\\sigma_{{\\mathrm{{map}}}}={sig_map_str}\\,{_u}\\quad "
@@ -231,7 +246,7 @@ def make_spatial_rms(resid_dir: Path, out_path: Path, tag: str = "",
                      nbins: int = 20) -> None:
     """
     Median residual per spatial bin — shows systematic calibration offsets.
-    Diverging colormap (RdBu_r), symmetric about zero, independent per panel.
+    Diverging colormap (RdBu_r), symmetric about zero, one shared range for all panels.
     """
     epochs = _load_resid_npz(resid_dir)
     if not epochs:
@@ -249,7 +264,7 @@ def make_spatial_iqr(resid_dir: Path, out_path: Path, tag: str = "",
                      nbins: int = 20) -> None:
     """
     IQR (75th−25th percentile) per spatial bin — shows epoch-to-epoch scatter.
-    Sequential colormap (YlOrRd), always positive, independent per panel.
+    Sequential colormap (YlOrRd), always positive, one shared range for all panels.
     """
     epochs = _load_resid_npz(resid_dir)
     if not epochs:

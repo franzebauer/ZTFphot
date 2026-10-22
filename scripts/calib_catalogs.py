@@ -1,3 +1,4 @@
+import functools
 import numpy as np
 import pandas as pd
 import astropy.io.fits as pf
@@ -10,6 +11,8 @@ from astropy.coordinates.matching import match_coordinates_sky
 
 from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
+
+from ztfphot_flags import F
 
 
 # ── Spatial-correction helpers ────────────────────────────────────────────────
@@ -76,7 +79,34 @@ _HDR_KEYS = ['OBSMJD', 'AIRMASS', 'NMATCHES', 'MAGZP_DIF', 'MAGZPRMS_DIF',
 # image: calibrator measurements with an aperture off the image edge or on masked pixels
 # (8 | 16 | 32) are rejected. Catalogs without that PHOTCODE have their FLAGS zeroed.
 _AP_PHOTCODE = 'ztfphot-aper'
-_AP_CAL_REJECT_BITS = 8 | 16 | 32     # ztfphot_flags.F.CAL_REJECT: all apertures clean
+
+
+# ── Reference / vetting catalogs, cached per worker process (same file for every epoch) ─
+
+@functools.lru_cache(maxsize=4)
+def _ref_table(path: str, mtime: float) -> pd.DataFrame:
+    return pd.read_csv(path)
+
+
+@functools.lru_cache(maxsize=4)
+def _vet_good(vet_path: str, mtime: float, ref_path: str, ref_mtime: float) -> np.ndarray:
+    """IS_GOOD per reference row. The vetting catalog is the reference catalog with an
+    IS_GOOD column: used by index when its rows coincide with the reference catalog,
+    else matched by position (1")."""
+    ref = _ref_table(ref_path, ref_mtime)
+    ra, dec = ref['ALPHAWIN_J2000'].to_numpy(float), ref['DELTAWIN_J2000'].to_numpy(float)
+    with pf.open(vet_path) as h:
+        v = h[1].data
+        vra, vdec, vgood = (np.asarray(v['ALPHAWIN_J2000'], float), np.asarray(v['DELTAWIN_J2000'], float),
+                            np.asarray(v['IS_GOOD'], bool))
+    if len(vra) == len(ra) and np.allclose(vra, ra, atol=1e-7) and np.allclose(vdec, dec, atol=1e-7):
+        return vgood
+    good = np.ones(len(ra), dtype=bool)
+    idx, sep, _ = match_coordinates_sky(SkyCoord(ra=vra, dec=vdec, unit='deg'),
+                                        SkyCoord(ra=ra, dec=dec, unit='deg'), nthneighbor=1)
+    m = sep.arcsec < 1.0
+    good[idx[m]] = vgood[m]
+    return good
 
 
 def _read_ldac(catalog_path):
@@ -106,35 +136,18 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                   target_match_radius=1.0,
                   residuals_out=None):
 
-    table_ref = pd.read_csv(ref_catalog)
+    ref_catalog = str(ref_catalog)
+    table_ref = _ref_table(ref_catalog, os.path.getmtime(ref_catalog))
 
     raref  = table_ref['ALPHAWIN_J2000'].values
     decref = table_ref['DELTAWIN_J2000'].values
 
-    # Load vetting mask if provided (bad calibration stars flagged by vet_calibration_stars.py)
+    # Vetting mask (bad calibration stars flagged by vet_calibration_stars.py); an
+    # unreadable vetting catalog raises (calibrate reports it)
     is_good_calib = np.ones(len(table_ref), dtype=bool)
-    if vet_catalog is not None:
-        if isinstance(vet_catalog, str):
-            vet_catalog = Path(vet_catalog)
-        if os.path.isfile(str(vet_catalog)):
-            try:
-                vet_hdul = pf.open(str(vet_catalog))
-                vet_data = vet_hdul[1].data
-                vet_ra   = vet_data['ALPHAWIN_J2000']
-                vet_dec  = vet_data['DELTAWIN_J2000']
-                vet_good = vet_data['IS_GOOD']
-                vet_hdul.close()
-
-                cat_ref_vet = SkyCoord(ra=raref, dec=decref, unit='deg')
-                cat_vet     = SkyCoord(ra=vet_ra, dec=vet_dec, unit='deg')
-                idx, sep, _ = match_coordinates_sky(cat_vet, cat_ref_vet, nthneighbor=1)
-                matched_vet = sep.arcsec < 3.0
-                is_good_calib[idx[matched_vet]] = vet_good[matched_vet]
-                print(f"  Vet catalog: {np.sum(~is_good_calib)} bad calibration stars masked")
-            except Exception as e:
-                print(f"Warning: could not load vetting catalog {vet_catalog}: {e}")
-
-    cat_coord = SkyCoord(ra=raref, dec=decref, unit='deg')
+    if vet_catalog is not None and os.path.isfile(str(vet_catalog)):
+        is_good_calib = _vet_good(str(vet_catalog), os.path.getmtime(str(vet_catalog)),
+                                  ref_catalog, os.path.getmtime(ref_catalog)).copy()
 
     ref_zp = table_ref['MAGZP_REF'].values
     mag_ref_tot     = [[], [], [], []]
@@ -169,7 +182,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
     if img_kind.casefold() == 'sim' and not is_aper:
         for i in range(len(flags)):
             flags[i] = 0
-    cal_reject = _AP_CAL_REJECT_BITS if is_aper else ~0
+    cal_reject = F.CAL_REJECT if is_aper else ~0
 
     clas = table_ref['CLASS_STAR'].values
     # Calibrators must be clean in the reference image (FLAG_SE_REF == 0: no bright
@@ -247,7 +260,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         (clas >= 0.7) &
         (mag_ref_tot[1] > 14.) & (mag_ref_tot[1] < 19.0) &
         (mag_ref_tot_err[1] < 0.3) &
-        is_good_calib
+        is_good_calib & ref_clean       # unblended: a neighbour would bias the 10 px flux
     )
     if _ac_mask.sum() >= 5:
         _apcorr_4_10 = float(np.median(
@@ -314,8 +327,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         errinst = errinst[fn]
         q_mag   = q_mag[fn]
         q_err   = q_err[fn]
-        sigma   = np.sqrt((errinst**2) + (q_err**2))
-        errf    = sigma
+        errf    = np.sqrt((errinst**2) + (q_err**2))
         diff    = maginst - q_mag
 
         _nc_rms0_k = float(np.std(diff))
@@ -327,10 +339,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         # ── Step 1: initial linear fit ──────────────────────────────────────
         coefficients, pcov = curve_fit(fit_fun, maginst, diff, p0=p0,
                                        sigma=errf, absolute_sigma=True)
-        pvar    = np.diagonal(pcov)
-        pstd    = np.sqrt(pvar)
         fit     = fit_fun(maginst, *coefficients)
-        var_fit = (maginst * pstd[1])**2 + pstd[0]**2
 
         res1       = np.abs(diff - fit)
         rms        = np.sum((diff - fit)**2) / len(maginst)
@@ -345,10 +354,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         diff2    = diff
         diff     = diff[l1]
         diff_rej = diff2[r1]
-        sigma    = sigma[l1]
         errf     = errf[l1]
         maginst  = maginst[l1]
-        q_mag    = q_mag[l1]
         ra_c     = ra_c[l1]
         dec_c    = dec_c[l1]
 
@@ -358,10 +365,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                     break
                 coefficients, pcov = curve_fit(fit_fun, maginst, diff, p0=p0,
                                                sigma=errf, absolute_sigma=True)
-                pvar    = np.diagonal(pcov)
-                pstd    = np.sqrt(pvar)
                 fit     = fit_fun(maginst, *coefficients)
-                var_fit = (maginst * pstd[1])**2 + pstd[0]**2
 
                 res2     = np.abs(diff - fit)
                 rms      = np.sum((diff - fit)**2) / len(maginst)
@@ -370,19 +374,15 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                 diff2    = diff
                 diff     = diff[l2]
                 diff_rej = diff2[r2]
-                sigma    = sigma[l2]
                 errf     = errf[l2]
                 maginst  = maginst[l2]
-                q_mag    = q_mag[l2]
                 ra_c     = ra_c[l2]
                 dec_c    = dec_c[l2]
 
             coefficients, pcov = curve_fit(fit_fun, maginst, diff, p0=p0,
                                            sigma=errf, absolute_sigma=True)
-            pvar    = np.diagonal(pcov)
-            pstd    = np.sqrt(pvar)
             fit     = fit_fun(maginst, *coefficients)
-            var_fit = (maginst * pstd[1])**2 + pstd[0]**2
+            var_fit = pcov[0, 0] + maginst**2 * pcov[1, 1] + 2 * maginst * pcov[0, 1]
             final_fit  = fit_fun(magQi[k], *coefficients)
             _nc_rms2_k = float(np.std(diff - fit))
             if k == 1:
@@ -436,7 +436,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             if flatfield is not None:
                 try:
                     # A sparse quadrant can produce a degenerate flatfield whose
-                    # grid is (partly) NaN — too few sources per bin, "bins=0/400".
+                    # grid is (partly) NaN — too few sources per bin.
                     # Applying it verbatim subtracts NaN and poisons every
                     # magnitude, so treat undefined cells as a zero correction.
                     _ff_corr   = _apply_flatfield(alphafin, deltafin, flatfield)
@@ -455,7 +455,13 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             # for finite-mag epochs; the rare negative-flux epoch (mag = NaN) falls
             # back to the constant intercept n (m·mag ≲1% and undefined there).
             _zp_ujy      = 10.0**(-0.4 * (np.float64(magzp_dif) - 23.9))
-            _zp_corr     = np.where(np.isfinite(final_fit), final_fit, coefficients[0])
+            # epochs with total flux <= 0 (no magnitude): the fit evaluated at the
+            # magnitude of |total flux| — symmetric in sign, continuous through 0
+            with np.errstate(divide='ignore', invalid='ignore'):
+                _mag_abs = np.float64(magzp_dif) - 2.5 * np.log10(np.abs(flux_tot[k]))
+            _zp_corr     = np.where(np.isfinite(final_fit), final_fit,
+                                    np.where(np.isfinite(_mag_abs), fit_fun(_mag_abs, *coefficients),
+                                             coefficients[0]))
             _cal_corr    = _zp_corr + _poly_corr + _ff_corr
             _cal_factor  = 10.0**(0.4 * _cal_corr)
             flux_cal_k   = np.float64(flux_tot[k]) * _zp_ujy * _cal_factor
@@ -463,7 +469,7 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
             # ── end flux steps 1–4 ──────────────────────────────────────────
 
             # All-source residual after every correction (dm_3 diagnostic)
-            residual_all = Q_cal[k] - q_mag_all
+            residual_all = Q_cal[k] - q_mag_all if k == 1 else None   # dm_3 diagnostic
 
             # ── Accumulate diagnostics for k=1 (primary aperture) ──────────
             if k == 1:
@@ -488,7 +494,8 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                     _dm_st5  = (_dm_st4 - _ff_save).astype(float)
                     # dm_3: all-source residual after all corrections; dm_4/dm_5:
                     # calibrators post-poly / post-flatfield (the flatfield build reads dm_4).
-                    np.savez(str(residuals_out),
+                    _rtmp = open(str(residuals_out) + '.tmp', 'wb')          # atomic write
+                    np.savez(_rtmp,
                              ra_0=_ra_c_pre,  dec_0=_dec_c_pre,
                              dm_0=_dm_st0.astype(float),
                              ra_1=_ra_c_pre,  dec_1=_dec_c_pre,
@@ -526,12 +533,14 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
                                                                 flux_ref_ujy, np.nan) - 1.0,
                                           np.nan), dtype=float),
                              apcorr_4_10=np.float64(_apcorr_4_10))
+                    _rtmp.close()
+                    os.replace(str(residuals_out) + '.tmp', str(residuals_out))
 
             # error floor from the calibrator scatter per magnitude bin (none populated:
             # the photometric error alone)
             interpolation = (np.interp(Q_cal[k], median_mag_per_bin, rms_per_bin)
                              if rms_per_bin else np.zeros(len(Q_cal[k])))
-            Q_err[k]      = np.array([max(i, j) for i, j in zip(interpolation, errmagQi[k])])
+            Q_err[k]      = np.where(errmagQi[k] > interpolation, errmagQi[k], interpolation)
 
             # Bipolar flux (μJy), fully calibrated (flux_cal_k, steps 1–4 above).
             # Sign-preserving — epochs fainter than the reference survive as NEGATIVE
@@ -598,42 +607,45 @@ def calib_catalog(ref_catalog, input_catalog, output_catalog, img_kind, vet_cata
         pf.Column(name='DELTA_J2000',       format='D', array=dltfin),
         pf.Column(name='VECTOR_ASSOC',      format='J', array=vector_assoc_fin),
     ]
-    pf.BinTableHDU.from_columns(cols).writeto(output_catalog, overwrite=True)
+    # the complete file (table + header) is written to a temporary name and renamed,
+    # so an interrupted run never leaves a catalog without its header
+    hdul = pf.HDUList([pf.PrimaryHDU(), pf.BinTableHDU.from_columns(cols)])
+    head = hdul[0].header
 
-    with pf.open(output_catalog, mode='update') as arch1:
-        head = arch1[0].header
+    def _hv(v):
+        f = float(v)
+        return -999.0 if np.isnan(f) else f
 
-        def _hv(v):
-            f = float(v)
-            return -999.0 if np.isnan(f) else f
+    head['fit_rms']      = np.sqrt(rms_hdr)
+    head['chi_red']      = chi_red
+    head['num_stars']    = n_stars
+    head['CALIB_N']      = _hv(_calib_n)
+    head['CALIB_M']      = _hv(_calib_m)
+    head['CALIB_ZP']     = _hv(_calib_n + _calib_m * 17.0)
+    head['APCORR410']    = _hv(_apcorr_4_10 * 1000)       # mmag, 4px→10px, applied to MAG_4/FLUX_4
 
-        head['fit_rms']      = np.sqrt(rms_hdr)
-        head['chi_red']      = chi_red
-        head['num_stars']    = n_stars
-        head['CALIB_N']      = _hv(_calib_n)
-        head['CALIB_M']      = _hv(_calib_m)
-        head['CALIB_ZP']     = _hv(_calib_n + _calib_m * 17.0)
-        head['APCORR410']    = _hv(_apcorr_4_10 * 1000)       # mmag, 4px→10px, applied to MAG_4/FLUX_4
+    head['NC_RMS0']      = _hv(_nc_rms0)
+    head['NC_RMS1']      = _hv(_nc_rms1)
+    head['NC_RMS2']      = _hv(_nc_rms2)
+    head['NC_RMSFC']     = _hv(_nc_rmsfc)
+    head['NC_RMS3']      = _hv(_nc_rms3)
+    head['NC_RMS4']      = _hv(_nc_rms4)
 
-        head['NC_RMS0']      = _hv(_nc_rms0)
-        head['NC_RMS1']      = _hv(_nc_rms1)
-        head['NC_RMS2']      = _hv(_nc_rms2)
-        head['NC_RMSFC']     = _hv(_nc_rmsfc)
-        head['NC_RMS3']      = _hv(_nc_rms3)
-        head['NC_RMS4']      = _hv(_nc_rms4)
+    head['TGT_MRAW']     = _hv(_tgt_mraw)
+    head['TGT_DCLIN']    = _hv(_tgt_dclin)
+    head['TGT_DCPOL']    = _hv(_tgt_dcpoly)
+    head['TGT_DCFF']     = _hv(_tgt_dcff)
 
-        head['TGT_MRAW']     = _hv(_tgt_mraw)
-        head['TGT_DCLIN']    = _hv(_tgt_dclin)
-        head['TGT_DCPOL']    = _hv(_tgt_dcpoly)
-        head['TGT_DCFF']     = _hv(_tgt_dcff)
-
-        head['SEEING']       = seeing
-        head['SATURATE']     = saturate
-        head['AIRMASS']      = airmass
-        head['MAGLIM']       = maglim
-        head['NMATCHES']     = nmatches
-        head['CLRCOEFF']     = clrcoeff
-        head['MAGZP_DIF']    = magzp_dif
-        head['MAGZPRMS_DIF'] = magzprms_dif
-        head['INFOBITS_DIF'] = infobits_dif
-        head['OBSMJD']       = mjd
+    head['SEEING']       = seeing
+    head['SATURATE']     = saturate
+    head['AIRMASS']      = airmass
+    head['MAGLIM']       = maglim
+    head['NMATCHES']     = nmatches
+    head['CLRCOEFF']     = clrcoeff
+    head['MAGZP_DIF']    = magzp_dif
+    head['MAGZPRMS_DIF'] = magzprms_dif
+    head['INFOBITS_DIF'] = infobits_dif
+    head['OBSMJD']       = mjd
+    _tmp = output_catalog + '.tmp'
+    hdul.writeto(_tmp, overwrite=True)
+    os.replace(_tmp, output_catalog)

@@ -54,6 +54,8 @@ import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import functools
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -76,7 +78,6 @@ _LEGACY_SUFFIX = "_sexout.fits"
 from ztfphot_flags import F as _F
 FLAG_NEIGHBOUR, FLAG_EDGE, FLAG_MASKED, FLAG_OUTER = (_F.NEIGHBOUR, _F.EDGE, _F.MASKED,
                                                       _F.OUTER_APERTURES)
-CAL_REJECT_BITS = _F.CAL_REJECT               # calib_catalogs rejects calibrators with these
 PRIMARY_APERTURE = 1                          # index of the 4 px aperture in PHOT_APERTURES
 PHOTCODE = "ztfphot-aper"                     # LDAC header tag identifying these catalogs
 
@@ -87,6 +88,17 @@ def _ffd_from_path(p: Path) -> str:
 
 def _aperture_radii() -> list[float]:
     return [float(d) / 2.0 for d in PHOT_APERTURES.split(",")]
+
+
+_ONES: dict = {}
+
+
+def _ones(shape) -> np.ndarray:
+    """A cached image of ones (the in-image pixel count in one aperture pass)."""
+    if shape not in _ONES:
+        _ONES.clear()
+        _ONES[shape] = np.ones(shape)
+    return _ONES[shape]
 
 
 def catalog_dir(base_dir: Path, suffix: str, field: int, fc: str, ccd: int, qid: int) -> Path:
@@ -125,7 +137,13 @@ def migrate_legacy_layout(base_dir: Path) -> int:
             else:
                 f.rename(target)
                 n += 1
-        if src.exists():
+        if src.exists():                       # move any other file, then drop the tree
+            for f in sorted(src.rglob("*")):
+                if f.is_file():
+                    t = dst / f.relative_to(src)
+                    t.parent.mkdir(parents=True, exist_ok=True)
+                    if not t.exists():
+                        f.rename(t)
             shutil.rmtree(src, ignore_errors=True)
         logger.info(f"migrated {old}/ -> {CATALOG_DIRS[suffix]}/ ({n - n0} catalogs renamed to *{CATALOG_SUFFIX})")
     return n
@@ -147,11 +165,18 @@ def catalog_ok(path: Path) -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=4)
+def _ref_positions(ref_csv: str, mtime: float):
+    """Reference catalog read once per worker process (the same file for every epoch)."""
+    import pandas as pd
+    return pd.read_csv(ref_csv, usecols=["ALPHAWIN_J2000", "DELTAWIN_J2000"])
+
+
 def _assoc_entries(ref_csv: Path, target_ra, target_dec, match_radius):
     """(index, ra, dec, injected): reference sources (1-based index) plus the target as
     the last entry (index N+1) when it is injected."""
     import pandas as pd
-    ref = pd.read_csv(ref_csv)
+    ref = _ref_positions(str(ref_csv), Path(ref_csv).stat().st_mtime)
     ra = pd.to_numeric(ref["ALPHAWIN_J2000"], errors="coerce").to_numpy(float)
     dec = pd.to_numeric(ref["DELTAWIN_J2000"], errors="coerce").to_numpy(float)
     idx = np.arange(1, len(ref) + 1)
@@ -301,9 +326,9 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
     good = np.zeros(len(x), bool)
     if on.any():
         ap_v = CircularAperture(np.column_stack([x[on], y[on]]), r=0.75 * fwhm)
-        n_fin = aperture_photometry(ep.fin, ap_v, method="center")["aperture_sum"]
-        n_all = aperture_photometry(np.ones_like(ep.fin), ap_v, method="center")["aperture_sum"]
-        good[on] = np.asarray(n_fin) > 0.5 * np.asarray(n_all)
+        # one pass: valid pixels (sum of fin) and all in-image pixels (error=1 -> sqrt(count))
+        t = aperture_photometry(ep.fin, ap_v, method="center", error=_ones(ep.fin.shape))
+        good[on] = np.asarray(t["aperture_sum"]) > 0.5 * np.asarray(t["aperture_sum_err"]) ** 2
 
     # Target fate (read by run_pipeline's target status): matched = has a reference source
     fate = None
@@ -336,8 +361,11 @@ def _measure(ep: _Epoch, out_cat: Path, ref_csv: Path, sexcat_path, assoc_radius
         outer = np.zeros(n, bool)
         for k, r in enumerate(radii):
             ap = CircularAperture(pos, r=r)
-            s = np.asarray(aperture_photometry(ep.data0, ap, method="exact")["aperture_sum"], float)
-            a_eff = np.asarray(aperture_photometry(ep.fin, ap, method="exact")["aperture_sum"], float)
+            # one exact pass: the flux, and with error = the 0/1 valid-pixel map the
+            # propagated error is sqrt(sum overlap over valid pixels) = sqrt(effective area)
+            t = aperture_photometry(ep.data0, ap, method="exact", error=ep.fin)
+            s = np.asarray(t["aperture_sum"], float)
+            a_eff = np.asarray(t["aperture_sum_err"], float) ** 2
             flux[:, k] = s - bkg_loc * a_eff
             ferr[:, k] = rms * np.sqrt(a_eff)
             edge_k = (x - r < -0.5) | (x + r > ncols - 0.5) | (y - r < -0.5) | (y + r > nrows - 0.5)
@@ -387,18 +415,6 @@ def measure_jobs(diff_path: Path, ref_csv: Path, jobs: list, *, target_ra=None,
                      target_ra, target_dec, match_radius, bkg)
         fate = fate if f is None else f
     return fate
-
-
-def measure_epoch(diff_path: Path, out_cat: Path, ref_csv: Path, *,
-                  sexcat_path: Path | None = None, assoc_radius: float = 1.5,
-                  target_ra=None, target_dec=None, match_radius: float = 1.0,
-                  bkg: str = "box", bkg_mesh: int = BKG_MESH) -> dict | None:
-    """Forced aperture photometry of one difference image. sexcat_path=None -> ref-pos
-    (reference positions); else sci-pos (science-catalog positions tied to the
-    reference by nearest match within assoc_radius). Returns the target fate dict."""
-    return measure_jobs(diff_path, ref_csv, [(out_cat, sexcat_path, assoc_radius)],
-                        target_ra=target_ra, target_dec=target_dec,
-                        match_radius=match_radius, bkg=bkg, bkg_mesh=bkg_mesh)
 
 
 def _aper_one(args: tuple) -> tuple[str, bool, str]:
@@ -476,13 +492,12 @@ def _run(base_dir: Path, quadrants: list[dict], *, ref: bool, sci: bool, workers
 
 
 def step_aperture(base_dir: Path, quadrants: list[dict], workers: int = 4,
-                  force: bool = False, verbose: bool = False, filefracdays: set | None = None,
+                  force: bool = False, filefracdays: set | None = None,
                   target_ra: float | None = None, target_dec: float | None = None,
-                  match_radius: float = 1.0, assoc_radius: float = 0.5,
+                  match_radius: float = 1.0,
                   bkg: str = "box", bkg_mesh: int = BKG_MESH,
                   also_sci: bool = False, assoc_radius_sci: float = 1.5) -> int:
-    """Ref-pos forced photometry (step `phot`); assoc_radius is unused (positions are
-    the reference positions themselves). also_sci=True also
+    """Ref-pos forced photometry (step `phot`) at the reference positions. also_sci=True also
     writes the sci-pos catalogs from the same image pass (the later sci step then finds
     them complete and skips)."""
     return _run(base_dir, quadrants, ref=True, sci=also_sci, workers=workers, force=force,
@@ -492,7 +507,7 @@ def step_aperture(base_dir: Path, quadrants: list[dict], workers: int = 4,
 
 
 def step_aperture_scipos(base_dir: Path, quadrants: list[dict], workers: int = 4,
-                         force: bool = False, verbose: bool = False,
+                         force: bool = False,
                          filefracdays: set | None = None,
                          target_ra: float | None = None, target_dec: float | None = None,
                          match_radius: float = 1.0, assoc_radius: float = 1.5,

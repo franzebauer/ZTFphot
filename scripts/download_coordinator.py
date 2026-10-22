@@ -105,35 +105,10 @@ DEFAULT_WORKERS = 50
 
 # ---------------------------------------------------------------------------
 # Infobits quality masks
-# ---------------------------------------------------------------------------
-# These epochs have no valid astrometric or photometric calibration and cannot
-# be recovered regardless of science case — never worth downloading.
-#   Bit  0 (       1): no astrometric solution
-#   Bit  1 (       2): no photometric solution
-#   Bit 25 (33554432): composite "bad quality" flag
-HARD_REJECT_MASK = (1 << 0) | (1 << 1) | (1 << 25)   # = 33554435
-
-# Cautionary bits — data may still be usable depending on science requirements.
-# Skipped only when --skip-flagged is passed.
-# Well-documented bits (ZSDS Sec 10.4):
-#   Bit  2 (       4): astrometric fit rms above threshold
-#   Bit  3 (       8): photometric fit rms above threshold
-#   Bit  4 (      16): moon in/near FOV, elevated background
-#   Bit  5 (      32): satellite/aircraft trail present
-#   Bit  6 (      64): high sky background (non-moon)
-# Observed in data but not fully documented (treated as cautionary until confirmed):
-#   Bit 11 (    2048): unknown — rare (few epochs), treat cautionary
-#   Bit 21 ( 2097152): unknown — very rare, treat cautionary
-#   Bit 22 ( 4194304): PSF matching / subtraction quality below threshold
-#                      (most common mystery bit — 158 epochs in r-band field 443;
-#                       appears WITHOUT bit 25, so ZTF did not consider globally bad)
-#   Bit 26 (67108864): reference image quality / normalization issue
-#   Bit 27 (134217728): possibly non-standard reference used
-# TODO: confirm bits 11, 21, 22, 26, 27 against ZSDS Explanatory Supplement Sec 10.4
-CAUTIONARY_MASK = (
-    (1 << 2)  | (1 << 3)  | (1 << 4)  | (1 << 5)  | (1 << 6)   # documented
-  | (1 << 11) | (1 << 21) | (1 << 22) | (1 << 26) | (1 << 27)   # observed, unconfirmed
-)  # = 234881148
+# ZTF INFOBITS masks (documented in ztfphot_flags): hard-rejected epochs are never
+# downloaded; cautionary ones are skipped with --skip-flagged.
+from ztfphot_flags import HARD_REJECT_INFOBITS as HARD_REJECT_MASK  # noqa: E402
+from ztfphot_flags import CAUTIONARY_INFOBITS as CAUTIONARY_MASK     # noqa: E402
 
 # Request timeout (seconds): connect, read
 # Connect timeout is generous because IRSA can be slow to accept connections
@@ -548,7 +523,8 @@ def _build_sci_tasks(epochs: pd.DataFrame, base_dir: Path,
         if str(row.get("filtercode", "")) not in filtercodes:
             continue
 
-        infobits = int(row.get("infobits", 0) or 0)
+        _ib = pd.to_numeric(row.get("infobits", 0), errors="coerce")
+        infobits = 0 if pd.isna(_ib) else int(_ib)      # unknown: treated as clean, as filter_epochs
 
         # Always skip unrecoverable epochs
         if infobits & HARD_REJECT_MASK:
@@ -698,9 +674,11 @@ def download_all(
     all_tasks = ref_tasks + sci_tasks   # refs first — smaller, quick to confirm auth works
 
     # Load previously recorded permanent 404s — skip them silently this run
+    (base_dir / "Epochs").mkdir(parents=True, exist_ok=True)
     perm404_log     = base_dir / "Epochs" / "permanent_404s.log"
     missing_log     = base_dir / "Epochs" / "missing_epochs.log"
     failed_log      = base_dir / "Epochs" / "failed_downloads.log"
+    missing_seen    = (set(missing_log.read_text().split()) if missing_log.exists() else set())
 
     known_404s = load_permanent_404s(base_dir, perm404_max_age_days, ignore=retry_404)
 
@@ -727,9 +705,18 @@ def download_all(
     n_404         = n_pre_skipped_404   # count known + newly discovered
     failed_urls   = []
 
+    def _fetch(url, dest):
+        """Download, then unpack a .fz in the same worker (funpack is a subprocess, so the
+        unpacking runs in parallel instead of serially in this thread); a .fz left by an
+        earlier failed funpack is unpacked too."""
+        r = download_file(url, dest, auth)
+        if funpack and r[1] in ("ok", "skipped") and dest.exists():
+            funpack_file(dest)
+        return r
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(download_file, url, dest, auth): (url, dest)
+            pool.submit(_fetch, url, dest): (url, dest)
             for url, dest in filtered_tasks
         }
         for i, future in enumerate(as_completed(futures), 1):
@@ -741,14 +728,10 @@ def download_all(
 
             if status == "skipped":
                 n_skipped += 1
-                if funpack and dest.exists():       # a .fz left by an earlier failed funpack
-                    funpack_file(dest)
 
             elif status == "ok":
                 n_downloaded += 1
                 logger.debug(f"[{i}/{n_total}] {dest.name}: {msg}")
-                if funpack and dest.exists():
-                    funpack_file(dest)
 
             elif status == "404":
                 # Permanent absence — record and never retry
@@ -764,8 +747,10 @@ def download_all(
                 else:
                     # Science epoch has no processed diff image — log but don't warn noisily
                     logger.debug(f"[{i}/{n_total}] MISSING EPOCH {dest.name}")
-                    with open(missing_log, "a") as f:
-                        f.write(f"{url}\n")
+                    if url not in missing_seen:          # one line per product
+                        missing_seen.add(url)
+                        with open(missing_log, "a") as f:
+                            f.write(f"{url}\n")
 
             else:  # "failed" — retriable
                 n_failed += 1
@@ -789,7 +774,10 @@ def download_all(
         _time.sleep(REF_RETRY_WAIT * _round)
         dest_of = dict(filtered_tasks)
         for url in ref_failed:
-            _, status, msg = download_file(url, dest_of[url], auth)
+            try:
+                _, status, msg = download_file(url, dest_of[url], auth)
+            except Exception as exc:                     # e.g. disk full: still failed
+                status, msg = "failed", str(exc)
             if status in ("ok", "404"):
                 failed_urls.remove(url)
                 n_failed -= 1
@@ -891,17 +879,15 @@ if __name__ == "__main__":
 
     if result["n_permanent_404"] > 0:
         print(f"\n{result['n_permanent_404']} permanent 404s (missing IRSA products). "
-              f"See {args.base_dir}/permanent_404s.log")
+              f"See {args.base_dir}/Epochs/permanent_404s.log")
     if result["n_failed"] > 0:
         print(f"\n{result['n_failed']} retriable failures. "
-              f"See {args.base_dir}/failed_downloads.log — re-run to retry.")
+              f"See {args.base_dir}/Epochs/failed_downloads.log — re-run to retry.")
         sys.exit(1)
 
 
 # ── Disk inventory ────────────────────────────────────────────────────────────
 
-# Inline band→filtercode mapping to avoid importing ztf_field_lookup
-_BAND_TO_FC = {"g": "zg", "r": "zr", "i": "zi"}
 
 
 def find_quadrants(
@@ -929,8 +915,9 @@ def find_quadrants(
     ref_root = base_dir / "Reference"
     sci_root = base_dir / "Science"
 
+    from ztf_field_lookup import BAND_TO_FILTERCODE
     allowed_fcs = (
-        {_BAND_TO_FC.get(b, b) for b in bands} if bands else None
+        {BAND_TO_FILTERCODE.get(b, b) for b in bands} if bands else None
     )
 
     quadrants = []
@@ -1128,7 +1115,6 @@ def purge_images(
                 to_delete.extend(sorted(ref_dir.glob(pat)))
 
     total_bytes = 0
-    n_deleted = 0
     for p in to_delete:
         try:
             size = p.stat().st_size
@@ -1137,7 +1123,6 @@ def purge_images(
                 logger.info(f"  [dry-run] {p.name} ({size/1e6:.1f} MB)")
             else:
                 p.unlink()
-                n_deleted += 1
                 logger.debug(f"  deleted {p.name} ({size/1e6:.1f} MB)")
         except FileNotFoundError:
             pass

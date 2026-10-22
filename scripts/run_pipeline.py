@@ -104,8 +104,11 @@ def _write_target_status(base_dir, quadrants, target_ra, target_dec, match_radiu
     found = False
     tgt_has_ref = True
     for q in quadrants:
-        lc = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
-              / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}" / "lightcurves.parquet")
+        _qd = (base_dir / "LightCurves" / f"{q['field']:06d}" / q['filtercode']
+               / f"ccd{q['ccdid']:02d}" / f"q{q['qid']}")
+        lc = _qd / "lightcurves.parquet"
+        if not lc.exists():
+            lc = _qd / "lightcurves_sci.parquet"         # sci-pos-only runs
         if not lc.exists():
             continue
         # A finite FLUX is a real measurement — including the negative-flux
@@ -210,10 +213,6 @@ def _inject_targets_into_quadrants(base_dir: Path, quadrants: list[dict],
     match_radius of a reference source. Writes non-destructive *_refsexcat_augmented.fits;
     make_catalog prefers it automatically. Injected sources carry the
     reference-mag sentinel (MAG_APER=99 → MAG_4_REF > 90 in the light curves)."""
-    import sys as _sys
-    _scripts = Path(__file__).parent
-    if str(_scripts) not in _sys.path:
-        _sys.path.insert(0, str(_scripts))
     from transient_catalog import augment_sexcat
 
     logger.info(f"inject-targets: {len(transients)} candidate source(s)")
@@ -237,6 +236,12 @@ def _inject_targets_into_quadrants(base_dir: Path, quadrants: list[dict],
         )
         n_quad += 1
     logger.info(f"inject-targets: augmented {n_quad} quadrant catalog(s)")
+
+
+def _epoch_cache_path(base_dir: Path, args) -> Path:
+    """The epoch cache the lookup step writes for --ra/--dec/--bands."""
+    from ztf_field_lookup import _cache_path
+    return _cache_path(args.ra, args.dec, args.bands or ["g", "r", "i"], base_dir / "Epochs")
 
 
 def _injection_list(args, base_dir: Path) -> list:
@@ -378,11 +383,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
 
     # Load epochs from cache if not already in memory (e.g. lookup not in steps)
     if epochs is None and args.ra is not None and args.dec is not None:
-        import pandas as pd
-        bands = args.bands or ["g", "i", "r"]          # same cache name as main()
-        band_str   = "-".join(sorted(bands))
-        cache_path = (base_dir / "Epochs"
-                      / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{band_str}.epochs.parquet")
+        cache_path = _epoch_cache_path(base_dir, args)
         if cache_path.exists():
             epochs = pd.read_parquet(cache_path)
             logger.info(f"purge-batch: loaded {len(epochs)} epochs from cache")
@@ -427,11 +428,23 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             _run_phot(steps, step_phot, step_phot_sci, base_dir, [q], args)
             continue
 
+        # Resume: a quadrant whose photometry is already complete (reference CSV and every
+        # epoch's catalog; no pending injection) needs no reference download or check
+        _wanted = [sfx for sfx, st in (("", "phot"), ("_sci", "phot_sci")) if st in steps]
+        _complete = (not args.force and not _transients and bool(_wanted)
+                     and (base_dir / "Catalogs" /
+                          f"{field:06d}_{fc}_c{ccd:02d}_q{qid_}(REFERENCE)[OBJECTS].csv").exists()
+                     and all(catalog_ok(catalog_dir(base_dir, sfx, field, fc, ccd, qid_) / catalog_name(
+                                 f"ztf_{int(float(v))}_{field:06d}_{fc}_c{ccd:02d}_o_q{qid_}_scimrefdiffimg"))
+                             for v in q_epochs["filefracday"] for sfx in _wanted))
+        if _complete:
+            logger.info(f"{tag}: photometry complete — reference products not needed")
+
         # Footprint gate: fetch only the (small) reference products first, then skip
         # the entire quadrant if the target falls outside the reference detector area
         # (chip edge/gap). This avoids downloading any of this quadrant's science
         # images — the costly part — for a target it can never photometer.
-        if (args.ra is not None and args.dec is not None
+        if (not _complete and args.ra is not None and args.dec is not None
                 and ("download" in steps or args.purge_batch)):
             download_all(q_epochs, base_dir=base_dir, bands=[fc[1:]],
                          max_workers=args.download_workers, products="ref",
@@ -443,7 +456,7 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
                 continue
 
         # (references are fetched up front only in target mode; otherwise with batch 1)
-        if (args.ra is not None and args.dec is not None
+        if (not _complete and args.ra is not None and args.dec is not None
                 and ("download" in steps or args.purge_batch)
                 and not _refs_ok(q["ref_dir"], field, fc, ccd, qid_)):
             logger.warning(f"{tag}: reference products unavailable (download failed) — "
@@ -498,7 +511,12 @@ def _run_purge_batch(base_dir: Path, epochs, quadrants: list[dict], args) -> Non
             ffds_set = {str(int(float(v))) for v in this_batch["filefracday"]}
 
             if not args.force and all(_epoch_done(f) for f in ffds_set):
-                logger.info(f"  {label}: all SEx catalogs exist — skipping")
+                logger.info(f"  {label}: all photometry catalogs exist — skipping")
+                # the reference catalog may still need (re)building (e.g. injection)
+                # before this batch's purge deletes the reference products
+                if "catalog" in steps and not catalog_done:
+                    step_make_catalog(base_dir, [q], force=args.force or _injected)
+                    catalog_done = True
                 purge_images(base_dir, [q], sci=True, ref=is_first,
                              filefracdays=ffds_set, dry_run=args.dry_run)
                 return set()
@@ -606,7 +624,8 @@ def _record_run(base_dir: Path, args) -> dict:
         "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "ztfphot": _git_info(),
         "argv": sys.argv,
-        "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "args": {**{k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+                 "base_dir": str(Path(base_dir).resolve())},      # absolute: image reuse
         "python": platform.python_version(),
         "packages": vers,
         "host": platform.node(),
@@ -807,7 +826,10 @@ def main() -> None:
     # download-time invocation for this target (its epoch cuts), and per-quadrant
     # epoch summaries computed from the data.
     import json as _json
-    _run_rec = _record_run(base_dir, args)
+    # --status / --clean-up / --dry-run produce nothing and are not recorded (a
+    # recorded run counts as the target's latest download run)
+    _run_rec = ({} if (args.status or args.clean_up or args.dry_run)
+                else _record_run(base_dir, args))
 
     # ── Step: lookup ──────────────────────────────────────────────────────────
     if "lookup" in steps:
@@ -841,9 +863,7 @@ def main() -> None:
             if epochs is None:
                 # Load from cache (lookup already ran previously)
                 import pandas as pd
-                band_str   = "-".join(sorted(bands))
-                cache_path = (base_dir / "Epochs"
-                              / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{band_str}.epochs.parquet")
+                cache_path = _epoch_cache_path(base_dir, args)
                 if not cache_path.exists():
                     sys.exit(f"Epochs cache not found: {cache_path}\nRun the lookup step first.")
                 epochs = pd.read_parquet(cache_path)
@@ -912,8 +932,7 @@ def main() -> None:
     # Filter to fields belonging to this target using the epoch cache
     if args.ra is not None and args.dec is not None:
         import pandas as _pd
-        bands_str  = "-".join(sorted(args.bands or ["g", "i", "r"]))
-        cache_path = base_dir / "Epochs" / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{bands_str}.epochs.parquet"
+        cache_path = _epoch_cache_path(base_dir, args)
         if cache_path.exists():
             _cache     = _pd.read_parquet(cache_path)
             _fields    = set(_cache["field"].dropna().astype(int).tolist())
@@ -945,8 +964,7 @@ def main() -> None:
     # every expected quadrant is processed (whether partially done or brand-new).
     if args.purge_batch and epochs is None and args.ra is not None and args.dec is not None:
         import pandas as _pd2
-        _bs = "-".join(sorted(args.bands or ["g", "i", "r"]))
-        _cp = base_dir / "Epochs" / f"lookup_{args.ra:.5f}_{args.dec:.5f}_{_bs}.epochs.parquet"
+        _cp = _epoch_cache_path(base_dir, args)
         if _cp.exists():
             epochs = _pd2.read_parquet(_cp)
     if args.purge_batch and epochs is not None:
@@ -959,7 +977,7 @@ def main() -> None:
             if ((args.field is not None and _f != args.field)
                     or (args.ccdid is not None and _ccd != args.ccdid)
                     or (args.qid is not None and _qid != args.qid)
-                    or (args.bands and _fc[1:] not in args.bands)):
+                    or (args.bands and _fc[1:] not in {x.lstrip("z") for x in args.bands})):
                 continue
             if _key not in _on_disk:
                 _added.append({
@@ -1031,7 +1049,7 @@ def main() -> None:
             # vetting reads the ref-pos light curves; a sci-only run vets from its sci
             # light curves, seeded under the ref name for the duration of the vet step
             vsuf = "" if "" in suffixes else "_sci"
-            step_lightcurves(base_dir, quadrants, force=True, use_calibrated=True,
+            step_lightcurves(base_dir, quadrants, force=True,
                              suffix=vsuf, target_ra=args.ra, target_dec=args.dec,
                              target_match_radius=args.target_match_radius)
             seeded = []
@@ -1094,7 +1112,6 @@ def main() -> None:
             # after a two-pass calibration the pass-1 light curves (written for vetting)
             # must be replaced by the final, flatfield-applied ones
             step_lightcurves(base_dir, quadrants, force=args.force or two_pass or "recalibrate" in steps,
-                             use_calibrated=("calibrate" in steps or "recalibrate" in steps),
                              suffix=suffix, target_ra=args.ra, target_dec=args.dec,
                              target_match_radius=args.target_match_radius,
                              lc_columns=args.lc_columns,
@@ -1112,9 +1129,6 @@ def main() -> None:
 
         if "plots"      in steps:
             logger.info("─── plots ───")
-            import sys as _sys
-            if str(_SCRIPTS) not in _sys.path:
-                _sys.path.insert(0, str(_SCRIPTS))
             from plot_diagnostics import (
                 make_spatial_rms, make_spatial_iqr,
                 make_rms, make_precision, make_position,

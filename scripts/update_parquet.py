@@ -147,12 +147,12 @@ def _fetch_references(base: Path, quads, auth, retries: int, wait: float) -> lis
     return ok
 
 
-def _download_epochs(dc, todo: pd.DataFrame, base: Path, fc: str, a) -> list[str]:
+def _download_epochs(dc, todo: pd.DataFrame, base: Path, fc: str, a) -> tuple[list[str], list[str]]:
     """Science products of the epochs to add. Transient failures (IRSA 503s, dropped
     connections) get a few SHORT retry rounds (--retry-wait s x round); whatever still
     fails is deferred rather than waited for — the target is processed without those
     epochs and they are recorded in the output (epochs_deferred), for --retry-deferred.
-    Returns the deferred filefracdays."""
+    Returns (deferred, unavailable on IRSA (HTTP 404)) filefracdays."""
     import time
     for attempt in range(a.download_retries + 1):
         res = dc.download_all(todo, base_dir=base, bands=[fc[1:]], products="sci",
@@ -182,7 +182,7 @@ def _download_epochs(dc, todo: pd.DataFrame, base: Path, fc: str, a) -> list[str
     if deferred:
         logger.warning(f"  {len(deferred)} epoch(s) deferred (download still failing) — "
                        f"processed without them; add later with --retry-deferred")
-    return deferred
+    return deferred, unavailable
 
 
 def _image_dirs(a, meta: dict) -> list[Path]:
@@ -302,8 +302,13 @@ def _complete_catalog(dc, base: Path, q, positions: np.ndarray, target, match_ra
 def _csv_index(ra, dec, ref: pd.DataFrame, target, match_radius, tol=0.5) -> np.ndarray:
     """Reference-catalog row (0-based) for each (ra, dec); the injected target gets
     len(ref) (no reference source within match_radius), as in the photometry step.
-    Unmatched -> -1."""
+    Unmatched -> -1. Positions repeat for every epoch of a source, so the match is done
+    once per distinct position."""
     from astropy.coordinates import SkyCoord
+    ra, dec = np.asarray(ra, float), np.asarray(dec, float)
+    pos, inv = np.unique(np.column_stack([ra, dec]), axis=0, return_inverse=True)
+    if len(pos) < len(ra):
+        return _csv_index(pos[:, 0], pos[:, 1], ref, target, match_radius, tol)[inv.ravel()]
     rc = SkyCoord(ref["ALPHAWIN_J2000"].values, ref["DELTAWIN_J2000"].values, unit="deg")
     out = np.full(len(ra), -1, int)
     ok = np.isfinite(ra) & np.isfinite(dec)
@@ -341,9 +346,8 @@ def _write_old_epochs(base: Path, df: pd.DataFrame, sci: bool, refs: dict, ffd_o
     """Write one LDAC catalog per old epoch and quadrant; return (n catalogs, index of
     the parquet rows written)."""
     from astropy.io import fits
-    from aperture_photometry import _write_ldac, PHOTCODE
+    from aperture_photometry import _write_ldac, PHOTCODE, CATALOG_DIRS, catalog_name
     written, used = 0, []
-    from aperture_photometry import CATALOG_DIRS, catalog_name
     sub = CATALOG_DIRS["_sci" if sci else ""]
     for key, rows in df.groupby(QKEY):
         q = (int(key[0]), str(key[1]), int(key[2]), int(key[3]))
@@ -482,10 +486,11 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
     first = next(iter(variants.values()))
     frames = {s: _load(p) for s, p in variants.items()}
     if legacy is not None:
-        frames = {s: legacy.prepare(df, variants[s]) for s, df in frames.items()}
+        frames = {s: legacy.prepare(df, variants[s], a.target_match_radius) for s, df in frames.items()}
         # epochs the conversion removed count as missing (measured again)
-        kept = set().union(*(map(tuple, df[QKEY].assign(_m=df["OBSMJD"].round(6))
-                                 .drop_duplicates().to_numpy().tolist()) for df in frames.values()))
+        kept = set.intersection(*(set(map(tuple, df[QKEY].assign(_m=df["OBSMJD"].round(6))
+                                          .drop_duplicates().to_numpy().tolist()))
+                                  for df in frames.values()))
     elif not all(_is_current(df) for df in frames.values()):
         logger.warning(f"SKIP {', '.join(p.name for p in variants.values())}: written before the "
                        f"current format (no FLUX_4_DIF / APCORR410) — use update_old_parquet.py")
@@ -598,7 +603,7 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
                 logger.info(f"  {q}: reference catalog completed with the parquet's sources — "
                             f"{n_raw} from refsexcat, {n_inj} injected")
         refs = {q: _ref_catalog(base, q) for q in quads}
-        deferred = _download_epochs(dc, todo, base, fc, a)
+        deferred, unavailable = _download_epochs(dc, todo, base, fc, a)
 
         # 3. old epochs -> per-epoch catalogs
         all_ep = dc.filter_epochs(epochs).astype({"field": int, "ccdid": int, "qid": int})
@@ -625,7 +630,8 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
                                             raw_flux=legacy.raw_flux if legacy else _raw_flux)
             logger.info(f"  {variants[s].name}: {n_cat} old-epoch catalogs from "
                         f"{len(used):,}/{len(df):,} rows (unmatched {int((df['_csv'] < 0).sum())})")
-            old_epochs |= set(map(tuple, df[QKEY].assign(_m=df["OBSMJD"].round(6)).to_numpy().tolist()))
+            old_epochs |= set(map(tuple, df[QKEY].assign(_m=df["OBSMJD"].round(6))
+                                  .drop_duplicates().to_numpy().tolist()))
 
         # Has the reference catalog changed since the parquet was built (e.g. make_catalog's
         # selection changed)? If unchanged, the original object_index equals the rebuilt
@@ -680,7 +686,7 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
             new_meta[b"ztfphot_update"] = json.dumps({
                 "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "source": str(path), "cuts": cuts, "cuts_recorded": recorded,
-                "epochs_added": int(len(todo) - len(deferred)),
+                "epochs_added": int(len(todo) - len(deferred) - len(unavailable)),
                 "epochs_deferred": int(len(deferred)), "deferred_filefracdays": deferred,
                 "rows": int(len(out)),
             }, default=str).encode()
@@ -883,7 +889,7 @@ def main(legacy=None):
             except (Exception, SystemExit) as exc:
                 logger.exception(f"FAIL {g[0].name}: {exc}")
                 st = "fail"
-            status[g[0].name] = st
+            status[str(g[0])] = st
             if st == "refs":
                 requeue.append(g)
         queue = requeue

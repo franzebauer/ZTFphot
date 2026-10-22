@@ -1,16 +1,13 @@
 """
 plot_rms.py
 -------------------
-Fig 2 — Calibration RMS improvement & corrections (4 panels).
-Top row (summary): calibrator RMS boxplot per stage | linear ZP correction vs
-seeing.
-Bottom row (full-sample residual vs calibrated magnitude, per-column-normalised
-density):
-  bot-left  — BEFORE calibration (dm_all_pre, per-epoch bulk offset removed)
-  bot-right — AFTER calibration (dm_all_post) with per-bin clipped/raw median,
-              mean and mode overplotted. A raw median ≈0 with the mode offset at
-              the faint end is the Eddington binning artifact (measured mag on x),
-              not a calibration error.
+Fig 2 — Calibration RMS improvement & corrections (6 panels).
+Rows 1–2: full-sample residual vs reference magnitude (per-column-normalised density),
+in magnitude and in flux: before calibration (dm_all_pre, per-epoch bulk offset
+removed) | after calibration (dm_all_post) with per-bin clipped/raw median, mean and
+mode. A raw median ≈0 with the mode offset at the faint end is the Eddington binning
+artifact, not a calibration error.
+Row 3: calibrator RMS per calibration stage | linear ZP correction vs seeing.
 
 Reads *_cal.fits primary headers from Calibrated/, and (for the top-right panel)
 mag_all + dm_all_post from *_resid.npz in FlatfieldResiduals/.
@@ -29,9 +26,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import matplotlib.patheffects as pe
-from matplotlib.cm import ScalarMappable
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +123,8 @@ def _faint_residual_panel(ax, resid_dir, which="post", curves=True, flux=False) 
     _used_ref = True
     mags, res = [], []
     if resid_dir is not None:
-        for p in sorted(Path(resid_dir).glob("*_resid.npz")):
-            try:
-                d = np.load(str(p))
-            except Exception as exc:
-                logger.warning(f"  skipping unreadable {p.name}: {exc}")
-                continue
+        from plot_spatial import _load_resid_npz     # loaded once, shared by all panels
+        for d in _load_resid_npz(Path(resid_dir)):
             if key not in d or ("qmag_all" not in d and "mag_all" not in d):
                 continue
             if "qmag_all" in d:
@@ -242,10 +233,9 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     ax_zp    = fig.add_subplot(gs[2, 3:6])            # linear ZP vs seeing
     fig.suptitle(f"Calibration RMS improvement & corrections — {tag}", fontsize=13)
 
-    # ── Top-left: calibrator RMS boxplot ──
+    # ── calibrator RMS per stage ──
     ax = ax_box
-    _sc = 1.0                                    # mmag (no flux variant of this panel)
-    data_box = [df[s].dropna().values * _sc for s in stages]
+    data_box = [df[s].dropna().values for s in stages]
     bp = ax.boxplot(data_box, patch_artist=True, medianprops=dict(color="black", lw=2))
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color); patch.set_alpha(0.6)
@@ -267,7 +257,7 @@ def make_rms(cal_dir: Path, out_path: Path, tag: str = "",
     for _a in (ax_pre, ax_post, ax_pre_f, ax_post_f):
         _a.set_xlim(right=23.0)
 
-    # ── Top-middle: ZP correction vs seeing ──
+    # ── linear ZP correction vs seeing ──
     ax = ax_zp
     cn  = df["CALIB_N"].dropna()
     cm  = df["CALIB_M"].dropna()

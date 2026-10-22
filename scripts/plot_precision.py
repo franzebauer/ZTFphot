@@ -55,51 +55,17 @@ _CALIB_MAG_HI = 19.0
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _find_target_obj(df: pd.DataFrame, target_ra: float, target_dec: float):
-    if "ALPHAWIN_REF" not in df.columns:
-        return None
+    """object_index of the target (within the pipeline's 1" radius), or None."""
     from astropy.coordinates import SkyCoord
     import astropy.units as u
-    srcs = df.groupby("object_index")[["ALPHAWIN_REF", "DELTAWIN_REF"]].first().dropna()
-    if srcs.empty:
-        return None
-    cats = SkyCoord(ra=srcs["ALPHAWIN_REF"].values * u.deg,
-                    dec=srcs["DELTAWIN_REF"].values * u.deg)
-    tgt  = SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg)
-    idx, sep, _ = tgt.match_to_catalog_sky(cats)
-    if sep[0].arcsec < 1.0:                       # the pipeline's target association radius
-        return srcs.index[int(idx)]
-    return None
+    from plot_lightcurve import _find_target
+    return _find_target(df, SkyCoord(ra=target_ra * u.deg, dec=target_dec * u.deg))[0]
 
 
 def _load_vet_rejected(vet_catalog: Path, df: pd.DataFrame) -> set:
-    """Return set of object_index values flagged IS_GOOD=False in the vet catalog."""
-    if vet_catalog is None or not vet_catalog.exists():
-        return set()
-    try:
-        from astropy.io import fits
-        from astropy.coordinates import SkyCoord
-        import astropy.units as u
-        with fits.open(str(vet_catalog)) as h:
-            vd = h[1].data
-        vet_ra   = vd["ALPHAWIN_J2000"].astype(float)
-        vet_dec  = vd["DELTAWIN_J2000"].astype(float)
-        vet_good = vd["IS_GOOD"].astype(bool)
-        bad_ra   = vet_ra[~vet_good]
-        bad_dec  = vet_dec[~vet_good]
-        if len(bad_ra) == 0:
-            return set()
-        srcs = df.groupby("object_index")[["ALPHAWIN_REF", "DELTAWIN_REF"]].first().dropna()
-        if srcs.empty:
-            return set()
-        cat_src = SkyCoord(ra=srcs["ALPHAWIN_REF"].values * u.deg,
-                           dec=srcs["DELTAWIN_REF"].values * u.deg)
-        cat_bad = SkyCoord(ra=bad_ra * u.deg, dec=bad_dec * u.deg)
-        idx, sep, _ = cat_bad.match_to_catalog_sky(cat_src)
-        matched = sep.arcsec < 1.0              # same reference positions: exact match
-        return set(srcs.index[idx[matched]].tolist())
-    except Exception as e:
-        logger.warning(f"Could not load vet catalog {vet_catalog}: {e}")
-        return set()
+    """object_index of the sources flagged IS_GOOD=False in the vet catalog."""
+    from plot_lightcurve import _vet_indices
+    return _vet_indices(vet_catalog, df, good=False)
 
 
 def _running_median(grp: pd.DataFrame, edges: np.ndarray, scale: float = 1000.0):
@@ -118,7 +84,8 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
                         target_ra: float | None = None,
                         target_dec: float | None = None,
                         vet_catalog: Path | None = None) -> None:
-    df = pd.read_parquet(lc_path)
+    from ztfphot_lc import read_lc
+    df = read_lc(lc_path)                     # any pipeline version, current names
 
     # Both unit systems are built: σ_mag (censored — negative-flux epochs are NaN) and
     # σ_flux from the bipolar FLUX column (unbiased, keeps them). The brightness axis is
@@ -170,7 +137,7 @@ def make_precision(lc_path: Path, out_path: Path, tag: str = "",
                                          23.9 - 2.5 * np.log10(clean["_FLUX_RAW"]), np.nan)
         for _col, _flux in (("_MAG_RAW", False), ("_FLUX_RAW", True)):
             g = clean.groupby("object_index").agg(
-                n_org=(_col, "count"), med=(_BRT if _flux else _col, "median"),
+                n_org=(_col, "count"), med=(_BRT, "median"),     # same x-axis as the solid curve
                 std=(_col, "std")).dropna(subset=["std"])
             g = g[(g["n_org"] >= 5) & np.isfinite(g["std"])]
             if _flux:
@@ -310,7 +277,8 @@ def make_position(lc_path: Path, out_path: Path, tag: str = "",
     Ref-pos parquets carry no per-epoch positions (sources are measured at their fixed
     reference positions), so this returns without writing anything in that mode.
     """
-    df = pd.read_parquet(lc_path)
+    from ztfphot_lc import read_lc
+    df = read_lc(lc_path)                     # any pipeline version, current names
     if not {"DRA_SCI", "DDEC_SCI"} <= set(df.columns):
         logger.info(f"  [{tag}] no DRA_SCI/DDEC_SCI (ref-pos) — skipping position plot")
         return
@@ -337,7 +305,10 @@ def make_position(lc_path: Path, out_path: Path, tag: str = "",
         if len(srcs) >= 2:
             from scipy.spatial import KDTree
             cos_dec = np.cos(np.radians(srcs["dec"].values.mean()))
-            xy = np.column_stack([srcs["ra"].values * cos_dec, srcs["dec"].values])
+            ra = srcs["ra"].values
+            d = ra - ra[0]                                    # continuous across RA = 0/360
+            ra = np.where(d >= 180, ra - 360, np.where(d < -180, ra + 360, ra))
+            xy = np.column_stack([ra * cos_dec, srcs["dec"].values])
             dists, _ = KDTree(xy).query(xy, k=2)
             nn_data = pd.DataFrame({"sep": dists[:, 1] * 3600}, index=srcs.index)
             nn_data = nn_data.join(med, how="left").dropna(subset=["sep"])

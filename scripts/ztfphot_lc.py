@@ -25,11 +25,35 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
+# stored columns the conversions below need
+_FLAG_SOURCES = ["FLAG_AP", "FLAG_SE_REF", "MAG_4_REF", "INFOBITS_DIF", "INFOBITS_REF"]
+
+
+def _needed(names: set, columns: list[str]) -> list[str]:
+    """Stored columns to read for the requested (current-name) `columns`."""
+    want = set()
+    for c in columns:
+        if c in names:
+            want.add(c)
+        for k in ("4", "6", "10"):
+            for kind in ("FLUX", "FERR"):
+                if c == f"{kind}_{k}_TOT_uJy" and f"{kind}_{k}_TOT_AB" in names:
+                    want |= {f"{kind}_{k}_TOT_AB", "norm_offset"}
+                if c == f"{kind}_{k}_DIF_uJy" and f"{kind}_{k}_DIF" in names:
+                    want |= {f"{kind}_{k}_DIF", "MAGZP_DIF"}
+        if c == "FLAGS" and "FLAGS" not in names:
+            want |= set(_FLAG_SOURCES)
+    return [c for c in want if c in names]
+
+
 def read_lc(path, columns: list[str] | None = None) -> pd.DataFrame:
-    """Read a light-curve parquet with current column names/units; `columns` selects
-    (current names) after conversion."""
-    df = pd.read_parquet(path)
+    """Read a light-curve parquet with current column names/units. `columns` (current
+    names) reads only what they need; requested columns the file lacks are omitted."""
     meta = pq.read_schema(path).metadata or {}
+    if columns is not None:
+        df = pd.read_parquet(path, columns=_needed(set(pq.read_schema(path).names), columns))
+    else:
+        df = pd.read_parquet(path)
     for k in ("4", "6", "10"):
         for kind in ("FLUX", "FERR"):
             old = f"{kind}_{k}_TOT_AB"
@@ -48,4 +72,4 @@ def read_lc(path, columns: list[str] | None = None) -> pd.DataFrame:
     if "FLAGS" not in df.columns:
         from ztfphot_flags import flags_of
         df["FLAGS"] = flags_of(df).astype("Int32")
-    return df[columns] if columns is not None else df
+    return df[[c for c in columns if c in df.columns]] if columns is not None else df

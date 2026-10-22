@@ -47,7 +47,6 @@ import update_parquet as up  # noqa: E402
 from epoch_inventory import target_position  # noqa: E402
 
 _MIN_FIT_ROWS = 30          # rows with a magnitude needed for the full factor model
-TARGET_RADIUS = 1.0         # arcsec, the pipeline's target association radius
 
 
 def _num(df: pd.DataFrame, col: str) -> np.ndarray:
@@ -55,7 +54,7 @@ def _num(df: pd.DataFrame, col: str) -> np.ndarray:
             else np.full(len(df), np.nan))
 
 
-def prepare(df: pd.DataFrame, path: Path) -> pd.DataFrame:
+def prepare(df: pd.DataFrame, path: Path, match_radius: float = 1.0) -> pd.DataFrame:
     """Bring an old parquet's rows to the current conventions (see module docstring)."""
     from ztfphot_flags import flags_of
     meta = {k.decode(): v.decode() for k, v in (pq.read_schema(path).metadata or {}).items()
@@ -79,8 +78,9 @@ def prepare(df: pd.DataFrame, path: Path) -> pd.DataFrame:
     ra, dec = target_position(path, meta)
     sep = 3600 * np.hypot((_num(df, "ALPHAWIN_REF") - ra) * np.cos(np.radians(dec)),
                           _num(df, "DELTAWIN_REF") - dec)
-    ep = df[up.QKEY].astype(str).agg("|".join, axis=1) + "|" + df["OBSMJD"].round(6).astype(str)
-    redo = ep.isin(set(ep[(sep < TARGET_RADIUS) & ~has]))
+    ep = pd.Series(df.assign(_m=df["OBSMJD"].round(6)).groupby(up.QKEY + ["_m"], sort=False)
+                   .ngroup().to_numpy(), index=df.index)
+    redo = ep.isin(set(ep[(sep < match_radius) & ~has]))
     if redo.any():
         up.logger.info(f"  {path.name}: {ep[redo].nunique()} epoch(s) without target 4 px "
                        f"photometry — re-measured from the images")

@@ -7,29 +7,8 @@ from astropy.table import Table
 
 
 def list_files(dir):
-    r = []
-    subdirs = [x[0] for x in os.walk(dir)]
-    for subdir in subdirs:
-        files = os.walk(subdir).__next__()[2]
-        if (len(files) > 0):
-            for file in files:
-                r.append(os.path.join(subdir, file))
-
-    return r
-
-
-def list_folders(dir):
-    r = []
-    subdirs = [x[0] for x in os.walk(dir)]
-    for subdir in subdirs:
-        files = os.walk(subdir).__next__()[2]
-        if (len(files) > 0):
-            r.append(subdir)
-
-    return r
-
-
-# In []
+    """All files below `dir`."""
+    return [os.path.join(root, f) for root, _, files in os.walk(dir) for f in files]
 
 def make_catalog(save_path, refcats):
     # Per quadrant, prefer the injection-augmented catalog when present so injected
@@ -55,16 +34,11 @@ def make_catalog(save_path, refcats):
             print(f"make_catalog: {os.path.basename(tmp)} missing — skipping "
                   f"{os.path.basename(catalog)} (retried once the reference image exists)")
             continue
-        if os.path.exists(tmp):
-            # Exact keywords: the refimg header also has MAGZPUNC / MAGZPMIN / MAGZPMAX
-            hdr = fits.getheader(tmp)
-            infobits_ref = hdr.get('INFOBITS', int(np.iinfo(np.uint32).max))
-            magzp_ref    = hdr.get('MAGZP', np.nan)
-            magzprms_ref = hdr.get('MAGZPRMS', np.nan)
-        else:
-            infobits_ref = int(np.iinfo(np.uint32).max)
-            magzp_ref = np.nan
-            magzprms_ref = np.nan
+        # Exact keywords: the refimg header also has MAGZPUNC / MAGZPMIN / MAGZPMAX
+        hdr = fits.getheader(tmp)
+        infobits_ref = hdr.get('INFOBITS', int(np.iinfo(np.uint32).max))
+        magzp_ref    = hdr.get('MAGZP', np.nan)
+        magzprms_ref = hdr.get('MAGZPRMS', np.nan)
 
         catname = catalog[catalog.rfind("ztf_")+4:catalog.rfind("_refsexcat")]
         hdul = fits.open(catalog)
@@ -88,9 +62,10 @@ def make_catalog(save_path, refcats):
         table['ID'] = tmp['CLASS_STAR'].astype(str)
 
         del tmp
-        table.sort('MAG_APER_3px')
-        for i in range(len(table)):
-            table['ID'][i] = str(i) + "_" + catname
+        # stable order (ties, e.g. the 99-mag injected sources, ordered by position):
+        # the row is the source index
+        table.sort(['MAG_APER_3px', 'ALPHAWIN_J2000', 'DELTAWIN_J2000'])
+        table['ID'] = [f"{i}_{catname}" for i in range(len(table))]
 
         catname = save_path + '/' + catname + '(REFERENCE)[OBJECTS].csv'
         ascii.write(table, catname + '.tmp', format='csv', overwrite=True)

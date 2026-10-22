@@ -79,6 +79,26 @@ def step_vet(base_dir: Path, quadrants: list[dict]) -> int:
 
 # ── Step: per-epoch calibration ───────────────────────────────────────────────
 
+_VET_OK: dict = {}
+
+
+def _vet_readable(path: Path) -> bool:
+    """True if the vetting catalog can be read (checked once per file); otherwise warn —
+    the quadrant is then calibrated with all eligible stars."""
+    key = (str(path), path.stat().st_mtime)
+    if key not in _VET_OK:
+        try:
+            from astropy.io import fits
+            d = fits.getdata(path, 1)
+            _ = d['IS_GOOD'], d['ALPHAWIN_J2000'], d['DELTAWIN_J2000']
+            _VET_OK[key] = True
+        except Exception as exc:
+            logger.warning(f"calibrate: vetting catalog {path} unreadable ({exc}) — "
+                           f"calibrating without vetting; re-run the vet step")
+            _VET_OK[key] = False
+    return _VET_OK[key]
+
+
 def _calibrate_one(args: tuple) -> tuple[str, bool, str]:
     """Worker: run calib_catalog() for a single LDAC epoch catalog."""
     ref_csv, in_ldac, out_cal, img_kind, vet_catalog, extra_kw = args
@@ -161,6 +181,8 @@ def step_calibrate(
                 vet_fn = _cal_quad_dir(base_dir, field, fc, ccd, qid_) / "vet_calib_stars.fits"
                 if vet_fn.exists():
                     vet_cat = vet_fn
+            if vet_cat is not None and not _vet_readable(vet_cat):
+                vet_cat = None
 
             resid_out = None
             if save_residuals:
@@ -258,22 +280,22 @@ def step_build_flatfield(
                            f"{field:06d}/{fc}/c{ccd:02d}/q{qid_}")
             continue
 
-        all_ra, all_dec, all_dm = [], [], []
+        # post-polynomial calibrator residuals (dm_4) of every epoch
+        all_ra, all_dec, all_dm, n_bad = [], [], [], 0
         for f in resid_files:
             try:
-                d = np.load(f)
-                if 'dm_4' in d:
-                    all_ra.extend(d['ra_4']); all_dec.extend(d['dec_4']); all_dm.extend(d['dm_4'])
-                elif 'dm_3' in d:
-                    all_ra.extend(d['ra_3']); all_dec.extend(d['dec_3']); all_dm.extend(d['dm_3'])
-                else:
-                    all_ra.extend(d['ra']); all_dec.extend(d['dec']); all_dm.extend(d['dm'])
-            except Exception:
-                pass
+                with np.load(f) as d:
+                    all_ra.append(d['ra_4']); all_dec.append(d['dec_4']); all_dm.append(d['dm_4'])
+            except Exception as exc:
+                n_bad += 1
+                logger.warning(f"flatfield: skipping unreadable {Path(f).name}: {exc}")
+        if not all_dm:
+            logger.warning(f"flatfield: no readable residual files")
+            continue
 
-        all_ra  = np.array(all_ra,  dtype=float)
-        all_dec = np.array(all_dec, dtype=float)
-        all_dm  = np.array(all_dm,  dtype=float)
+        all_ra  = np.concatenate(all_ra).astype(float)
+        all_dec = np.concatenate(all_dec).astype(float)
+        all_dm  = np.concatenate(all_dm).astype(float)
 
         finite = np.isfinite(all_dm) & (np.abs(all_dm) < 1.0)
         if finite.sum() < 100:
@@ -302,14 +324,16 @@ def step_build_flatfield(
         pp   = float(np.nanmax(vals) - np.nanmin(vals)) * 1000 if len(vals) > 1 else np.nan
         logger.info(f"flatfield {field:06d}/{fc}/c{ccd:02d}/q{qid_}: "
                     f"RMS={rms:.1f} mmag  P-P={pp:.1f} mmag  "
-                    f"N={finite.sum():,}  bins={int(np.sum(nobs>=min_count))}/{nbins**2}")
+                    f"N={finite.sum():,}  bins={int(np.sum(nobs>=min_count))}/{stat.size}")
 
         ff = dict(stat=stat_filled.astype(np.float32),
                   ra_edges=ra_e.astype(np.float64),
                   dec_edges=dec_e.astype(np.float64))
 
         out_path = _cal_quad_dir(base_dir, field, fc, ccd, qid_, suffix) / "flatfield.npz"
-        np.savez(str(out_path), **ff, nobs=nobs.astype(np.int32))
+        with open(str(out_path) + ".tmp", "wb") as _fh:                 # atomic write
+            np.savez(_fh, **ff, nobs=nobs.astype(np.int32))
+        Path(str(out_path) + ".tmp").replace(out_path)
         logger.info(f"flatfield saved → {out_path}")
 
         flatfields[(field, fc, ccd, qid_)] = ff

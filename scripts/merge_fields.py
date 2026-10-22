@@ -25,7 +25,7 @@ Algorithm
     matched against all quadrants linked before it (dominant first), mutual
     nearest neighbours within MAX_SEP arcsec only.
 6.  Concatenate all quadrants (with origin columns), sort by OBSMJD, and
-    write to LightCurves/merged/{band}/lightcurves_merged.parquet.
+    write to LightCurves/merged/{ra}_{dec}/{band}{suffix}/lightcurves_merged.parquet.
 
 Output parquet extra columns (beyond per-quadrant schema)
 ----------------------------------------------------------
@@ -79,17 +79,15 @@ def _per_source_stats(df: pd.DataFrame, min_epochs: int = MIN_EPOCHS) -> pd.Data
     Return one row per object_index with ra, dec, n_clean, median_mag.
     Only sources with n_clean >= min_epochs are returned.
 
-    Uses MAG_4_TOT_AB with a clean-epoch filter (INFOBITS_DIF == 0, magnitude in
-    [MAG_BRIGHT, MAG_FAINT], error < MAX_ERR), over the full magnitude range so
-    the inter-quadrant offset can be measured as a function of magnitude.
+    Uses MAG_4_TOT_AB over the clean rows (ztfphot_flags.clean_rows: no INFOBITS_DIF,
+    no EDGE / MASKED; the selection the plots use) with magnitude in [MAG_BRIGHT,
+    MAG_FAINT] and error < MAX_ERR, over the full magnitude range so the
+    inter-quadrant offset can be measured as a function of magnitude.
     """
+    from ztfphot_flags import clean_rows
     mag_col = 'MAG_4_TOT_AB'
-    mask = (
-        (df['INFOBITS_DIF'] == 0) &
-        df[mag_col].notna() &
-        (df[mag_col] > MAG_BRIGHT) &
-        (df[mag_col] < MAG_FAINT)
-    )
+    df = clean_rows(df)
+    mask = df[mag_col].notna() & (df[mag_col] > MAG_BRIGHT) & (df[mag_col] < MAG_FAINT)
     if 'MERR_4_TOT_AB' in df.columns:
         mask &= df['MERR_4_TOT_AB'].fillna(999) < MAX_ERR
     clean = df[mask]
@@ -128,7 +126,9 @@ def _compute_mag_correction(
                        dec=stats_min['dec'].values * u.deg)
 
     idx, sep, _ = cat_min.match_to_catalog_sky(cat_dom)
-    matched = sep.arcsec < max_sep_arcsec
+    back, _, _ = cat_dom.match_to_catalog_sky(cat_min)
+    # mutual nearest neighbours only: a close pair cannot both match one source
+    matched = (sep.arcsec < max_sep_arcsec) & (back[idx] == np.arange(len(stats_min)))
 
     n_common = int(matched.sum())
     if n_common < min_common:
@@ -311,9 +311,6 @@ def merge_band(
     # secondary quadrant is matched against all quadrants linked so far (dominant first),
     # so overlaps between secondaries are linked too; only mutual nearest neighbours
     # within max_sep_arcsec are linked, so two distinct sources never share an index.
-    from astropy.coordinates import SkyCoord as _SkyCoord
-    import astropy.units as _u
-
     def _positions(df):
         return (df.groupby('object_index')[['ALPHAWIN_REF', 'DELTAWIN_REF']]
                 .first().reset_index())
@@ -325,10 +322,10 @@ def merge_band(
         sec = _positions(df)
         remap = {}
         if len(sec) and len(linked):
-            c_sec = _SkyCoord(ra=sec['ALPHAWIN_REF'].values * _u.deg,
-                              dec=sec['DELTAWIN_REF'].values * _u.deg)
-            c_lnk = _SkyCoord(ra=linked['ALPHAWIN_REF'].values * _u.deg,
-                              dec=linked['DELTAWIN_REF'].values * _u.deg)
+            c_sec = SkyCoord(ra=sec['ALPHAWIN_REF'].values * u.deg,
+                              dec=sec['DELTAWIN_REF'].values * u.deg)
+            c_lnk = SkyCoord(ra=linked['ALPHAWIN_REF'].values * u.deg,
+                              dec=linked['DELTAWIN_REF'].values * u.deg)
             fwd, sep, _ = c_sec.match_to_catalog_sky(c_lnk)
             back, _, _ = c_lnk.match_to_catalog_sky(c_sec)
             mutual = (sep.arcsec < max_sep_arcsec) & (back[fwd] == np.arange(len(sec)))

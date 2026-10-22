@@ -55,9 +55,31 @@ class F:
     CAL_REJECT = EDGE | MASKED | OUTER_APERTURES        # calibrators: all apertures clean
 
 
-# ZTF INFOBITS considered cautionary (same set as download_coordinator.CAUTIONARY_MASK)
-CAUTIONARY_INFOBITS = ((1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6)
-                       | (1 << 11) | (1 << 21) | (1 << 22) | (1 << 26) | (1 << 27))
+# These epochs have no valid astrometric or photometric calibration and cannot
+# be recovered regardless of science case — never worth downloading.
+#   Bit  0 (       1): no astrometric solution
+#   Bit  1 (       2): no photometric solution
+#   Bit 25 (33554432): composite "bad quality" flag
+# Cautionary bits — data may still be usable depending on science requirements.
+# Skipped only when --skip-flagged is passed.
+# Well-documented bits (ZSDS Sec 10.4):
+#   Bit  2 (       4): astrometric fit rms above threshold
+#   Bit  3 (       8): photometric fit rms above threshold
+#   Bit  4 (      16): moon in/near FOV, elevated background
+#   Bit  5 (      32): satellite/aircraft trail present
+#   Bit  6 (      64): high sky background (non-moon)
+# Observed in data but not fully documented (treated as cautionary until confirmed):
+#   Bit 11 (    2048): unknown — rare (few epochs), treat cautionary
+#   Bit 21 ( 2097152): unknown — very rare, treat cautionary
+#   Bit 22 ( 4194304): PSF matching / subtraction quality below threshold
+#                      (most common mystery bit — 158 epochs in r-band field 443;
+#                       appears WITHOUT bit 25, so ZTF did not consider globally bad)
+#   Bit 26 (67108864): reference image quality / normalization issue
+#   Bit 27 (134217728): possibly non-standard reference used
+# TODO: confirm bits 11, 21, 22, 26, 27 against ZSDS Explanatory Supplement Sec 10.4
+HARD_REJECT_INFOBITS = (1 << 0) | (1 << 1) | (1 << 25)                       # = 33554435
+CAUTIONARY_INFOBITS = ((1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6)   # documented
+                       | (1 << 11) | (1 << 21) | (1 << 22) | (1 << 26) | (1 << 27))  # = 207620220
 
 
 def _int(s, df) -> np.ndarray:
@@ -98,8 +120,6 @@ def good(df: pd.DataFrame, reject: int = F.DEFAULT_REJECT) -> pd.DataFrame:
     """Rows whose FLAGS have none of the `reject` bits set."""
     return df[(flags_of(df) & reject) == 0]
 
-
-good.DEFAULT = F.DEFAULT_REJECT
 
 
 def clean_rows(df: pd.DataFrame) -> pd.DataFrame:
