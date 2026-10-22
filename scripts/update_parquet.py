@@ -724,6 +724,23 @@ def _output_path(path: Path, a) -> Path:
     return (Path(a.outdir) if a.outdir else path.parent) / f"{stem}.parquet"
 
 
+_THIS_COMMIT: list = []
+
+
+def _made_by_this_code(path: Path) -> bool:
+    """The parquet's ztfphot_run records the commit of the ZTFphot checkout running now."""
+    if not _THIS_COMMIT:
+        from run_pipeline import _git_info
+        _THIS_COMMIT.append(_git_info().get("commit"))
+    if _THIS_COMMIT[0] is None:
+        return False
+    try:
+        run = json.loads((pq.read_schema(path).metadata or {}).get(b"ztfphot_run", b"null") or "null")
+        return bool(run) and (run.get("ztfphot") or {}).get("commit") == _THIS_COMMIT[0]
+    except (ValueError, OSError):
+        return False
+
+
 def _plan_directory(d: Path, a) -> list[list[Path]]:
     """Target groups from a directory of light-curve parquets. Per target, band and
     variant (ref-pos / _sci) the input is X_recal.parquet if it exists, else X.parquet
@@ -756,7 +773,12 @@ def _plan_directory(d: Path, a) -> list[list[Path]]:
         outs = [_output_path(m, a) for m in members]
         done = all(o.exists() for o in outs)
         if a.from_updated and done:
-            # refresh the existing outputs in place (they already hold every epoch)
+            # refresh the existing outputs in place (they already hold every epoch); with
+            # --recalibrate, outputs already made by this code version are skipped, so an
+            # interrupted refresh resumes (--redo refreshes them anyway)
+            if a.recalibrate and not a.redo and all(_made_by_this_code(o) for o in outs):
+                logger.info(f"  skip {Path(gkey).name}: already refreshed by this code version")
+                continue
             out.append(outs)
             continue
         if a.retry_deferred:
