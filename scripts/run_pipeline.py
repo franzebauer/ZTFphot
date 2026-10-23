@@ -1136,8 +1136,13 @@ def main() -> None:
         logger.info("─── calibration pass 1 (no flatfield) → light curves → vetting ───")
         for suffix in suffixes:
             for q in quadrants:
+                # when this run vets, pass 1 is unvetted (unless --vet-catalog): a vetting
+                # catalog left by an earlier run in this base dir would otherwise steer
+                # this run's vetting, so the result would depend on the directory's
+                # history. Without the vet step an existing vetting catalog is the input.
                 step_calibrate(base_dir, [q], workers=args.workers, force=True,
-                               vet_catalog=args.vet_catalog, poly_degree=args.poly_degree,
+                               vet_catalog=args.vet_catalog, auto_vet="vet" not in steps,
+                               poly_degree=args.poly_degree,
                                flatfield=None, target_ra=args.ra, target_dec=args.dec,
                                target_match_radius=args.target_match_radius,
                                save_residuals=True,

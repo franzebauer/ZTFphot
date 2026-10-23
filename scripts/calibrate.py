@@ -141,10 +141,14 @@ def step_calibrate(
     target_match_radius: float = 1.0,
     save_residuals: bool = False,
     suffix: str = "",
+    auto_vet: bool = True,
 ) -> int:
     """
     Apply per-epoch photometric calibration (linear ZP → 3σ clip → 2D polynomial →
     flatfield) to every per-epoch photometry catalog.
+
+    Calibration stars: `vet_catalog` if given; otherwise, with `auto_vet`, the
+    quadrant's Calibrated/…/vet_calib_stars.fits when it exists; else all eligible stars.
 
     Reads from  PhotCatalogs{suffix}/{field}/{fc}/{ccd}/{qid}/*_phot.fits
     Writes to   Calibrated{suffix}/{field}/{fc}/{ccd}/{qid}/*_cal.fits
@@ -183,7 +187,7 @@ def step_calibrate(
             vet_cat = None
             if vet_catalog is not None and vet_catalog.exists():
                 vet_cat = vet_catalog
-            else:
+            elif auto_vet:
                 vet_fn = _cal_quad_dir(base_dir, field, fc, ccd, qid_) / "vet_calib_stars.fits"
                 if vet_fn.exists():
                     vet_cat = vet_fn
