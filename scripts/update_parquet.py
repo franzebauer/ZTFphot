@@ -123,11 +123,14 @@ def _is_current(df: pd.DataFrame) -> bool:
 
 # ── reference catalogs + source matching ─────────────────────────────────────
 
-def _fetch_references(base: Path, quads, auth, retries: int, wait: float) -> list:
-    """refimg + refsexcat per quadrant, retrying transient (503/HTML) failures."""
+def _fetch_references(base: Path, quads, auth, retries: int, wait: float) -> tuple:
+    """refimg + refsexcat per quadrant, retrying transient (503/HTML) failures.
+
+    Returns (ok, no_ref): the quadrants with both products, and those for which IRSA
+    answered a genuine 404 (it has no reference image: permanent, not retried)."""
     import time
     from download_coordinator import ref_url, ref_local_path, download_file
-    ok = []
+    ok, no_ref = [], []
     for q in quads:
         good = True
         for suf in _REF_PRODUCTS:
@@ -142,10 +145,12 @@ def _fetch_references(base: Path, quads, auth, retries: int, wait: float) -> lis
             if st not in ("ok", "skipped"):
                 logger.warning(f"  reference {suf} for {q}: giving up ({st})")
                 good = False
+                if st == "404":
+                    no_ref.append(q)
                 break
         if good:
             ok.append(q)
-    return ok
+    return ok, no_ref
 
 
 def _download_epochs(dc, todo: pd.DataFrame, base: Path, fc: str, a) -> tuple[list[str], list[str]]:
@@ -586,12 +591,14 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
         # Quadrants IRSA lists for the target that the file lacks (e.g. deferred by the
         # original run, or lost by an older version) are added — all their epochs are
         # new — unless the file's quadrant set is fixed; quadrants already known to miss
-        # the target's reference footprint (quadrants_off_footprint) are not tried again.
+        # the target's reference footprint (quadrants_off_footprint), or to have no
+        # reference image at IRSA (quadrants_no_reference), are not tried again.
         off_known = set(_json_list(meta, "quadrants_off_footprint"))
+        noref_known = set(_json_list(meta, "quadrants_no_reference"))
         quads_extra = [] if _fixed_quadrants(first, meta) else sorted(
             q for q in {(int(r.field), str(r.filtercode), int(r.ccdid), int(r.qid))
                         for r in possible.itertuples()}
-            if q not in quads_in and _qtag(q) not in off_known)
+            if q not in quads_in and _qtag(q) not in off_known and _qtag(q) not in noref_known)
         if quads_extra:
             logger.info(f"  quadrant(s) not in the parquet, to add: {[_qtag(q) for q in quads_extra]}")
         t_end = have["OBSMJD"].max()
@@ -624,20 +631,36 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
             n_s, n_r = _reuse_local(dc, base, todo, quads_in, src_dirs)
             logger.info(f"  reused from {', '.join(map(str, src_dirs))}: {n_s}/{len(todo)} epoch "
                         f"image(s), {n_r} reference product(s) — not downloaded")
-        quads = _fetch_references(base, quads_in + quads_extra, auth,
-                                  max(a.download_retries, 3), a.retry_wait)
+        quads, no_ref = _fetch_references(base, quads_in + quads_extra, auth,
+                                          max(a.download_retries, 3), a.retry_wait)
         if not set(quads_in) <= set(quads):
             logger.warning(f"FAIL {first.name}: reference products unavailable for "
                            f"{sorted(set(quads_in) - set(quads))} — target re-queued for later")
             return "refs"
-        # an added quadrant without reference products is deferred again (recorded in
-        # the output as quadrants_deferred), not a failure of the target
-        quads_deferred = sorted(set(quads_extra) - set(quads))
+        # an added quadrant without reference products is not a failure of the target:
+        # if IRSA has no reference image for it (404) it is recorded as permanent
+        # (quadrants_no_reference) and never tried again; any other failure defers it
+        # again (quadrants_deferred)
+        quads_noref = sorted(set(quads_extra) & set(no_ref))
+        quads_deferred = sorted(set(quads_extra) - set(quads) - set(quads_noref))
+        if quads_noref:
+            noref_known |= {_qtag(q) for q in quads_noref}
+            logger.info(f"  IRSA has no reference image (404) for the added quadrant(s) "
+                        f"{[_qtag(q) for q in quads_noref]} — recorded, not retried")
         if quads_deferred:
             logger.warning(f"  reference products unavailable for the added quadrant(s) "
                            f"{[_qtag(q) for q in quads_deferred]} — deferred (--retry-deferred)")
+        if quads_noref or quads_deferred:
+            _drop = set(quads_noref) | set(quads_deferred)
             todo = todo[np.array([(int(r.field), r.filtercode, int(r.ccdid), int(r.qid))
-                                  not in quads_deferred for r in todo.itertuples()], dtype=bool)]
+                                  not in _drop for r in todo.itertuples()], dtype=bool)]
+        if quads_noref and len(todo) == 0 and not quads_deferred and not a.recalibrate:
+            # the reference-less quadrant(s) were all there was to add: record them and
+            # clear the deferred flags, without re-running the pipeline
+            logger.info("  nothing to add")
+            for path in variants.values():
+                _clear_deferred(path, no_reference=noref_known)
+            return "ok"
         # Same reference-footprint check run_pipeline applies: quadrants whose reference
         # image does not contain the target are dropped by the pipeline anyway, so don't
         # download their epochs (science exposures dither and can cover the target while
@@ -761,6 +784,7 @@ def update_target(paths: list[Path], a, auth, legacy=None) -> str:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             new_meta[b"quadrants_deferred"] = json.dumps([_qtag(q) for q in quads_deferred]).encode()
             new_meta[b"quadrants_off_footprint"] = json.dumps(sorted(off_known)).encode()
+            new_meta[b"quadrants_no_reference"] = json.dumps(sorted(noref_known)).encode()
             new_meta[b"ztfphot_update"] = json.dumps({
                 "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "source": str(path), "cuts": cuts, "cuts_recorded": recorded,
@@ -878,14 +902,19 @@ def _plan_directory(d: Path, a) -> list[list[Path]]:
     return out
 
 
-def _clear_deferred(p: Path) -> None:
+def _clear_deferred(p: Path, no_reference=()) -> None:
     """An updated file whose deferred epochs turn out to need nothing (no longer
     missing / no longer passing the cuts): reset epochs_deferred so --retry-deferred
-    stops selecting it."""
-    if not _n_deferred(p):
+    stops selecting it. `no_reference`: quadrant tags to record as quadrants_no_reference
+    (IRSA has no reference image for them), so they are not tried again."""
+    no_reference = sorted(no_reference)
+    have = sorted(json.loads((pq.read_schema(p).metadata or {}).get(b"quadrants_no_reference", b"[]") or b"[]"))
+    if not _n_deferred(p) and no_reference in ([], have):
         return
     t = pq.read_table(p)
     md = dict(t.schema.metadata or {})
+    if no_reference:
+        md[b"quadrants_no_reference"] = json.dumps(sorted(set(have) | set(no_reference))).encode()
     if b"ztfphot_update" in md:
         u = json.loads(md[b"ztfphot_update"])
         u.update(epochs_deferred=0, deferred_filefracdays=[])
@@ -895,7 +924,8 @@ def _clear_deferred(p: Path) -> None:
     tmp = p.with_name(p.name + ".tmp")
     pq.write_table(t.replace_schema_metadata(md), tmp)
     os.replace(tmp, p)
-    logger.info(f"  {p.name}: deferred epochs no longer missing — flag cleared")
+    logger.info(f"  {p.name}: deferred epochs no longer missing — flag cleared"
+                + (f"; no reference image for {no_reference}" if no_reference else ""))
 
 
 def _n_deferred(p: Path) -> int:
