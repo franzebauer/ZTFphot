@@ -114,7 +114,7 @@ def lookup_target(
         # An HTML/XML page parsed as a table is an IRSA error (retried); a well-formed
         # empty table is returned as is (no coverage, or an IRSA-side problem)
         if meta is not None and not any(
-                str(c).strip().startswith(("<!", "<?")) for c in meta.columns):
+                str(c).strip().lower().startswith(("<!", "<?", "<html")) for c in meta.columns):
             break
         if _attempt < _max_attempts:
             logger.warning(f"IRSA lookup failed (attempt {_attempt}/{_max_attempts}"
